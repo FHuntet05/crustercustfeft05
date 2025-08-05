@@ -1,7 +1,7 @@
 import logging
 import os
-import base64
-from telegram import Update, InlineKeyboardMarkup
+from bson.objectid import ObjectId
+from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
@@ -69,12 +69,13 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             if not task: await query.edit_message_text("❌ Tarea no encontrada."); return
             download_path = os.path.join(DOWNLOAD_DIR, str(task_id))
             if not os.path.exists(download_path):
-                # Esto es solo para análisis, el worker hará la descarga final. Límite de 20MB aplica.
+                # Esto es solo para análisis, el worker hará la descarga final.
                 await query.edit_message_text("⏳ Analizando archivo (puede tardar)...", reply_markup=None)
                 try:
                     bot_file = await context.bot.get_file(task['file_id'])
-                    if bot_file.file_size > 20 * 1024 * 1024:
-                         await query.edit_message_text("❌ El análisis de pistas para archivos > 20MB no es posible sin un Userbot."); return
+                    # La comprobación de 20MB es para la API del bot, no para el userbot
+                    if bot_file.file_size > 20 * 1024 * 1024 and not context.user_data.get('userbot_active'):
+                         await query.edit_message_text("❌ El análisis de pistas para archivos > 20MB no es posible sin un Userbot activo."); return
                     await bot_file.download_to_drive(download_path)
                 except Exception as e: await query.edit_message_text(f"❌ No se pudo descargar para análisis: {e}"); return
             media_info = ffmpeg.get_media_info(download_path)
@@ -119,23 +120,20 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         task = db_instance.get_task(task_id)
         keyboard = build_processing_menu(task_id, task['file_type'], task.get('processing_config', {}), task.get('original_filename', ''))
         await query.edit_message_text(f"🛠️ Configuración actualizada.", reply_markup=keyboard, parse_mode=ParseMode.HTML)
-
+    
     elif action == "song":
-        command = parts[1]
-        encoded_payload = "_".join(parts[2:]) # Reconstruir en caso de que el payload base64 tenga '_'
+        command, result_id = parts[1], parts[2]
         
-        if command == "dl":
+        if command == "select":
             user = query.from_user
             greeting_prefix = get_greeting(user.id)
             await query.edit_message_text(f"🔎 {greeting_prefix}Analizando selección...")
             
-            try:
-                # Decodificar el payload de Base64
-                decoded_payload = base64.urlsafe_b64decode(encoded_payload).decode('utf-8')
-            except (base64.binascii.Error, UnicodeDecodeError):
-                await query.edit_message_text("❌ Error: El payload de la canción es inválido."); return
+            search_result = db_instance.search_results.find_one_and_delete({"_id": ObjectId(result_id)})
+            if not search_result:
+                await query.edit_message_text("❌ Error: Este resultado de búsqueda ha expirado."); return
 
-            search_term_or_url = f"ytsearch:{decoded_payload}" if not decoded_payload.startswith("http") else decoded_payload
+            search_term_or_url = search_result.get('url') or f"ytsearch:{search_result.get('search_term')}"
             
             info = downloader.get_url_info(search_term_or_url)
             if not info: await query.edit_message_text(f"❌ No pude obtener información para descargar."); return
@@ -146,7 +144,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             keyboard = build_download_quality_menu(str(task_id), info['formats'])
             text = f"✅ <b>{escape_html(info['title'])}</b>\n\nSeleccione la calidad a descargar:"
             await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-    
+
     elif action == "bulk":
         action_type = parts[1]
         task_ids_str = parts[2] if len(parts) > 2 else ''

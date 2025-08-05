@@ -20,24 +20,28 @@ class Database:
                 if not mongo_uri:
                     raise ValueError("La variable de entorno MONGO_URI no está definida.")
                 
-                # Aumentar el timeout de conexión y servidor para mayor resiliencia
-                cls._instance.client = pymongo.MongoClient(
-                    mongo_uri,
-                    serverSelectionTimeoutMS=5000,
-                    connectTimeoutMS=10000
-                )
+                cls._instance.client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000, connectTimeoutMS=10000)
                 cls._instance.client.admin.command('ping')
                 logger.info("Conexión con MongoDB Atlas establecida con éxito.")
                 
                 cls._instance.db = cls._instance.client.get_database("JefesMediaSuiteDB")
                 cls._instance.tasks = cls._instance.db.tasks
                 cls._instance.user_settings = cls._instance.db.user_settings
+                
+                # --- NUEVO: Colección para resultados de búsqueda y su índice TTL ---
+                cls._instance.search_results = cls._instance.db.search_results
+                # Crear un índice TTL que borre los documentos después de 1 hora (3600 segundos)
+                # Esto evita que la colección crezca indefinidamente.
+                if "created_at_ttl" not in cls._instance.search_results.index_information():
+                    cls._instance.search_results.create_index("created_at", expireAfterSeconds=3600, name="created_at_ttl")
+                    logger.info("Índice TTL para 'search_results' creado/verificado.")
 
             except (ConnectionFailure, ValueError) as e:
                 logger.critical(f"¡FALLO CRÍTICO AL INICIAR LA BASE DE DATOS! Error: {e}")
                 raise ConnectionError("No se pudo conectar a la base de datos.")
         return cls._instance
 
+    # ... (el resto de los métodos de la clase no cambian) ...
     # --- Métodos de Tareas ---
     def add_task(self, user_id, file_type, file_id=None, file_name=None, file_size=None, url=None, special_type=None, processing_config=None):
         task_doc = {
