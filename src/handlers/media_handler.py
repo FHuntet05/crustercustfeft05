@@ -3,7 +3,7 @@ import os
 from telegram import Update
 from telegram.ext import ContextTypes
 from src.db.mongo_manager import db_instance
-from src.helpers.keyboards import build_panel_keyboard # Importamos nuestro generador de teclados
+from src.helpers.keyboards import build_panel_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -66,11 +66,11 @@ async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_html(f"✅ ¡{greeting} mesa de trabajo está vacía!")
         return
         
-    # Construir el teclado de botones a partir de las tareas
     keyboard = build_panel_keyboard(pending_tasks)
     
-    response_text = f"📋 **{greeting} mesa de trabajo actual:**\n\n"
+    # --- TEXTO CORREGIDO A FORMATO HTML ---
+    response_text = f"📋 <b>{greeting} mesa de trabajo actual:</b>\n\n"
     response_text += "Seleccione una acción para cada tarea o use los botones globales."
 
-    # Enviar el mensaje con el teclado adjunto. Usamos Markdown por el formato de **.
-    await update.message.reply_markdown_v2(response_text, reply_markup=keyboard)
+    # --- MÉTODO DE ENVÍO CORREGIDO A reply_html ---
+    await update.message.reply_html(response_text, reply_markup=keyboard)
