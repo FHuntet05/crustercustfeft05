@@ -1,37 +1,29 @@
 # generate_session.py
 import asyncio
-from telethon.sync import TelegramClient
-from telethon.sessions import StringSession
+from pyrogram import Client
 
 async def main():
-    print("🚀 Generador de String Session de Telethon 🚀")
-    print("--------------------------------------------")
-    print("Ingresa tus credenciales de Telegram para generar la sesión.")
-    print("Estos datos solo se usan para la autenticación y no se guardan aquí.\n")
-
-    # Pide las credenciales de forma segura
+    print("--- Generador de Session String de Pyrogram ---")
+    print("Necesitará su API_ID y API_HASH de my.telegram.org")
+    
     try:
-        api_id = int(input("🔑 Ingresa tu API_ID: "))
-        api_hash = input("🔒 Ingresa tu API_HASH: ")
+        api_id = int(input("Por favor, introduzca su API_ID: "))
+        api_hash = input("Por favor, introduzca su API_HASH: ")
     except ValueError:
-        print("\n❌ Error: El API_ID debe ser un número entero.")
+        print("\nERROR: API_ID debe ser un número entero. Por favor, reinicie el script.")
         return
 
-    # Usamos una sesión en memoria para no crear archivos
-    async with TelegramClient(StringSession(), api_id, api_hash) as client:
-        # El cliente se conectará y te pedirá tu número, código y contraseña 2FA si la tienes.
-        # Esto sucede de forma interactiva en la terminal.
+    async with Client(':memory:', api_id=api_id, api_hash=api_hash) as app:
+        print("\nEl cliente de Telegram se iniciará ahora.")
+        print("Se le pedirá su número, código y contraseña 2FA si la tiene.")
         
-        session_string = client.session.save()
+        session_string = await app.export_session_string()
         
-        print("\n✅ ¡Sesión generada con éxito!")
-        print("--------------------------------------------")
-        print("Copia la siguiente línea completa. Esta es tu SESSION_STRING:")
-        print("\n" + session_string + "\n")
-        print("⚠️  Guarda esta string de forma segura. Quien la tenga puede acceder a tu cuenta.")
-        print("     Añádela a tus variables de entorno en tu servidor (Railway, etc.).")
+        with open("session_pyrogram.txt", "w") as f:
+            f.write(session_string)
+        print("\n\n--- ¡ÉXITO! ---")
+        print("Su Session String HA SIDO GUARDADA en el archivo 'session_pyrogram.txt'.")
+        print("Esto evita errores al copiar. Use el contenido de ese archivo.")
 
 if __name__ == "__main__":
-    # En Windows, puede que necesites esta línea si hay problemas con el event loop
-    # asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())
