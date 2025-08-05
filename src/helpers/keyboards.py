@@ -1,5 +1,6 @@
 import json
 import os
+import base64
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from src.core import ffmpeg
 from .utils import escape_html, format_bytes
@@ -61,7 +62,7 @@ def build_processing_menu(task_id: str, file_type: str, task_config: dict, filen
         keyboard.extend([
             [InlineKeyboardButton(f"🔊 Convertir ({audio_format.upper()}, {bitrate})", callback_data=f"config_audioconvert_{task_id}")],
             [InlineKeyboardButton("🎧 Efectos (EQ, Vel., etc.)", callback_data=f"config_audioeffects_{task_id}")],
-            [InlineKeyboardButton("✂️ Cortar", callback_data=f"config_audiotrim_{task_id}")],
+            [InlineKeyboardButton("✂️ Cortar", callback_data=f"config_trim_{task_id}")],
             [InlineKeyboardButton("🖼️ Editar Tags/Carátula", callback_data=f"config_audiotags_{task_id}")],
         ])
 
@@ -214,10 +215,22 @@ def build_song_results_keyboard(search_results: list) -> InlineKeyboardMarkup:
     """Construye un teclado con los resultados de la búsqueda de música."""
     keyboard = []
     for i, res in enumerate(search_results):
-        label = f"{i+1}. {escape_html(res['title'])} - {escape_html(res['artist'])}"
-        # El callback data contiene el término de búsqueda para Youtube o la URL directa
-        payload = res.get('url') or res.get('search_term')
-        keyboard.append([InlineKeyboardButton(label, callback_data=f"song_download_{payload}")])
+        duration = int(res.get('duration', 0))
+        duration_str = f"{duration // 60}:{str(duration % 60).zfill(2)}" if duration > 0 else ""
+        
+        # Limitar la longitud para evitar errores de payload de callback demasiado largo
+        title = escape_html(res['title'])
+        artist = escape_html(res['artist'])
+        label = f"• {duration_str} • {title} — {artist}"
+        if len(label) > 60:
+            label = label[:57] + "..."
+
+        # El payload es el término de búsqueda o la URL directa. Se codifica en Base64.
+        raw_payload = res.get('url') or res.get('search_term')
+        encoded_payload = base64.urlsafe_b64encode(raw_payload.encode('utf-8')).decode('utf-8')
+        
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"song_dl_{encoded_payload}")])
+        
     return InlineKeyboardMarkup(keyboard)
 
 # =================================================================

@@ -1,5 +1,6 @@
 import logging
 import os
+import base64
 from telegram import Update, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
@@ -120,15 +121,28 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(f"🛠️ Configuración actualizada.", reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
     elif action == "song":
-        command, payload = parts[1], "_".join(parts[2:])
-        if command == "download":
-            user = query.from_user; greeting_prefix = get_greeting(user.id)
+        command = parts[1]
+        encoded_payload = "_".join(parts[2:]) # Reconstruir en caso de que el payload base64 tenga '_'
+        
+        if command == "dl":
+            user = query.from_user
+            greeting_prefix = get_greeting(user.id)
             await query.edit_message_text(f"🔎 {greeting_prefix}Analizando selección...")
-            search_term_or_url = f"ytsearch:{payload}" if not payload.startswith("http") else payload
+            
+            try:
+                # Decodificar el payload de Base64
+                decoded_payload = base64.urlsafe_b64decode(encoded_payload).decode('utf-8')
+            except (base64.binascii.Error, UnicodeDecodeError):
+                await query.edit_message_text("❌ Error: El payload de la canción es inválido."); return
+
+            search_term_or_url = f"ytsearch:{decoded_payload}" if not decoded_payload.startswith("http") else decoded_payload
+            
             info = downloader.get_url_info(search_term_or_url)
             if not info: await query.edit_message_text(f"❌ No pude obtener información para descargar."); return
+            
             task_id = db_instance.add_task(user_id=user.id, file_type='video' if info['is_video'] else 'audio', url=info['url'], file_name=sanitize_filename(info['title']), processing_config={'url_info': info})
             if not task_id: await query.edit_message_text(f"❌ Error al crear la tarea en la DB."); return
+            
             keyboard = build_download_quality_menu(str(task_id), info['formats'])
             text = f"✅ <b>{escape_html(info['title'])}</b>\n\nSeleccione la calidad a descargar:"
             await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
@@ -141,7 +155,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             keyboard = build_bulk_actions_menu(task_ids_str)
             await query.edit_message_text(f"✨ <b>Modo Bulk</b>\n\nHa seleccionado {len(task_ids)} tareas. ¿Qué desea realizar?", reply_markup=keyboard, parse_mode=ParseMode.HTML)
         elif action_type == "action":
-            bulk_op, task_ids_str = parts[2], parts[3]
+            bulk_op = "_".join(parts[2:-1])
+            task_ids_str = parts[-1]
             task_ids = task_ids_str.split(',')
             if bulk_op == "convert720p":
                 count = 0

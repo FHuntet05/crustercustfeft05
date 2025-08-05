@@ -144,7 +144,7 @@ async def _handle_single_input(update: Update, context: ContextTypes.DEFAULT_TYP
             db_instance.update_task_config(task_id, db_key, user_input)
 
     context.user_data.pop('active_config', None)
-    await update.message.reply_html(feedback_message, parse_mode=ParseMode.HTML)
+    await update.message.reply_html(feedback_message)
     
     task = db_instance.get_task(task_id)
     if task:
