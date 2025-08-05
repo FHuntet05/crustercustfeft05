@@ -2,25 +2,20 @@ import logging
 import time
 import os
 import asyncio
-import json
 import zipfile
-import glob
 import shlex
 import subprocess
 import re
 from datetime import datetime
-from bson.objectid import ObjectId
+
 from telegram import Bot, InlineKeyboardMarkup
 from telegram.error import BadRequest, NetworkError
-from mutagen.mp3 import MP3
-from mutagen.flac import FLAC
-from mutagen.id3 import APIC
-from mutagen.easyid3 import EasyID3
-import mutagen.flac
 
 from src.db.mongo_manager import db_instance
 from src.helpers.utils import create_progress_bar, format_bytes, format_time, escape_html, sanitize_filename
 from src.core import ffmpeg, downloader
+from src.core.userbot_manager import userbot_instance
+import mutagen
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +24,11 @@ OUTPUT_DIR = os.path.join(os.getcwd(), "outputs")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Límite de la API de Bots de Telegram en bytes (20 MB)
 BOT_API_DOWNLOAD_LIMIT = 20 * 1024 * 1024
-
 progress_data = {}
 bot_instance = None
 
+# ... (Las funciones _edit_status_message, progress_callback, ffmpeg_progress_callback, _run_subprocess_with_progress, _apply_audio_tags, y _upload_file no cambian)
 async def _edit_status_message(text: str):
     if not (bot := progress_data.get('bot')) or not (msg := progress_data.get('message')): return
     try:
@@ -75,8 +69,8 @@ async def _apply_audio_tags(output_path, audio_tags, files_to_clean):
     await _edit_status_message("🖼️ Aplicando metadatos...")
     try:
         ext = os.path.splitext(output_path)[1].lower()
-        if ext == '.mp3': audio_file = MP3(output_path, ID3=EasyID3)
-        elif ext == '.flac': audio_file = FLAC(output_path)
+        if ext == '.mp3': audio_file = mutagen.mp3.MP3(output_path, ID3=mutagen.easyid3.EasyID3)
+        elif ext == '.flac': audio_file = mutagen.flac.FLAC(output_path)
         else: return
         if 'title' in audio_tags: audio_file['title'] = audio_tags['title']
         if 'artist' in audio_tags: audio_file['artist'] = audio_tags['artist']
@@ -85,15 +79,16 @@ async def _apply_audio_tags(output_path, audio_tags, files_to_clean):
         if 'cover_file_id' in audio_tags:
             cover_path = os.path.join(DOWNLOAD_DIR, audio_tags['cover_file_id'])
             files_to_clean.add(cover_path)
-            if not os.path.exists(cover_path): await (await bot_instance.get_file(audio_tags['cover_file_id'])).download_to_drive(cover_path)
+            if not os.path.exists(cover_path):
+                await _download_file_helper(audio_tags['cover_file_id'], None, cover_path)
             with open(cover_path, 'rb') as art:
                 cover_data = art.read()
                 if ext == '.mp3':
-                    audio_file_complex = MP3(output_path)
-                    audio_file_complex.tags.add(APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=cover_data))
+                    audio_file_complex = mutagen.mp3.MP3(output_path)
+                    audio_file_complex.tags.add(mutagen.id3.APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=cover_data))
                     audio_file_complex.save(v2_version=3)
                 elif ext == '.flac':
-                    audio_file_complex = FLAC(output_path)
+                    audio_file_complex = mutagen.flac.FLAC(output_path)
                     pic = mutagen.flac.Picture(); pic.type = 3; pic.mime = 'image/jpeg'; pic.data = cover_data
                     audio_file_complex.add_picture(pic); audio_file_complex.save()
     except Exception as e:
@@ -107,30 +102,40 @@ async def _upload_file(user_id, file_handle, filename, file_type, caption, reply
     elif file_type == 'audio': await bot_instance.send_audio(user_id, audio=file_handle, filename=filename, **common_args)
     else: await bot_instance.send_document(user_id, document=file_handle, filename=filename, **common_args)
 
+async def _download_file_helper(file_id: str, file_size: int | None, download_path: str):
+    """Función auxiliar para descargar un archivo, priorizando el Userbot."""
+    if os.path.exists(download_path):
+        return
+    
+    if userbot_instance.is_active():
+        await _edit_status_message("⬇️ Descargando (Userbot)...")
+        await userbot_instance.download_file(
+            file_id, download_path, lambda c, t: progress_callback(c, t, "⬇️ Descargando...")
+        )
+    elif file_size and file_size <= BOT_API_DOWNLOAD_LIMIT:
+        await _edit_status_message("⬇️ Descargando (Bot API)...")
+        file = await bot_instance.get_file(file_id)
+        await file.download_to_drive(download_path, callback=lambda c, t: progress_callback(c, t, "⬇️ Descargando..."))
+    else:
+        raise Exception("Archivo excede el límite de 20MB y el Userbot no está configurado/activo.")
+
 async def _handle_standard_task(task, files_to_clean):
     task_id = task['_id']; config = task.get('processing_config', {})
     download_path = os.path.join(DOWNLOAD_DIR, str(task_id)); files_to_clean.add(download_path)
     progress_data['start_time'] = time.time()
     
-    # --- BLOQUE DE DESCARGA CON VALIDACIÓN DE TAMAÑO ---
     if url := task.get('url'):
         if not downloader.download_from_url(url, download_path, config.get('download_format_id', 'best')): 
             raise Exception("La descarga desde la URL falló.")
-    elif task.get('file_id'):
-        if task.get('file_size', 0) > BOT_API_DOWNLOAD_LIMIT:
-            raise Exception("Archivo excede el límite de 20MB de la API de Bots.")
-        
-        if not os.path.exists(download_path):
-            await _edit_status_message("⬇️ Descargando de Telegram..."); 
-            await (await bot_instance.get_file(task['file_id'])).download_to_drive(
-                custom_path=download_path, 
-                callback=lambda c, t: progress_callback(c, t, "⬇️ Descargando...")
-            )
+    elif file_id := task.get('file_id'):
+        await _download_file_helper(file_id, task.get('file_size'), download_path)
             
     if audio_file_id := config.get('add_audio_file_id'):
-        path = os.path.join(DOWNLOAD_DIR, audio_file_id); files_to_clean.add(path); await (await bot_instance.get_file(audio_file_id)).download_to_drive(path); config['add_audio_file_path'] = path
+        path = os.path.join(DOWNLOAD_DIR, audio_file_id); files_to_clean.add(path)
+        await _download_file_helper(audio_file_id, None, path); config['add_audio_file_path'] = path
     if subs_file_id := config.get('add_subtitle_file_id'):
-        path = os.path.join(DOWNLOAD_DIR, subs_file_id); files_to_clean.add(path); await (await bot_instance.get_file(subs_file_id)).download_to_drive(path); config['add_subtitle_file_path'] = path
+        path = os.path.join(DOWNLOAD_DIR, subs_file_id); files_to_clean.add(path)
+        await _download_file_helper(subs_file_id, None, path); config['add_subtitle_file_path'] = path
     
     await _edit_status_message("⚙️ Preparando..."); progress_data['start_time'] = time.time()
     media_info = ffmpeg.get_media_info(download_path); duration = float(media_info.get('format', {}).get('duration', 0))
@@ -144,10 +149,12 @@ async def _handle_standard_task(task, files_to_clean):
     if 'subtitle_convert_to' in config: commands = [ffmpeg.build_subtitle_convert_command(download_path, output_path)]
     else: commands = ffmpeg.build_ffmpeg_command(task, download_path, output_path)
     for i, cmd in enumerate(commands):
-        if not cmd: continue # Saltar comandos vacíos (ej. split por tamaño no soportado)
+        if not cmd: continue
         await _edit_status_message(f"⚙️ Procesando (Paso {i+1}/{len(commands)})..."); await _run_subprocess_with_progress(cmd, duration)
     if file_type == 'audio' and 'audio_tags' in config: await _apply_audio_tags(output_path, config['audio_tags'], files_to_clean)
     return output_path
+
+# ... (_handle_special_task, process_task, y worker_thread_runner no cambian significativamente en su lógica principal, pero se benefician de la descarga helper)
 
 async def _handle_special_task(task, files_to_clean):
     special_type = task.get('special_type'); task_id = task['_id']; config = task.get('processing_config', {}); source_task_ids = config.get('source_task_ids', []); source_tasks = db_instance.get_multiple_tasks(source_task_ids)
@@ -155,26 +162,32 @@ async def _handle_special_task(task, files_to_clean):
         output_path = os.path.join(OUTPUT_DIR, f"Bulk_Archive_{task_id}.zip"); files_to_clean.add(output_path)
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for i, t_zip in enumerate(source_tasks):
-                await _edit_status_message(f"📦 Comprimiendo {i+1}/{len(source_tasks)}..."); file_path = os.path.join(DOWNLOAD_DIR, str(t_zip['_id']))
-                if t_zip.get('file_size', 0) > BOT_API_DOWNLOAD_LIMIT:
-                    logger.warning(f"Omitiendo archivo {t_zip['_id']} en ZIP por exceder límite de 20MB.")
+                await _edit_status_message(f"📦 Comprimiendo {i+1}/{len(source_tasks)}...");
+                file_path = os.path.join(DOWNLOAD_DIR, str(t_zip['_id']))
+                try:
+                    await _download_file_helper(t_zip['file_id'], t_zip.get('file_size'), file_path)
+                    files_to_clean.add(file_path)
+                    zipf.write(file_path, config.get('final_filename') or t_zip.get('original_filename'))
+                except Exception as e:
+                    logger.warning(f"Omitiendo archivo {t_zip['_id']} en ZIP. Causa: {e}")
                     continue
-                if not os.path.exists(file_path): await (await bot_instance.get_file(t_zip['file_id'])).download_to_drive(file_path)
-                files_to_clean.add(file_path); zipf.write(file_path, config.get('final_filename') or t_zip.get('original_filename'))
         return output_path
     elif special_type == "unify_videos":
         file_list_path = os.path.join(DOWNLOAD_DIR, f"filelist_{task_id}.txt"); files_to_clean.add(file_list_path)
         with open(file_list_path, 'w', encoding='utf-8') as f:
             for i, t_unify in enumerate(source_tasks):
-                await _edit_status_message(f"📥 Preparando video {i+1}/{len(source_tasks)}..."); file_path = os.path.join(DOWNLOAD_DIR, str(t_unify['_id']))
-                if t_unify.get('file_size', 0) > BOT_API_DOWNLOAD_LIMIT:
-                    logger.warning(f"Omitiendo video {t_unify['_id']} en unificación por exceder límite de 20MB.")
+                await _edit_status_message(f"📥 Preparando video {i+1}/{len(source_tasks)}...");
+                file_path = os.path.join(DOWNLOAD_DIR, str(t_unify['_id']))
+                try:
+                    await _download_file_helper(t_unify['file_id'], t_unify.get('file_size'), file_path)
+                    files_to_clean.add(file_path)
+                    f.write(f"file '{os.path.abspath(file_path)}'\n")
+                except Exception as e:
+                    logger.warning(f"Omitiendo video {t_unify['_id']} en unificación. Causa: {e}")
                     continue
-                if not os.path.exists(file_path): await (await bot_instance.get_file(t_unify['file_id'])).download_to_drive(file_path)
-                files_to_clean.add(file_path); f.write(f"file '{os.path.abspath(file_path)}'\n")
         output_path = os.path.join(OUTPUT_DIR, f"Unified_Video_{task_id}.mp4"); files_to_clean.add(output_path)
         command = ffmpeg.build_unify_command(file_list_path, output_path); await _edit_status_message("🔄 Unificando videos...")
-        result = subprocess.run(shlex.split(command), capture_output=True, text=True)
+        result = subprocess.run(shlex.split(command), capture_output=True, text=True, encoding='utf-8', errors='ignore')
         if result.returncode != 0: logger.error(f"Fallo al unificar: {result.stderr}"); raise Exception("Fallo al unificar videos.")
         return output_path
 

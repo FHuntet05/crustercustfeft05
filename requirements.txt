@@ -1,6 +1,9 @@
 # Telegram Bot Framework
 python-telegram-bot[ext]
 
+# Cliente de Telegram (Userbot)
+Pyrogram[asyncio]
+
 # Interacción con MongoDB
 pymongo
 
