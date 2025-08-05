@@ -11,20 +11,17 @@ from . import processing_handler # Importar para delegar
 
 logger = logging.getLogger(__name__)
 
-# Límite de la API de Bots de Telegram en bytes (20 MB)
-BOT_API_DOWNLOAD_LIMIT = 20 * 1024 * 1024
-
 async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Manejador UNIFICADO para todos los archivos (video, audio, foto, documento).
-    Determina si el archivo es para una configuración activa o si es una nueva tarea.
+    Manejador UNIFICADO para todos los archivos. Acepta cualquier archivo
+    y lo añade al panel de trabajo para que el worker lo procese.
     """
     user = update.effective_user
     if not user:
         logger.warning("No se pudo obtener effective_user de la actualización.")
         return
 
-    # Comprobar si hay una configuración activa que espera un archivo
+    # Comprobar si hay una configuración activa que espera un archivo (para carátulas, etc.)
     if config := context.user_data.get('active_config'):
         if config.get('menu_type') == 'audiotags' and config.get('stage') == 'cover':
             await processing_handler.handle_cover_art_input(update, context, config)
@@ -33,7 +30,7 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await processing_handler.handle_track_input(update, context, config)
             return
 
-    # Si no hay configuración activa, tratarlo como una nueva tarea para el panel
+    # Flujo normal: tratarlo como una nueva tarea para el panel
     greeting_prefix = get_greeting(user.id)
     message = update.effective_message
     
@@ -55,14 +52,6 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_id = file_obj.file_id
     file_name = sanitize_filename(getattr(file_obj, 'file_name', "Archivo Sin Nombre"))
     file_size = file_obj.file_size
-
-    # --- VALIDACIÓN DE TAMAÑO ---
-    if file_size and file_size > BOT_API_DOWNLOAD_LIMIT:
-        await message.reply_html(
-            f"❌ {greeting_prefix}el archivo <code>{escape_html(file_name)}</code> es demasiado grande ({file_size / 1024**2:.2f} MB).\n\n"
-            "Actualmente, no puedo procesar archivos de más de 20 MB. Esta funcionalidad está pendiente de implementación."
-        )
-        return
 
     task_id = db_instance.add_task(
         user_id=user.id,
@@ -139,12 +128,10 @@ async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     Delega la lógica a processing_handler.
     """
     if 'active_config' not in context.user_data:
-        # Podríamos añadir una respuesta por defecto si el usuario envía texto sin contexto
         return
         
     config = context.user_data['active_config']
     user_input = update.message.text.strip()
     is_skip = user_input.lower() == "/skip"
     
-    # Delegar la lógica real a processing_handler
     await processing_handler.handle_text_input(update, context, config, None if is_skip else user_input)

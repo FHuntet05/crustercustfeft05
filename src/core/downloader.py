@@ -8,13 +8,14 @@ logger = logging.getLogger(__name__)
 
 # --- Configuración de APIs ---
 # Spotify
-SPOTIPY_CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
-SPOTIPY_CLIENT_SECRET = os.getenv("SPOTIPY_CLIENT_SECRET")
+# CORRECCIÓN: Nombres de variables cambiados a SPOTIFY_... para coincidir con el .env
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 
 spotify_api = None
-if SPOTIPY_CLIENT_ID and SPOTIPY_CLIENT_SECRET:
+if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
     try:
-        auth_manager = SpotifyClientCredentials(client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET)
+        auth_manager = SpotifyClientCredentials(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET)
         spotify_api = spotipy.Spotify(auth_manager=auth_manager)
         logger.info("Cliente de Spotify API inicializado con éxito.")
     except Exception as e:
@@ -27,8 +28,6 @@ def get_url_info(url: str) -> dict or None:
     Usa yt-dlp para obtener información detallada de una URL sin descargarla.
     Devuelve un diccionario con los datos clave o None si falla.
     """
-    # Excluir explícitamente el extractor de Terabox para evitar que yt-dlp intente y falle.
-    # Cuando implementemos el extractor dedicado, esta lógica cambiará.
     if "terabox.com" in url or "teraboxapp.com" in url:
         logger.warning("URL de Terabox detectada. Se requiere un extractor específico no implementado.")
         return None
@@ -126,7 +125,6 @@ def search_music(query: str, limit: int = 5) -> list:
         except Exception as e:
             logger.warning(f"Búsqueda en Spotify falló, haciendo fallback a YouTube: {e}")
 
-    # Fallback a YouTube si Spotify falla o no está configurado o no da resultados
     ydl_opts = {
         'quiet': True,
         'default_search': f'ytsearch{limit}',
@@ -137,7 +135,6 @@ def search_music(query: str, limit: int = 5) -> list:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             search_result = ydl.extract_info(query, download=False)
             for entry in search_result.get('entries', []):
-                # Intentar parsear "Artista - Título" del título de YouTube
                 title = entry.get('title', 'Título Desconocido')
                 artist = entry.get('uploader', 'Artista Desconocido')
                 if ' - ' in title:
