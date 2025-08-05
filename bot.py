@@ -1,33 +1,27 @@
 import logging
 import os
 from dotenv import load_dotenv
-from telegram.ext import Application, CommandHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
-# --- Configuración Inicial ---
-# Cargar las variables de entorno desde el archivo .env
+# Importar los nuevos manejadores
+from src.handlers.media_handler import any_file_handler, panel_command
+
+# --- Configuración Inicial (se mantiene igual) ---
 load_dotenv()
-
-# Configurar el logging para ver errores y actividad en la consola
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
-# Leer las credenciales del entorno
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))
 
-# --- Definición de Comandos ---
+# --- Definición de Comandos (la función start se mantiene igual) ---
 async def start(update, context):
     """Manejador para el comando /start."""
     user = update.effective_user
     user_id = user.id
-    
-    greeting = "Hola."
-    if user_id == ADMIN_USER_ID:
-        greeting = f"A sus órdenes, Jefe. Bienvenido de vuelta."
-        
+    greeting = "A sus órdenes, Jefe. Bienvenido de vuelta." if user_id == ADMIN_USER_ID else "Hola."
     await update.message.reply_html(
         f"¡{greeting}!\n\n"
         f"Soy su Asistente de Medios personal. "
@@ -36,11 +30,10 @@ async def start(update, context):
     )
 
 async def error_handler(update, context):
-    """Manejador de errores para loggear excepciones."""
+    """Manejador de errores."""
     logger.error(f"Error: {context.error} causado por una actualización: {update}")
 
-
-# --- Función Principal ---
+# --- Función Principal (actualizada) ---
 def main():
     """Inicia el bot y lo mantiene corriendo."""
     logger.info("Iniciando el bot...")
@@ -49,16 +42,20 @@ def main():
         logger.critical("¡ERROR CRÍTICO! No se encontró el TELEGRAM_TOKEN en el entorno.")
         return
 
-    # Crear la aplicación del bot
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Registrar los manejadores de comandos
+    # --- Registrar todos los manejadores ---
+    # Comandos
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("panel", panel_command))
 
-    # Registrar el manejador de errores
+    # Manejador de archivos
+    # filters.ALL captura videos, audios, documentos, fotos, etc.
+    application.add_handler(MessageHandler(filters.VIDEO | filters.AUDIO | filters.DOCUMENT, any_file_handler))
+
+    # Manejador de errores
     application.add_error_handler(error_handler)
 
-    # Iniciar el bot
     logger.info("El bot está ahora en línea y escuchando...")
     application.run_polling()
 
