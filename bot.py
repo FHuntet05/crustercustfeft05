@@ -9,6 +9,7 @@ from telegram.ext import (
     filters,
     CallbackQueryHandler,
     PicklePersistence,
+    Defaults  # <-- IMPORTACIÓN AÑADIDA
 )
 from telegram.constants import ParseMode, UpdateType
 
@@ -54,42 +55,35 @@ def main():
 
     persistence = PicklePersistence(filepath="bot_persistence")
 
+    # --- CORRECCIÓN APLICADA AQUÍ ---
+    # 1. Crear un objeto Defaults con el modo de parseo por defecto
+    defaults = Defaults(parse_mode=ParseMode.HTML)
+    
+    # 2. Usar el método .defaults() en el constructor
     application = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
         .persistence(persistence)
-        .parse_mode(ParseMode.HTML)
+        .defaults(defaults) # <-- MÉTODO CORREGIDO
         .build()
     )
 
     # --- Registro de Manejadores (Handlers) ---
-    # El orden es importante. Los manejadores más específicos deben ir primero.
-    
-    # 1. Comandos
     application.add_handler(CommandHandler("start", command_handler.start_command))
     application.add_handler(CommandHandler("panel", command_handler.panel_command))
     application.add_handler(CommandHandler("settings", command_handler.settings_command))
     application.add_handler(CommandHandler("findmusic", command_handler.findmusic_command))
     
-    # 2. Manejador de Botones Inline (Callbacks)
     application.add_handler(CallbackQueryHandler(button_handler.button_callback_handler))
 
-    # 3. Manejadores de Mensajes para Conversaciones Activas (más específicos)
-    # Estos deben ir antes de los manejadores generales de media para capturar los inputs
-    # cuando el bot está esperando una respuesta específica.
     application.add_handler(MessageHandler(filters.PHOTO & (~filters.UpdateType.EDITED_MESSAGE), processing_handler.photo_input_handler))
-    application.add_handler(MessageHandler(filters.AUDIO & (~filters.UpdateType.EDITED_MESSAGE), processing_handler.document_input_handler))
-    application.add_handler(MessageHandler(filters.Document.ALL & (~filters.UpdateType.EDITED_MESSAGE), processing_handler.document_input_handler))
+    application.add_handler(MessageHandler((filters.AUDIO | filters.Document.ALL) & (~filters.UpdateType.EDITED_MESSAGE), processing_handler.document_input_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (~filters.UpdateType.EDITED_MESSAGE), processing_handler.text_input_handler))
 
-    # 4. Manejadores Generales de Recepción de Media (menos específicos)
-    # Se activan solo si ningún manejador de conversación capturó el mensaje.
     application.add_handler(MessageHandler(filters.VIDEO & (~filters.UpdateType.EDITED_MESSAGE), media_handler.any_file_handler))
-    # Separamos audio/document de video para asegurar que el handler de conversación de audio/doc se active primero
     application.add_handler(MessageHandler((filters.AUDIO | filters.Document.ALL) & (~filters.UpdateType.EDITED_MESSAGE), media_handler.any_file_handler))
-    application.add_handler(MessageHandler(filters.Entity("url") | filters.Entity("text_link") & (~filters.UpdateType.EDITED_MESSAGE), media_handler.url_handler))
+    application.add_handler(MessageHandler((filters.Entity("url") | filters.Entity("text_link")) & (~filters.UpdateType.EDITED_MESSAGE), media_handler.url_handler))
     
-    # 5. Manejador de Errores Global (debe ir al final)
     application.add_error_handler(command_handler.error_handler)
 
     # --- Inicio del Worker en un Hilo Separado ---
