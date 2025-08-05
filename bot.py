@@ -2,7 +2,7 @@ import logging
 import os
 import threading
 from dotenv import load_dotenv
-from telegram import Update  # <-- IMPORTACIÓN AÑADIDA Y CORREGIDA
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -55,7 +55,6 @@ def main():
         return
 
     persistence = PicklePersistence(filepath="bot_persistence")
-
     defaults = Defaults(parse_mode=ParseMode.HTML)
     
     application = (
@@ -87,7 +86,6 @@ def main():
     # --- Inicio del Worker en un Hilo Separado ---
     worker_thread = threading.Thread(
         target=worker.worker_thread_runner,
-        args=(application,),
         daemon=True
     )
     worker_thread.start()
@@ -95,7 +93,7 @@ def main():
 
     # --- Inicio del Bot ---
     logger.info("El bot está ahora en línea y escuchando...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES) # <-- ESTA LÍNEA AHORA FUNCIONARÁ
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
