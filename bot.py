@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 # Importar los nuevos manejadores
 from src.handlers.media_handler import any_file_handler, panel_command
 
-# --- Configuración Inicial (se mantiene igual) ---
+# --- Configuración Inicial ---
 load_dotenv()
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))
 
-# --- Definición de Comandos (la función start se mantiene igual) ---
+# --- Definición de Comandos ---
 async def start(update, context):
     """Manejador para el comando /start."""
     user = update.effective_user
@@ -33,7 +33,7 @@ async def error_handler(update, context):
     """Manejador de errores."""
     logger.error(f"Error: {context.error} causado por una actualización: {update}")
 
-# --- Función Principal (actualizada) ---
+# --- Función Principal ---
 def main():
     """Inicia el bot y lo mantiene corriendo."""
     logger.info("Iniciando el bot...")
@@ -45,15 +45,12 @@ def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     # --- Registrar todos los manejadores ---
-    # Comandos
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("panel", panel_command))
 
-    # Manejador de archivos
-    # filters.ALL captura videos, audios, documentos, fotos, etc.
-    application.add_handler(MessageHandler(filters.VIDEO | filters.AUDIO | filters.DOCUMENT, any_file_handler))
+    # --- LÍNEA CORREGIDA ---
+    application.add_handler(MessageHandler(filters.VIDEO | filters.AUDIO | filters.Document.ALL, any_file_handler))
 
-    # Manejador de errores
     application.add_error_handler(error_handler)
 
     logger.info("El bot está ahora en línea y escuchando...")
