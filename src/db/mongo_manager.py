@@ -3,6 +3,10 @@ import pymongo
 from pymongo.errors import ConnectionFailure
 import logging
 from datetime import datetime
+from dotenv import load_dotenv
+
+# --- Cargar las variables de entorno PRIMERO ---
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -11,12 +15,12 @@ class Database:
     
     def __new__(cls):
         if cls._instance is None:
-            # (El código __new__ se mantiene igual, no lo pego para abreviar)
             cls._instance = super(Database, cls).__new__(cls)
             try:
+                # La URI se lee después de load_dotenv()
                 mongo_uri = os.getenv("MONGO_URI")
                 if not mongo_uri:
-                    raise ValueError("La variable de entorno MONGO_URI no está definida.")
+                    raise ValueError("La variable de entorno MONGO_URI no está definida o el archivo .env no se encuentra.")
                 
                 cls._instance.client = pymongo.MongoClient(mongo_uri)
                 cls._instance.client.admin.command('ping')
@@ -35,6 +39,7 @@ class Database:
 
         return cls._instance
 
+    # ... Las funciones add_task y get_pending_tasks se mantienen exactamente iguales ...
     def add_task(self, user_id, file_id, file_name, file_size, file_type):
         """Añade una nueva tarea a la mesa de trabajo."""
         task_doc = {
@@ -43,7 +48,7 @@ class Database:
             "file_name": file_name,
             "file_size": file_size,
             "file_type": file_type,
-            "status": "pending_review", # Estado inicial
+            "status": "pending_review",
             "created_at": datetime.utcnow()
         }
         try:
@@ -57,7 +62,6 @@ class Database:
     def get_pending_tasks(self, user_id):
         """Obtiene las tareas pendientes de un usuario."""
         try:
-            # Busca todas las tareas del usuario con estado 'pending_review' y las ordena por fecha
             pending_tasks = self.tasks.find({
                 "user_id": user_id,
                 "status": "pending_review"
@@ -67,5 +71,9 @@ class Database:
             logger.error(f"No se pudieron obtener las tareas pendientes de la DB: {e}")
             return []
 
-# Crear una instancia global para ser importada en otros módulos
+
 db_instance = Database()
+
+# Asegurarse de que el bot se detenga si la DB no se conecta
+if not db_instance or not db_instance.client:
+    raise ConnectionError("No se pudo conectar a la base de datos. El bot no puede continuar.")
