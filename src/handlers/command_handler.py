@@ -11,8 +11,6 @@ from src.core import downloader
 
 logger = logging.getLogger(__name__)
 
-# ... (start_command, panel_command, settings_command no cambian) ...
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manejador para el comando /start. Saluda al usuario y crea su perfil si no existe."""
     user = update.effective_user
@@ -86,7 +84,6 @@ async def findmusic_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_message.edit_text(f"❌ {greeting_prefix}No encontré resultados para su búsqueda.")
         return
 
-    # --- NUEVO: Guardar resultados en la DB y construir teclado con IDs ---
     docs_to_insert = []
     for res in search_results:
         res['created_at'] = datetime.utcnow()
@@ -94,7 +91,6 @@ async def findmusic_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     result_ids = db_instance.search_results.insert_many(docs_to_insert).inserted_ids
     
-    # Añadir los IDs de la DB a los resultados para construir el teclado
     for i, res_id in enumerate(result_ids):
         search_results[i]['_id'] = str(res_id)
 

@@ -69,7 +69,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             if not task: await query.edit_message_text("❌ Tarea no encontrada."); return
             download_path = os.path.join(DOWNLOAD_DIR, str(task_id))
             if not os.path.exists(download_path):
-                # Esto es solo para análisis, el worker hará la descarga final.
                 await query.edit_message_text("⏳ Analizando archivo (puede tardar)...", reply_markup=None)
                 try:
                     bot_file = await context.bot.get_file(task['file_id'])
