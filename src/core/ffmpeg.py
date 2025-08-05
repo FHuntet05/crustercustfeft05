@@ -56,7 +56,7 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str) -> list:
         return [build_split_command(config, input_path, output_path)]
 
     # --- Flujo de Transcodificación Normal ---
-    command_parts = ["nice -n 19", "ionice -c 3", "ffmpeg -y"]
+    command_parts = ["ffmpeg", "-y"]
     
     # 1. Opciones de Input
     if 'trim_times' in config:
@@ -165,9 +165,13 @@ def build_gif_command(config, input_path, output_path):
 def build_split_command(config, input_path, output_path):
     criteria = config['split_criteria']
     base_name, ext = os.path.splitext(output_path)
-    if criteria.endswith('s'):
+    if 's' in criteria.lower():
         return (f"ffmpeg -y -i {shlex.quote(input_path)} -c copy -map 0 "
-                f"-segment_time {criteria[:-1]} -f segment -reset_timestamps 1 {shlex.quote(base_name)}_part%03d{ext}")
+                f"-segment_time {criteria.lower().replace('s', '')} -f segment -reset_timestamps 1 {shlex.quote(base_name)}_part%03d{ext}")
+    elif 'mb' in criteria.lower():
+        # La división por tamaño es más compleja y requiere re-codificación, no se implementa como comando simple por ahora.
+        logger.warning("División por tamaño no soportada directamente, se requiere un script más complejo.")
+        return "" # Devuelve un comando vacío para indicar que no se puede procesar
     return ""
 
 def build_unify_command(file_list_path: str, output_path: str) -> str:

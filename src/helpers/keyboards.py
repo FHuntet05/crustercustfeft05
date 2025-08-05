@@ -128,11 +128,11 @@ def build_tracks_menu(task_id: str, media_info: dict) -> InlineKeyboardMarkup:
 
     if audio_streams:
         keyboard.insert(0, [InlineKeyboardButton("--- Pistas de Audio ---", callback_data="noop")])
-        for stream in audio_streams:
+        for i, stream in enumerate(audio_streams):
             idx = stream.get('index')
             lang = stream.get('tags', {}).get('language', 'unk')
             codec = stream.get('codec_name', '---')
-            title = stream.get('tags', {}).get('title', f"Pista #{idx}")
+            title = stream.get('tags', {}).get('title', f"Pista de Audio {i+1}")
             keyboard.insert(1, [
                 InlineKeyboardButton(f"🎵 {escape_html(title)} ({lang}, {codec})", callback_data="noop"),
                 InlineKeyboardButton("🗑️ Eliminar", callback_data=f"set_trackop_{task_id}_remove_a_{idx}"),
@@ -141,11 +141,11 @@ def build_tracks_menu(task_id: str, media_info: dict) -> InlineKeyboardMarkup:
     
     if subtitle_streams:
         keyboard.append([InlineKeyboardButton("--- Pistas de Subtítulos ---", callback_data="noop")])
-        for stream in subtitle_streams:
+        for i, stream in enumerate(subtitle_streams):
             idx = stream.get('index')
             lang = stream.get('tags', {}).get('language', 'unk')
             codec = stream.get('codec_name', '---')
-            title = stream.get('tags', {}).get('title', f"Pista #{idx}")
+            title = stream.get('tags', {}).get('title', f"Subtítulo {i+1}")
             keyboard.append([
                 InlineKeyboardButton(f"📜 {escape_html(title)} ({lang}, {codec})", callback_data="noop"),
                 InlineKeyboardButton("🗑️ Eliminar", callback_data=f"set_trackop_{task_id}_remove_s_{idx}"),

@@ -58,7 +58,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             
     elif action == "config":
         action_type, task_id = parts[1], parts[2]
-        if action_type in ["rename", "trim", "split", "gif", "screenshot", "caption", "addtrack", "sample", "extract"]:
+        if action_type in ["rename", "trim", "split", "gif", "screenshot", "caption", "addtrack", "sample", "extract", "audiotags", "bulkrename"]:
             await processing_handler.show_config_menu(update, context, task_id, action_type, payload=parts[3] if len(parts) > 3 else None)
         elif action_type == "quality":
             keyboard = build_quality_menu(task_id)
@@ -68,10 +68,14 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             if not task: await query.edit_message_text("❌ Tarea no encontrada."); return
             download_path = os.path.join(DOWNLOAD_DIR, str(task_id))
             if not os.path.exists(download_path):
-                await query.edit_message_text("⬇️ Analizando archivo, un momento...", reply_markup=None)
+                # Esto es solo para análisis, el worker hará la descarga final. Límite de 20MB aplica.
+                await query.edit_message_text("⏳ Analizando archivo (puede tardar)...", reply_markup=None)
                 try:
-                    await (await context.bot.get_file(task['file_id'])).download_to_drive(download_path)
-                except Exception as e: await query.edit_message_text(f"❌ No se pudo descargar: {e}"); return
+                    bot_file = await context.bot.get_file(task['file_id'])
+                    if bot_file.file_size > 20 * 1024 * 1024:
+                         await query.edit_message_text("❌ El análisis de pistas para archivos > 20MB no es posible sin un Userbot."); return
+                    await bot_file.download_to_drive(download_path)
+                except Exception as e: await query.edit_message_text(f"❌ No se pudo descargar para análisis: {e}"); return
             media_info = ffmpeg.get_media_info(download_path)
             keyboard = build_tracks_menu(task_id, media_info)
             await query.edit_message_text("🎵/📜 Gestor de Pistas:", reply_markup=keyboard)
@@ -86,6 +90,14 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif action == "set":
         config_type, task_id = parts[1], parts[2]
         value = parts[3] if len(parts) > 3 else None
+        
+        if config_type == "dlformat":
+            format_id = parts[3]
+            db_instance.update_task_config(task_id, "download_format_id", format_id)
+            db_instance.update_task(task_id, "status", "queued")
+            await query.edit_message_text(f"✅ ¡Entendido! He enviado la descarga de <code>{format_id}</code> a la cola.", parse_mode=ParseMode.HTML)
+            return
+
         task = db_instance.get_task(task_id)
         if not task: await query.edit_message_text("❌ Error: La tarea ya no existe.", reply_markup=None); return
         if config_type == "quality": db_instance.update_task_config(task_id, "quality", value)
@@ -121,12 +133,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             text = f"✅ <b>{escape_html(info['title'])}</b>\n\nSeleccione la calidad a descargar:"
             await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     
-    elif action == "set" and parts[1] == "dlformat":
-        _, _, task_id, format_id = parts
-        db_instance.update_task_config(task_id, "download_format_id", format_id)
-        db_instance.update_task(task_id, "status", "queued")
-        await query.edit_message_text(f"✅ ¡Entendido! He enviado la descarga a la cola.")
-
     elif action == "bulk":
         action_type = parts[1]
         task_ids_str = parts[2] if len(parts) > 2 else ''

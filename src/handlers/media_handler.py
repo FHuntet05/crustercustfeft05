@@ -4,21 +4,33 @@ from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
 from src.db.mongo_manager import db_instance
-from src.helpers.utils import get_greeting, escape_html, sanitize_filename
-from src.helpers.keyboards import build_download_quality_menu
+from src.helpers.utils import get_greeting, escape_html, sanitize_filename, parse_reply_markup
+from src.helpers.keyboards import build_download_quality_menu, build_processing_menu
 from src.core import downloader
+from . import processing_handler # Importar para delegar
 
 logger = logging.getLogger(__name__)
 
 async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Manejador que captura cualquier tipo de archivo enviado (video, audio, documento)
-    y lo añade a la mesa de trabajo del usuario en la base de datos.
+    Manejador UNIFICADO para todos los archivos (video, audio, foto, documento).
+    Determina si el archivo es para una configuración activa o si es una nueva tarea.
     """
-    if not update.effective_user:
+    user = update.effective_user
+    if not user:
         logger.warning("No se pudo obtener effective_user de la actualización.")
         return
-    user = update.effective_user
+
+    # Comprobar si hay una configuración activa que espera un archivo
+    if config := context.user_data.get('active_config'):
+        if config.get('menu_type') == 'audiotags' and config.get('stage') == 'cover':
+            await processing_handler.handle_cover_art_input(update, context, config)
+            return
+        if config.get('menu_type') == 'addtrack':
+            await processing_handler.handle_track_input(update, context, config)
+            return
+
+    # Si no hay configuración activa, tratarlo como una nueva tarea para el panel
     greeting_prefix = get_greeting(user.id)
     message = update.effective_message
     
@@ -28,32 +40,36 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_obj, file_type = message.video, 'video'
     elif message.audio:
         file_obj, file_type = message.audio, 'audio'
+    elif message.photo:
+        # Se trata como un documento para evitar crear un tipo 'photo' sin acciones
+        file_obj, file_type = message.photo[-1], 'document' 
     elif message.document:
         file_obj, file_type = message.document, 'document'
-    else:
+    
+    if not file_obj:
         logger.warning("any_file_handler recibió un mensaje sin archivo adjunto válido.")
         return
 
-    if file_obj:
-        file_id = file_obj.file_id
-        file_name = sanitize_filename(file_obj.file_name) if file_obj.file_name else "Archivo Sin Nombre"
-        file_size = file_obj.file_size
-    
-        task_id = db_instance.add_task(
-            user_id=user.id,
-            file_type=file_type,
-            file_id=file_id,
-            file_name=file_name,
-            file_size=file_size
+    file_id = file_obj.file_id
+    file_name = sanitize_filename(getattr(file_obj, 'file_name', "Archivo Sin Nombre"))
+    file_size = file_obj.file_size
+
+    task_id = db_instance.add_task(
+        user_id=user.id,
+        file_type=file_type,
+        file_id=file_id,
+        file_name=file_name,
+        file_size=file_size
+    )
+
+    if task_id:
+        await message.reply_html(
+            f"✅ {greeting_prefix}He recibido <code>{escape_html(file_name)}</code> y lo he añadido a su mesa de trabajo.\n\n"
+            "Use /panel para ver y procesar sus tareas."
         )
-    
-        if task_id:
-            await message.reply_html(
-                f"✅ {greeting_prefix}He recibido <code>{escape_html(file_name)}</code> y lo he añadido a su mesa de trabajo.\n\n"
-                "Use /panel para ver y procesar sus tareas."
-            )
-        else:
-            await message.reply_html(f"❌ {greeting_prefix}Hubo un error al registrar el archivo en la base de datos.")
+    else:
+        await message.reply_html(f"❌ {greeting_prefix}Hubo un error al registrar el archivo en la base de datos.")
+
 
 async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -106,3 +122,19 @@ async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True
     )
+
+async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Manejador genérico de texto que procesa la entrada del usuario según el menú de configuración activo.
+    Delega la lógica a processing_handler.
+    """
+    if 'active_config' not in context.user_data:
+        # Podríamos añadir una respuesta por defecto si el usuario envía texto sin contexto
+        return
+        
+    config = context.user_data['active_config']
+    user_input = update.message.text.strip()
+    is_skip = user_input.lower() == "/skip"
+    
+    # Delegar la lógica real a processing_handler
+    await processing_handler.handle_text_input(update, context, config, None if is_skip else user_input)
