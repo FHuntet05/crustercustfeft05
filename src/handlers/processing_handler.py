@@ -9,14 +9,9 @@ from src.helpers.utils import get_greeting, escape_html, parse_reply_markup
 
 logger = logging.getLogger(__name__)
 
-# =================================================================
-# 1. MOSTRAR MENÚS DE CONFIGURACIÓN
-# =================================================================
-
 async def show_config_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, task_id: str, menu_type: str, payload: str = None):
     """
     Función genérica para mostrar un menú de configuración y pedir entrada al usuario.
-    Guarda el estado de la configuración en context.user_data.
     """
     query = update.callback_query
     greeting_prefix = get_greeting(query.from_user.id)
@@ -31,27 +26,25 @@ async def show_config_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, t
         original_filename = f"{len(task_id.split(','))} tareas"
 
     text = ""
+    context.user_data['active_config'] = {"task_id": task_id, "menu_type": menu_type, "payload": payload}
     
     if menu_type == "audiotags":
-        context.user_data['active_config'] = {"task_id": task_id, "menu_type": "audiotags", "stage": "title"}
+        context.user_data['active_config']["stage"] = "title"
         text = f"🖼️ <b>Editar Tags</b>\n\n{greeting_prefix}envíeme el nuevo <b>título</b> de la canción.\nO envíe /skip para omitir."
-    
     elif menu_type == "caption":
-        context.user_data['active_config'] = {"task_id": task_id, "menu_type": "caption", "stage": "text"}
+        context.user_data['active_config']["stage"] = "text"
         text = f"📄 <b>Editar Caption y Botones</b>\n\n{greeting_prefix}primero, envíeme el nuevo texto para el <b>caption</b>.\nEnvíe /skip para no cambiar el caption."
-    
     else:
-        context.user_data['active_config'] = {"task_id": task_id, "menu_type": menu_type, "payload": payload}
         menu_texts = {
-            "rename": f"✏️ <b>Renombrar Archivo</b>\n\n{greeting_prefix}envíeme el nuevo nombre para <code>{escape_html(original_filename)}</code>.\n<i>No incluya la extensión del archivo.</i>",
-            "trim": f"✂️ <b>Cortar Video/Audio</b>\n\n{greeting_prefix}envíeme el tiempo de inicio y fin.\nFormatos: <code>HH:MM:SS-HH:MM:SS</code> o <code>MM:SS-MM:SS</code>.",
-            "split": f"🧩 <b>Dividir Video</b>\n\n{greeting_prefix}envíeme el criterio de división por tiempo (ej. <code>300s</code>). La división por tamaño no está soportada.",
-            "gif": f"🎞️ <b>Crear GIF</b>\n\n{greeting_prefix}envíeme la duración en segundos y los FPS.\nFormato: <code>[duración] [fps]</code> (ej: <code>5 15</code> para 5s a 15fps).",
-            "screenshot": f"📸 <b>Capturas de Pantalla</b>\n\n{greeting_prefix}envíeme los timestamps de las capturas, separados por comas.\n(ej: <code>00:10, 01:25, 50%</code>).",
-            "sample": f"🎞️ <b>Crear Muestra de Video</b>\n\n{greeting_prefix}envíeme la duración de la muestra en segundos (ej: <code>30</code>).",
-            "extract": f"📦 <b>Extraer Archivo</b>\n\n{greeting_prefix}envíeme la contraseña para el archivo. Envíe /skip si no tiene contraseña.",
-            "addtrack": f"➕ <b>Añadir Pista</b>\n\n{greeting_prefix}envíeme ahora el archivo de <b>{payload}</b> que desea añadir al video.",
-            "bulkrename": f"✏️ <b>Renombrar en Lote</b>\n\n{greeting_prefix}envíeme el patrón de nombre. Use <code>{{num}}</code> para el número de secuencia (ej: <code>Serie S01E{{num}}</code>)."
+            "rename": f"✏️ <b>Renombrar Archivo</b>\n\n{greeting_prefix}envíeme el nuevo nombre para <code>{escape_html(original_filename)}</code>.\n<i>No incluya la extensión.</i>",
+            "trim": f"✂️ <b>Cortar</b>\n\n{greeting_prefix}envíeme el tiempo de inicio y fin.\nFormatos: <code>HH:MM:SS-HH:MM:SS</code> o <code>MM:SS-MM:SS</code>.",
+            "split": f"🧩 <b>Dividir Video</b>\n\n{greeting_prefix}envíeme el criterio de división por tiempo (ej. <code>300s</code>).",
+            "gif": f"🎞️ <b>Crear GIF</b>\n\n{greeting_prefix}envíeme la duración y los FPS.\nFormato: <code>[duración] [fps]</code> (ej: <code>5 15</code>).",
+            "screenshot": f"📸 <b>Capturas</b>\n\n{greeting_prefix}envíeme los timestamps, separados por comas.\n(ej: <code>00:10, 01:25, 50%</code>).",
+            "sample": f"🎞️ <b>Crear Muestra</b>\n\n{greeting_prefix}envíeme la duración en segundos (ej: <code>30</code>).",
+            "extract": f"📦 <b>Extraer Archivo</b>\n\n{greeting_prefix}envíeme la contraseña. Envíe /skip si no tiene.",
+            "addtrack": f"➕ <b>Añadir Pista</b>\n\n{greeting_prefix}envíeme ahora el archivo de <b>{payload}</b> que desea añadir.",
+            "bulkrename": f"✏️ <b>Renombrar en Lote</b>\n\n{greeting_prefix}envíeme el patrón. Use <code>{{num}}</code> para la secuencia (ej: <code>S01E{{num}}</code>)."
         }
         text = menu_texts.get(menu_type, "Configuración no reconocida.")
         
@@ -60,29 +53,24 @@ async def show_config_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, t
     await query.edit_message_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
 
-# =================================================================
-# 2. MANEJAR ENTRADAS DEL USUARIO (TEXTO Y ARCHIVOS)
-# =================================================================
-
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, config: dict, user_input: str or None):
-    """Manejador genérico de texto que procesa la entrada del usuario según el menú de configuración activo."""
-    if config['menu_type'] == 'audiotags':
+    """Procesa la entrada de texto del usuario según el menú de configuración activo."""
+    menu_type = config.get('menu_type')
+    if menu_type == 'audiotags':
         await _handle_audio_tags_conversation(update, context, config, user_input)
-    elif config['menu_type'] == 'caption':
+    elif menu_type == 'caption':
         await _handle_caption_conversation(update, context, config, user_input)
-    elif config['menu_type'] == 'bulkrename':
+    elif menu_type == 'bulkrename':
         await _handle_bulk_rename(update, context, config, user_input)
     else:
         await _handle_single_input(update, context, config, user_input)
 
 async def handle_cover_art_input(update: Update, context: ContextTypes.DEFAULT_TYPE, config: dict):
-    """Manejador específico para recibir la carátula del audio durante la configuración."""
+    """Manejador para recibir la carátula del audio."""
     context.user_data.pop('active_config', None)
     task_id = config['task_id']
-    photo = update.message.photo[-1] # Coger la de mayor resolución
-
+    photo = update.message.photo[-1]
     db_instance.update_task_config(task_id, "audio_tags.cover_file_id", photo.file_id)
-    
     await update.message.reply_html("✅ Carátula recibida y guardada.")
     task = db_instance.get_task(task_id)
     if task:
@@ -90,84 +78,64 @@ async def handle_cover_art_input(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_html("Toda la información de los tags ha sido guardada. ¿Algo más?", reply_markup=keyboard)
 
 async def handle_track_input(update: Update, context: ContextTypes.DEFAULT_TYPE, config: dict):
-    """Manejador para recibir archivos (documentos/audio) durante la configuración del Muxer."""
+    """Manejador para recibir archivos de pistas (audio/subtítulos)."""
     context.user_data.pop('active_config', None)
-    task_id = config['task_id']
-    track_type = config['payload'] # 'audio' o 'subtitle'
-    
+    task_id, track_type = config['task_id'], config['payload']
     file_obj = update.message.document or update.message.audio
-    if not file_obj:
-        return
-
-    db_key = f"add_{track_type}_file_id"
-    db_instance.update_task_config(task_id, db_key, file_obj.file_id)
-    
-    await update.message.reply_html(f"✅ Pista de {track_type} recibida y vinculada a la tarea.")
-    
+    if not file_obj: return
+    db_instance.update_task_config(task_id, f"add_{track_type}_file_id", file_obj.file_id)
+    await update.message.reply_html(f"✅ Pista de {track_type} recibida.")
     task = db_instance.get_task(task_id)
     if task:
         keyboard = build_processing_menu(task_id, task['file_type'], task.get('processing_config', {}), task.get('original_filename', ''))
         await update.message.reply_html("Puede continuar configurando o enviar a la cola.", reply_markup=keyboard)
 
-# =================================================================
-# 3. LÓGICA INTERNA DE CONVERSACIONES
-# =================================================================
+
+# --- Lógica Interna de Conversaciones ---
 
 async def _handle_single_input(update: Update, context: ContextTypes.DEFAULT_TYPE, config: dict, user_input: str or None):
-    """Procesa configuraciones que solo requieren una entrada de texto."""
-    task_id = config['task_id']
-    menu_type = config['menu_type']
-    
-    if user_input is None: # Si el usuario envió /skip
+    task_id, menu_type = config['task_id'], config['menu_type']
+    if user_input is None:
         feedback_message = "Acción cancelada."
     else:
-        feedback_message = "✅ Configuración guardada."
-        db_key = None
-
-        if menu_type == "rename": db_key, feedback_message = "final_filename", f"✅ Nombre actualizado a <code>{escape_html(user_input)}</code>."
-        elif menu_type == "trim": db_key, feedback_message = "trim_times", f"✅ Tiempos de corte: <code>{escape_html(user_input)}</code>."
-        elif menu_type == "split": db_key, feedback_message = "split_criteria", f"✅ Criterio de división: <code>{escape_html(user_input)}</code>."
-        elif menu_type == "screenshot": db_key, feedback_message = "screenshot_points", "✅ Puntos de captura establecidos."
-        elif menu_type == "sample": db_key, feedback_message = "sample_duration", f"✅ Muestra se creará con {user_input}s de duración."
-        elif menu_type == "extract": db_key, feedback_message = "archive_password", "✅ Contraseña guardada para la extracción."
-        
+        db_key, feedback_message = None, "✅ Configuración guardada."
+        actions = {
+            "rename": ("final_filename", f"✅ Nombre actualizado a <code>{escape_html(user_input)}</code>."),
+            "trim": ("trim_times", f"✅ Tiempos de corte: <code>{escape_html(user_input)}</code>."),
+            "split": ("split_criteria", f"✅ Criterio de división: <code>{escape_html(user_input)}</code>."),
+            "screenshot": ("screenshot_points", "✅ Puntos de captura establecidos."),
+            "sample": ("sample_duration", f"✅ Muestra se creará con {user_input}s."),
+            "extract": ("archive_password", "✅ Contraseña guardada.")
+        }
+        if menu_type in actions:
+            db_key, feedback_message = actions[menu_type]
+            db_instance.update_task_config(task_id, db_key, user_input)
         elif menu_type == "gif":
             try:
                 duration, fps = user_input.split()
                 db_instance.update_task_config(task_id, "gif_options", {"duration": duration, "fps": fps})
-                feedback_message = f"✅ GIF se creará con {duration}s de duración a {fps}fps."
+                feedback_message = f"✅ GIF se creará con {duration}s a {fps}fps."
             except ValueError:
-                feedback_message = "❌ Formato incorrecto. Debe ser: <code>[duración] [fps]</code>."
-                db_key = "invalid" # Para evitar que se guarde
-        
-        if db_key and db_key != "invalid":
-            db_instance.update_task_config(task_id, db_key, user_input)
-
+                feedback_message = "❌ Formato incorrecto: <code>[duración] [fps]</code>."
+    
     context.user_data.pop('active_config', None)
     await update.message.reply_html(feedback_message)
-    
     task = db_instance.get_task(task_id)
     if task:
         keyboard = build_processing_menu(task_id, task['file_type'], task.get('processing_config', {}), task.get('original_filename', ''))
         await update.message.reply_html("¿Algo más?", reply_markup=keyboard)
 
-
 async def _handle_audio_tags_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE, config: dict, user_input: str or None):
-    """Maneja la conversación de varios pasos para editar tags de audio."""
-    task_id = config['task_id']
-    stage = config.get('stage')
-    
+    task_id, stage = config['task_id'], config.get('stage')
     next_stage, prompt = None, None
-
-    if stage == "title":
-        if user_input: db_instance.update_task_config(task_id, "audio_tags.title", user_input)
-        next_stage, prompt = "artist", "Ahora envíeme el <b>artista</b>. (/skip)"
-    elif stage == "artist":
-        if user_input: db_instance.update_task_config(task_id, "audio_tags.artist", user_input)
-        next_stage, prompt = "album", "Ahora envíeme el <b>álbum</b>. (/skip)"
-    elif stage == "album":
-        if user_input: db_instance.update_task_config(task_id, "audio_tags.album", user_input)
-        next_stage, prompt = "cover", "Finalmente, envíeme la <b>imagen de la carátula</b>. (/skip)"
+    stages = {
+        "title": ("audio_tags.title", "artist", "Ahora envíeme el <b>artista</b>. (/skip)"),
+        "artist": ("audio_tags.artist", "album", "Ahora envíeme el <b>álbum</b>. (/skip)"),
+        "album": ("audio_tags.album", "cover", "Finalmente, envíeme la <b>imagen de la carátula</b>. (/skip)")
+    }
+    if stage in stages:
+        db_key, next_stage, prompt = stages[stage]
+        if user_input: db_instance.update_task_config(task_id, db_key, user_input)
     
     if next_stage:
         context.user_data['active_config']['stage'] = next_stage
@@ -181,51 +149,37 @@ async def _handle_audio_tags_conversation(update: Update, context: ContextTypes.
             await update.message.reply_html("¿Algo más?", reply_markup=keyboard)
 
 async def _handle_caption_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE, config: dict, user_input: str or None):
-    """Maneja la conversación de dos pasos para caption y botones."""
-    task_id = config['task_id']
-    stage = config.get('stage')
-
+    task_id, stage = config['task_id'], config.get('stage')
     if stage == "text":
-        if user_input:
-            db_instance.update_task_config(task_id, "final_caption", user_input)
-        
+        if user_input: db_instance.update_task_config(task_id, "final_caption", user_input)
         context.user_data['active_config']['stage'] = 'buttons'
-        await update.message.reply_html("✅ Caption guardado.\n\nAhora, envíeme los botones para el mensaje.\nFormato: <code>texto1 - url1, texto2 - url2</code>\nEnvíe /skip para no añadir botones.")
-    
+        await update.message.reply_html("✅ Caption guardado.\n\nAhora, envíeme los botones.\nFormato: <code>texto1 - url1, texto2 - url2</code>\nEnvíe /skip para no añadir botones.")
     elif stage == "buttons":
         context.user_data.pop('active_config', None)
         if user_input:
-            reply_markup_dict = parse_reply_markup(user_input)
-            if reply_markup_dict:
-                db_instance.update_task_config(task_id, "reply_markup", reply_markup_dict)
+            if reply_markup := parse_reply_markup(user_input):
+                db_instance.update_task_config(task_id, "reply_markup", reply_markup)
                 await update.message.reply_html("✅ Botones guardados.")
             else:
-                await update.message.reply_html("❌ Formato de botones inválido. No se guardaron.")
+                await update.message.reply_html("❌ Formato inválido. No se guardaron botones.")
         else:
              await update.message.reply_html("✅ No se añadieron botones.")
-
         task = db_instance.get_task(task_id)
         if task:
             keyboard = build_processing_menu(task_id, task['file_type'], task.get('processing_config', {}), task.get('original_filename', ''))
             await update.message.reply_html("Configuración finalizada. ¿Algo más?", reply_markup=keyboard)
 
 async def _handle_bulk_rename(update: Update, context: ContextTypes.DEFAULT_TYPE, config: dict, user_input: str):
-    """Maneja la lógica de renombrado en lote."""
-    task_ids = config['task_id'].split(',')
-    pattern = user_input
-    
+    task_ids, pattern = config['task_id'].split(','), user_input
     if '{num}' not in pattern:
-        await update.message.reply_html("❌ Patrón inválido. Debe incluir <code>{num}</code> para la secuencia.")
+        await update.message.reply_html("❌ Patrón inválido. Debe incluir <code>{num}</code>.")
         context.user_data.pop('active_config', None)
         return
-
-    renamed_count = 0
-    tasks_to_rename = db_instance.get_multiple_tasks(task_ids)
-
-    for i, task in enumerate(tasks_to_rename):
-        final_name = pattern.replace('{num}', str(i + 1).zfill(len(str(len(tasks_to_rename)))))
+    
+    tasks = db_instance.get_multiple_tasks(task_ids)
+    for i, task in enumerate(tasks):
+        final_name = pattern.replace('{num}', str(i + 1).zfill(len(str(len(tasks)))))
         db_instance.update_task_config(str(task['_id']), "final_filename", final_name)
-        renamed_count += 1
     
     context.user_data.pop('active_config', None)
-    await update.message.reply_html(f"✅ {renamed_count} tareas renombradas. Vuelva al /panel para ver los cambios.")
+    await update.message.reply_html(f"✅ {len(tasks)} tareas renombradas.")

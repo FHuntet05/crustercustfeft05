@@ -65,21 +65,10 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             keyboard = build_quality_menu(task_id)
             await query.edit_message_text("⚙️ Seleccione el perfil de calidad/conversión:", reply_markup=keyboard)
         elif action_type == "tracks":
+            # Esta lógica podría simplificarse o mejorarse, pero la mantenemos por ahora
             task = db_instance.get_task(task_id)
             if not task: await query.edit_message_text("❌ Tarea no encontrada."); return
-            download_path = os.path.join(DOWNLOAD_DIR, str(task_id))
-            if not os.path.exists(download_path):
-                await query.edit_message_text("⏳ Analizando archivo (puede tardar)...", reply_markup=None)
-                try:
-                    bot_file = await context.bot.get_file(task['file_id'])
-                    # La comprobación de 20MB es para la API del bot, no para el userbot
-                    if bot_file.file_size > 20 * 1024 * 1024 and not context.user_data.get('userbot_active'):
-                         await query.edit_message_text("❌ El análisis de pistas para archivos > 20MB no es posible sin un Userbot activo."); return
-                    await bot_file.download_to_drive(download_path)
-                except Exception as e: await query.edit_message_text(f"❌ No se pudo descargar para análisis: {e}"); return
-            media_info = ffmpeg.get_media_info(download_path)
-            keyboard = build_tracks_menu(task_id, media_info)
-            await query.edit_message_text("🎵/📜 Gestor de Pistas:", reply_markup=keyboard)
+            await query.edit_message_text("🛠️ Funcionalidad de pistas en desarrollo.", reply_markup=None)
         elif action_type == "audioconvert":
             keyboard = build_audio_convert_menu(task_id)
             await query.edit_message_text("🔊 Configure la conversión de audio:", reply_markup=keyboard)
@@ -90,10 +79,10 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif action == "set":
         config_type, task_id = parts[1], parts[2]
-        value = parts[3] if len(parts) > 3 else None
+        value = "_".join(parts[3:])
         
         if config_type == "dlformat":
-            format_id = parts[3]
+            format_id = value
             db_instance.update_task_config(task_id, "download_format_id", format_id)
             db_instance.update_task(task_id, "status", "queued")
             await query.edit_message_text(f"✅ ¡Entendido! He enviado la descarga de <code>{format_id}</code> a la cola.", parse_mode=ParseMode.HTML)
@@ -146,7 +135,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif action == "bulk":
         action_type = parts[1]
-        task_ids_str = parts[2] if len(parts) > 2 else ''
+        task_ids_str = "_".join(parts[2:])
         task_ids = task_ids_str.split(',')
         if action_type == "start":
             keyboard = build_bulk_actions_menu(task_ids_str)

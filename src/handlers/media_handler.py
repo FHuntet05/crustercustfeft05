@@ -1,13 +1,13 @@
 import logging
-from telegram import Update, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
 from src.db.mongo_manager import db_instance
-from src.helpers.utils import get_greeting, escape_html, sanitize_filename, parse_reply_markup
-from src.helpers.keyboards import build_download_quality_menu, build_processing_menu
+from src.helpers.utils import get_greeting, escape_html, sanitize_filename
+from src.helpers.keyboards import build_download_quality_menu
 from src.core import downloader
-from . import processing_handler # Importar para delegar
+from . import processing_handler
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,6 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning("No se pudo obtener effective_user de la actualización.")
         return
 
-    # Comprobar si hay una configuración activa que espera un archivo (para carátulas, etc.)
     if config := context.user_data.get('active_config'):
         if config.get('menu_type') == 'audiotags' and config.get('stage') == 'cover':
             await processing_handler.handle_cover_art_input(update, context, config)
@@ -30,7 +29,6 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await processing_handler.handle_track_input(update, context, config)
             return
 
-    # Flujo normal: tratarlo como una nueva tarea para el panel
     greeting_prefix = get_greeting(user.id)
     message = update.effective_message
     
@@ -72,23 +70,18 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Manejador para URLs. Analiza el enlace con yt-dlp y, si es válido,
-    presenta un menú de selección de calidad para la descarga.
+    Manejador para URLs. Analiza el enlace y presenta un menú de selección de calidad.
     """
-    if not update.effective_user:
-        logger.warning("No se pudo obtener effective_user de la actualización de URL.")
-        return
     user = update.effective_user
+    if not user: return
+    
     greeting_prefix = get_greeting(user.id)
     url = update.message.text
-
     status_message = await update.message.reply_html(f"🔎 {greeting_prefix}Analizando enlace...")
-
     info = downloader.get_url_info(url)
 
     if not info:
-        await status_message.edit_text(f"❌ {greeting_prefix}Lo siento, no pude obtener información de ese enlace. "
-                                       "Puede que no sea compatible o que el servicio esté caído.")
+        await status_message.edit_text(f"❌ {greeting_prefix}No pude obtener información de ese enlace.")
         return
 
     task_id = db_instance.add_task(
@@ -100,38 +93,24 @@ async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     if not task_id:
-        await status_message.edit_text(f"❌ {greeting_prefix}Hubo un error al crear la tarea en la base de datos.")
+        await status_message.edit_text(f"❌ {greeting_prefix}Error al crear la tarea en la DB.")
         return
 
     keyboard = build_download_quality_menu(str(task_id), info['formats'])
-    
-    title = escape_html(info['title'])
-    uploader = escape_html(info['uploader'])
-    
-    response_text = (
+    text = (
         f"✅ {greeting_prefix}Enlace analizado:\n\n"
-        f"<b>Título:</b> {title}\n"
-        f"<b>Canal:</b> {uploader}\n\n"
+        f"<b>Título:</b> {escape_html(info['title'])}\n"
+        f"<b>Canal:</b> {escape_html(info['uploader'])}\n\n"
         "Seleccione la calidad que desea descargar:"
     )
-
-    await status_message.edit_text(
-        response_text,
-        reply_markup=keyboard,
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True
-    )
+    await status_message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Manejador genérico de texto que procesa la entrada del usuario según el menú de configuración activo.
-    Delega la lógica a processing_handler.
+    Manejador de texto que delega a processing_handler si hay una configuración activa.
     """
-    if 'active_config' not in context.user_data:
-        return
-        
-    config = context.user_data['active_config']
-    user_input = update.message.text.strip()
-    is_skip = user_input.lower() == "/skip"
-    
-    await processing_handler.handle_text_input(update, context, config, None if is_skip else user_input)
+    if 'active_config' in context.user_data:
+        config = context.user_data['active_config']
+        user_input = update.message.text.strip()
+        is_skip = user_input.lower() == "/skip"
+        await processing_handler.handle_text_input(update, context, config, None if is_skip else user_input)

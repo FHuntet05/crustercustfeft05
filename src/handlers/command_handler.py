@@ -53,7 +53,6 @@ async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE, is_c
         else: await message.reply_html(response_text, reply_markup=keyboard)
     except Exception as e: logger.warning(f"No se pudo editar/enviar mensaje del panel: {e}")
 
-
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manejador para el comando /settings. Muestra el menú de configuración."""
     user = update.effective_user
