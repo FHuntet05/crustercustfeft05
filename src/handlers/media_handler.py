@@ -11,6 +11,9 @@ from . import processing_handler # Importar para delegar
 
 logger = logging.getLogger(__name__)
 
+# Límite de la API de Bots de Telegram en bytes (20 MB)
+BOT_API_DOWNLOAD_LIMIT = 20 * 1024 * 1024
+
 async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Manejador UNIFICADO para todos los archivos (video, audio, foto, documento).
@@ -41,7 +44,6 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif message.audio:
         file_obj, file_type = message.audio, 'audio'
     elif message.photo:
-        # Se trata como un documento para evitar crear un tipo 'photo' sin acciones
         file_obj, file_type = message.photo[-1], 'document' 
     elif message.document:
         file_obj, file_type = message.document, 'document'
@@ -53,6 +55,14 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_id = file_obj.file_id
     file_name = sanitize_filename(getattr(file_obj, 'file_name', "Archivo Sin Nombre"))
     file_size = file_obj.file_size
+
+    # --- VALIDACIÓN DE TAMAÑO ---
+    if file_size and file_size > BOT_API_DOWNLOAD_LIMIT:
+        await message.reply_html(
+            f"❌ {greeting_prefix}el archivo <code>{escape_html(file_name)}</code> es demasiado grande ({file_size / 1024**2:.2f} MB).\n\n"
+            "Actualmente, no puedo procesar archivos de más de 20 MB. Esta funcionalidad está pendiente de implementación."
+        )
+        return
 
     task_id = db_instance.add_task(
         user_id=user.id,

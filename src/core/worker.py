@@ -29,6 +29,9 @@ OUTPUT_DIR = os.path.join(os.getcwd(), "outputs")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# Límite de la API de Bots de Telegram en bytes (20 MB)
+BOT_API_DOWNLOAD_LIMIT = 20 * 1024 * 1024
+
 progress_data = {}
 bot_instance = None
 
@@ -66,7 +69,7 @@ async def _run_subprocess_with_progress(cmd, duration):
             percentage = (time_processed / duration) * 100
             ffmpeg_progress_callback(min(100, percentage), time_processed, duration)
     process.wait()
-    if process.returncode != 0: raise Exception("El proceso FFmpeg falló.")
+    if process.returncode != 0: raise Exception(f"El proceso FFmpeg falló. Código de salida: {process.returncode}")
 
 async def _apply_audio_tags(output_path, audio_tags, files_to_clean):
     await _edit_status_message("🖼️ Aplicando metadatos...")
@@ -98,7 +101,7 @@ async def _apply_audio_tags(output_path, audio_tags, files_to_clean):
         await _edit_status_message("⚠️ No se pudieron aplicar los metadatos.")
 
 async def _upload_file(user_id, file_handle, filename, file_type, caption, reply_markup):
-    common_args = {'caption': caption, 'reply_markup': reply_markup, 'write_timeout': 300, 'callback': lambda c, t: progress_callback(c, t, "⬆️ Subiendo...")}
+    common_args = {'caption': caption, 'reply_markup': reply_markup, 'write_timeout': 300, 'connect_timeout': 30, 'read_timeout': 300, 'pool_timeout': 300, 'callback': lambda c, t: progress_callback(c, t, "⬆️ Subiendo...")}
     if os.path.splitext(filename)[1].lower() == '.gif': await bot_instance.send_animation(user_id, animation=file_handle, filename=filename, **common_args)
     elif file_type == 'video': await bot_instance.send_video(user_id, video=file_handle, filename=filename, **common_args)
     elif file_type == 'audio': await bot_instance.send_audio(user_id, audio=file_handle, filename=filename, **common_args)
@@ -108,17 +111,30 @@ async def _handle_standard_task(task, files_to_clean):
     task_id = task['_id']; config = task.get('processing_config', {})
     download_path = os.path.join(DOWNLOAD_DIR, str(task_id)); files_to_clean.add(download_path)
     progress_data['start_time'] = time.time()
+    
+    # --- BLOQUE DE DESCARGA CON VALIDACIÓN DE TAMAÑO ---
     if url := task.get('url'):
-        if not downloader.download_from_url(url, download_path, config.get('download_format_id', 'best')): raise Exception("La descarga desde la URL falló.")
-    elif not os.path.exists(download_path):
-        await _edit_status_message("⬇️ Descargando de Telegram..."); await (await bot_instance.get_file(task['file_id'])).download_to_drive(custom_path=download_path, callback=lambda c, t: progress_callback(c, t, "⬇️ Descargando..."))
+        if not downloader.download_from_url(url, download_path, config.get('download_format_id', 'best')): 
+            raise Exception("La descarga desde la URL falló.")
+    elif task.get('file_id'):
+        if task.get('file_size', 0) > BOT_API_DOWNLOAD_LIMIT:
+            raise Exception("Archivo excede el límite de 20MB de la API de Bots.")
+        
+        if not os.path.exists(download_path):
+            await _edit_status_message("⬇️ Descargando de Telegram..."); 
+            await (await bot_instance.get_file(task['file_id'])).download_to_drive(
+                custom_path=download_path, 
+                callback=lambda c, t: progress_callback(c, t, "⬇️ Descargando...")
+            )
+            
     if audio_file_id := config.get('add_audio_file_id'):
         path = os.path.join(DOWNLOAD_DIR, audio_file_id); files_to_clean.add(path); await (await bot_instance.get_file(audio_file_id)).download_to_drive(path); config['add_audio_file_path'] = path
     if subs_file_id := config.get('add_subtitle_file_id'):
         path = os.path.join(DOWNLOAD_DIR, subs_file_id); files_to_clean.add(path); await (await bot_instance.get_file(subs_file_id)).download_to_drive(path); config['add_subtitle_file_path'] = path
+    
     await _edit_status_message("⚙️ Preparando..."); progress_data['start_time'] = time.time()
     media_info = ffmpeg.get_media_info(download_path); duration = float(media_info.get('format', {}).get('duration', 0))
-    base_name, _ = os.path.splitext(task.get('original_filename', 'archivo')); final_filename_base = sanitize_filename(task.get('final_filename', base_name))
+    base_name, _ = os.path.splitext(task.get('original_filename', 'archivo')); final_filename_base = sanitize_filename(config.get('final_filename', base_name))
     ext = ".mp4"; file_type = task.get('file_type')
     if file_type == 'audio': ext = f".{config.get('audio_format', 'mp3')}"
     elif 'gif_options' in config: ext = ".gif"
@@ -128,6 +144,7 @@ async def _handle_standard_task(task, files_to_clean):
     if 'subtitle_convert_to' in config: commands = [ffmpeg.build_subtitle_convert_command(download_path, output_path)]
     else: commands = ffmpeg.build_ffmpeg_command(task, download_path, output_path)
     for i, cmd in enumerate(commands):
+        if not cmd: continue # Saltar comandos vacíos (ej. split por tamaño no soportado)
         await _edit_status_message(f"⚙️ Procesando (Paso {i+1}/{len(commands)})..."); await _run_subprocess_with_progress(cmd, duration)
     if file_type == 'audio' and 'audio_tags' in config: await _apply_audio_tags(output_path, config['audio_tags'], files_to_clean)
     return output_path
@@ -139,14 +156,20 @@ async def _handle_special_task(task, files_to_clean):
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for i, t_zip in enumerate(source_tasks):
                 await _edit_status_message(f"📦 Comprimiendo {i+1}/{len(source_tasks)}..."); file_path = os.path.join(DOWNLOAD_DIR, str(t_zip['_id']))
+                if t_zip.get('file_size', 0) > BOT_API_DOWNLOAD_LIMIT:
+                    logger.warning(f"Omitiendo archivo {t_zip['_id']} en ZIP por exceder límite de 20MB.")
+                    continue
                 if not os.path.exists(file_path): await (await bot_instance.get_file(t_zip['file_id'])).download_to_drive(file_path)
-                files_to_clean.add(file_path); zipf.write(file_path, t_zip.get('final_filename') or t_zip.get('original_filename'))
+                files_to_clean.add(file_path); zipf.write(file_path, config.get('final_filename') or t_zip.get('original_filename'))
         return output_path
     elif special_type == "unify_videos":
         file_list_path = os.path.join(DOWNLOAD_DIR, f"filelist_{task_id}.txt"); files_to_clean.add(file_list_path)
         with open(file_list_path, 'w', encoding='utf-8') as f:
             for i, t_unify in enumerate(source_tasks):
                 await _edit_status_message(f"📥 Preparando video {i+1}/{len(source_tasks)}..."); file_path = os.path.join(DOWNLOAD_DIR, str(t_unify['_id']))
+                if t_unify.get('file_size', 0) > BOT_API_DOWNLOAD_LIMIT:
+                    logger.warning(f"Omitiendo video {t_unify['_id']} en unificación por exceder límite de 20MB.")
+                    continue
                 if not os.path.exists(file_path): await (await bot_instance.get_file(t_unify['file_id'])).download_to_drive(file_path)
                 files_to_clean.add(file_path); f.write(f"file '{os.path.abspath(file_path)}'\n")
         output_path = os.path.join(OUTPUT_DIR, f"Unified_Video_{task_id}.mp4"); files_to_clean.add(output_path)
