@@ -13,16 +13,8 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-try:
-    ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))
-except (TypeError, ValueError):
-    logger.critical("ADMIN_USER_ID no definido o inválido.")
-    exit()
 
 def main():
-    """Inicia el bot y el worker."""
-    logger.info("Iniciando el bot...")
-
     if not TELEGRAM_TOKEN:
         logger.critical("TELEGRAM_TOKEN no encontrado.")
         return
@@ -30,24 +22,25 @@ def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     # --- Registrar todos los manejadores ---
+    # Comandos
     application.add_handler(CommandHandler("start", command_handler.start_command))
     application.add_handler(CommandHandler("panel", command_handler.panel_command))
     application.add_handler(CommandHandler("settings", command_handler.settings_command))
+    application.add_handler(CommandHandler("findmusic", command_handler.findmusic_command))
     
-    application.add_handler(MessageHandler(
-        filters.VIDEO | filters.AUDIO | filters.Document.ALL,
-        media_handler.any_file_handler
-    ))
-    
-    # Manejador de texto genérico para cosas como el renombrado
+    # Manejadores de Mensajes
+    application.add_handler(MessageHandler(filters.VIDEO | filters.AUDIO | filters.Document.ALL, media_handler.any_file_handler))
+    application.add_handler(MessageHandler(filters.Entity("url") | filters.Entity("text_link"), media_handler.url_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, processing_handler.text_input_handler))
     
+    # Manejador de Botones (debe ir después de otros manejadores que puedan usar texto)
     application.add_handler(CallbackQueryHandler(button_handler.button_callback_handler))
 
+    # Manejador de errores
     application.add_error_handler(command_handler.error_handler)
 
-    # El worker ahora no necesita el contexto de la app, lo obtendrá de otra forma si es necesario
-    worker_thread = threading.Thread(target=worker.start_worker_loop, args=(application,))
+    # Iniciar el worker en un hilo separado
+    worker_thread = threading.Thread(target=worker.worker_thread_runner, args=(application,))
     worker_thread.daemon = True
     worker_thread.start()
     logger.info("Worker iniciado en segundo plano.")
