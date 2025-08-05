@@ -42,9 +42,10 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")
 
-def main():
-    """Punto de entrada principal. Configura y ejecuta el bot."""
+async def main():
+    """Punto de entrada asíncrono. Configura y ejecuta el bot y el userbot."""
     
+    # --- Verificaciones iniciales ---
     if not TELEGRAM_TOKEN:
         logger.critical("¡ERROR CRÍTICO! La variable de entorno TELEGRAM_TOKEN no está definida.")
         return
@@ -57,10 +58,7 @@ def main():
         logger.critical(f"¡ERROR CRÍTICO! No se pudo conectar a MongoDB al iniciar. Error: {e}")
         return
 
-    # Iniciar el Userbot antes de cualquier otra cosa
-    logger.info("Iniciando conexión del Userbot...")
-    asyncio.run(userbot_instance.start())
-
+    # --- Inicialización del Bot de Telegram ---
     persistence = PicklePersistence(filepath="bot_persistence")
     defaults = Defaults(parse_mode=ParseMode.HTML)
     
@@ -105,15 +103,37 @@ def main():
     worker_thread.start()
     logger.info("Worker de procesamiento iniciado en segundo plano.")
 
-    # --- Inicio del Bot ---
-    logger.info("El bot está ahora en línea y escuchando...")
+    # --- Arranque y Apagado Controlado del Bot y Userbot ---
     try:
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        # Iniciar el bot y el userbot concurrentemente
+        await application.initialize()
+        await userbot_instance.start()
+        
+        logger.info("El bot está ahora en línea y escuchando...")
+        await application.start()
+        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        
+        # Mantener el script corriendo hasta que se detenga manualmente
+        while True:
+            await asyncio.sleep(3600)
+
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Detención del bot solicitada.")
     finally:
-        # Detener el userbot al cerrar el bot
-        logger.info("Deteniendo conexión del Userbot...")
-        asyncio.run(userbot_instance.stop())
-        logger.info("El bot se ha detenido.")
+        # Apagado ordenado
+        logger.info("Iniciando secuencia de apagado...")
+        await application.updater.stop()
+        await application.stop()
+        await userbot_instance.stop()
+        logger.info("El bot se ha detenido limpiamente.")
+
 
 if __name__ == '__main__':
-    main()
+    # Ejecutar el bucle de eventos principal
+    try:
+        asyncio.run(main())
+    except RuntimeError as e:
+        if "There is no current event loop" in str(e):
+            logger.warning("Se detectó un reinicio rápido, puede ignorar el error de event loop.")
+        else:
+            raise
