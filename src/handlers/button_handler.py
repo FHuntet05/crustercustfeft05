@@ -64,8 +64,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             await query.edit_message_text("❌ Error al encolar la tarea.")
 
     elif data == "back_to_panel":
-        await query.delete_message()
-        await command_handler.panel_command(query, context)
+        # Le pasamos el objeto 'update' completo, que contiene el callback_query
+        await command_handler.panel_command(update, context)
 
     else:
         await query.edit_message_text("🤔 Acción desconocida o no implementada.")

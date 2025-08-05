@@ -21,21 +21,43 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manejador para el comando /panel, ahora con botones."""
-    user = update.effective_user
+    """Manejador para el comando /panel, que ahora maneja tanto comandos como callbacks."""
+    # Determinar si la actualización viene de un comando o de un botón
+    if update.effective_message and not update.callback_query:
+        # Viene de un comando /panel
+        user = update.effective_user
+        message_to_interact_with = update.effective_message
+        is_callback = False
+    elif update.callback_query:
+        # Viene de una pulsación de botón (ej. "Volver al Panel")
+        user = update.callback_query.from_user
+        message_to_interact_with = update.callback_query.message
+        is_callback = True
+    else:
+        # Caso improbable, no hacer nada
+        return
+
     greeting_prefix = get_greeting(user.id)
     
     pending_tasks = db_instance.get_pending_tasks(user.id)
     
     if not pending_tasks:
-        await update.message.reply_html(f"✅ ¡{greeting_prefix}su mesa de trabajo está vacía!")
+        text = f"✅ ¡{greeting_prefix}su mesa de trabajo está vacía!"
+        if is_callback:
+            await message_to_interact_with.edit_text(text, parse_mode='HTML')
+        else:
+            await message_to_interact_with.reply_html(text)
         return
         
     keyboard = build_panel_keyboard(pending_tasks)
     
     response_text = f"📋 <b>{greeting_prefix}su mesa de trabajo actual:</b>"
     
-    await update.message.reply_html(response_text, reply_markup=keyboard)
+    # Usamos el mensaje apropiado para responder o editar
+    if is_callback:
+        await message_to_interact_with.edit_text(response_text, reply_markup=keyboard, parse_mode='HTML')
+    else:
+        await message_to_interact_with.reply_html(response_text, reply_markup=keyboard)
 
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
