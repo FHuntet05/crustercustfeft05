@@ -2,6 +2,7 @@ import logging
 import os
 import threading
 from dotenv import load_dotenv
+from telegram import Update  # <-- IMPORTACIÓN AÑADIDA Y CORREGIDA
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -9,7 +10,7 @@ from telegram.ext import (
     filters,
     CallbackQueryHandler,
     PicklePersistence,
-    Defaults  # <-- IMPORTACIÓN AÑADIDA
+    Defaults
 )
 from telegram.constants import ParseMode, UpdateType
 
@@ -55,16 +56,13 @@ def main():
 
     persistence = PicklePersistence(filepath="bot_persistence")
 
-    # --- CORRECCIÓN APLICADA AQUÍ ---
-    # 1. Crear un objeto Defaults con el modo de parseo por defecto
     defaults = Defaults(parse_mode=ParseMode.HTML)
     
-    # 2. Usar el método .defaults() en el constructor
     application = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
         .persistence(persistence)
-        .defaults(defaults) # <-- MÉTODO CORREGIDO
+        .defaults(defaults)
         .build()
     )
 
@@ -97,7 +95,7 @@ def main():
 
     # --- Inicio del Bot ---
     logger.info("El bot está ahora en línea y escuchando...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(allowed_updates=Update.ALL_TYPES) # <-- ESTA LÍNEA AHORA FUNCIONARÁ
 
 if __name__ == '__main__':
     main()
