@@ -1,0 +1,15 @@
+# Entorno virtual
+.venv/
+venv/
+
+# Archivos de configuración sensibles
+.env
+credentials.json
+
+# Archivos temporales de Python
+__pycache__/
+*.pyc
+
+# Descargas y salidas del bot
+/downloads/
+/outputs/

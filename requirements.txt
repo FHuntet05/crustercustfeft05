@@ -1,0 +1,18 @@
+# Telegram Bot Framework
+python-telegram-bot[ext]
+
+# Interacción con MongoDB
+pymongo
+
+# Carga de variables de entorno desde el archivo .env
+python-dotenv
+
+# Para interactuar con APIs de música (opcional pero recomendado)
+ytmusicapi
+spotipy
+
+# Para descargar de YouTube y otros sitios
+yt-dlp
+
+# Para editar metadatos de audio (tags ID3)
+mutagen
