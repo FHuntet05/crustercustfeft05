@@ -4,7 +4,7 @@ from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
 from src.db.mongo_manager import db_instance
-from src.helpers.keyboards import build_panel_keyboard
+from src.helpers.keyboards import build_panel_keyboard, build_song_results_keyboard, build_settings_menu
 from src.helpers.utils import get_greeting, escape_html
 from src.core import downloader
 
@@ -25,7 +25,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <b>Envíe un archivo:</b> video, audio o documento.\n"
         "• <b>Pegue un enlace:</b> de YouTube, etc.\n"
         "• <b>Use /panel:</b> para ver su mesa de trabajo y procesar archivos.\n"
-        "• <b>Use /findmusic:</b> para buscar y descargar canciones."
+        "• <b>Use /findmusic:</b> para buscar y descargar canciones.\n"
+        "• <b>Use /settings:</b> para configurar sus preferencias."
     )
     await update.message.reply_html(start_message)
 
@@ -47,7 +48,11 @@ async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE, is_c
     if not pending_tasks:
         text = f"✅ ¡{greeting_prefix}Su mesa de trabajo está vacía!"
         if is_callback:
-            await message.edit_text(text, parse_mode=ParseMode.HTML)
+            # Usamos try-except porque el mensaje podría haber sido borrado
+            try:
+                await message.edit_text(text, parse_mode=ParseMode.HTML)
+            except Exception as e:
+                logger.warning(f"No se pudo editar el mensaje del panel (posiblemente borrado): {e}")
         else:
             await message.reply_html(text)
         return
@@ -56,23 +61,29 @@ async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE, is_c
     response_text = f"📋 <b>{greeting_prefix}Su mesa de trabajo actual:</b>"
     
     if is_callback:
-        await message.edit_text(response_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        try:
+            await message.edit_text(response_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        except Exception as e:
+             logger.warning(f"No se pudo editar el mensaje del panel (posiblemente borrado): {e}")
     else:
         await message.reply_html(response_text, reply_markup=keyboard)
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manejador para el comando /settings. Placeholder."""
+    """Manejador para el comando /settings. Muestra el menú de configuración."""
     user = update.effective_user
     greeting_prefix = get_greeting(user.id)
+    
+    keyboard = build_settings_menu(user.id)
+    
     await update.message.reply_html(
-        f"⚙️ {greeting_prefix}Panel de Configuración.\n\n"
-        "<i>(Función no implementada todavía)</i>"
+        f"⚙️ {greeting_prefix}Panel de Configuración General.",
+        reply_markup=keyboard
     )
 
 async def findmusic_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Busca música usando /findmusic [término].
-    Delega la búsqueda al módulo downloader y presenta los resultados.
+    Delega la búsqueda al módulo downloader y presenta los resultados en un teclado interactivo.
     """
     user = update.effective_user
     greeting_prefix = get_greeting(user.id)
@@ -84,22 +95,21 @@ async def findmusic_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     status_message = await update.message.reply_html(f"🔎 {greeting_prefix}Buscando <code>{escape_html(query)}</code>...")
     
-    search_results = downloader.search_music(query)
+    search_results = downloader.search_music(query, limit=5)
     
     if not search_results:
         await status_message.edit_text(f"❌ {greeting_prefix}No encontré resultados para su búsqueda.")
         return
 
-    # Aquí se construiría un teclado con los resultados. Placeholder por ahora.
-    text_results = [
-        f"<b>{i+1}. {escape_html(r['title'])}</b> - {escape_html(r['artist'])}\n"
-        f"   <code>/download_url {r['url']}</code>"
-        for i, r in enumerate(search_results)
-    ]
+    keyboard = build_song_results_keyboard(search_results)
     
-    response_text = f"✅ {greeting_prefix}He encontrado esto:\n\n" + "\n\n".join(text_results)
-    await status_message.edit_text(response_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-
+    response_text = f"✅ {greeting_prefix}He encontrado esto. Seleccione una para descargar:"
+    await status_message.edit_text(
+        response_text,
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Manejador de errores global. Registra la excepción y notifica al usuario."""

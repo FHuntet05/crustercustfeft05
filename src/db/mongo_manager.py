@@ -20,7 +20,12 @@ class Database:
                 if not mongo_uri:
                     raise ValueError("La variable de entorno MONGO_URI no está definida.")
                 
-                cls._instance.client = pymongo.MongoClient(mongo_uri)
+                # Aumentar el timeout de conexión y servidor para mayor resiliencia
+                cls._instance.client = pymongo.MongoClient(
+                    mongo_uri,
+                    serverSelectionTimeoutMS=5000,
+                    connectTimeoutMS=10000
+                )
                 cls._instance.client.admin.command('ping')
                 logger.info("Conexión con MongoDB Atlas establecida con éxito.")
                 
@@ -36,7 +41,7 @@ class Database:
     # --- Métodos de Tareas ---
     def add_task(self, user_id, file_type, file_id=None, file_name=None, file_size=None, url=None, special_type=None, processing_config=None):
         task_doc = {
-            "user_id": user_id,
+            "user_id": int(user_id),
             "file_id": file_id,
             "url": url,
             "original_filename": file_name,
@@ -73,13 +78,21 @@ class Database:
             return []
 
     def get_pending_tasks(self, user_id):
-        return list(self.tasks.find({"user_id": user_id, "status": "pending_review"}).sort("created_at", 1))
+        return list(self.tasks.find({"user_id": int(user_id), "status": "pending_review"}).sort("created_at", 1))
 
     def update_task_config(self, task_id, config_key, value):
         try:
             return self.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": {f"processing_config.{config_key}": value}})
         except Exception as e:
             logger.error(f"Error al actualizar config de tarea {task_id}: {e}")
+            return None
+            
+    def push_to_task_config_list(self, task_id, list_key, value):
+        """Añade un valor a una lista dentro de processing_config."""
+        try:
+            return self.tasks.update_one({"_id": ObjectId(task_id)}, {"$addToSet": {f"processing_config.{list_key}": value}})
+        except Exception as e:
+            logger.error(f"Error al añadir a lista en tarea {task_id}: {e}")
             return None
 
     def update_task(self, task_id, field, value):
@@ -101,7 +114,7 @@ class Database:
 
     def delete_task(self, task_id, user_id):
         try:
-            result = self.tasks.delete_one({"_id": ObjectId(task_id), "user_id": user_id})
+            result = self.tasks.delete_one({"_id": ObjectId(task_id), "user_id": int(user_id)})
             return result.deleted_count > 0
         except Exception as e:
             logger.error(f"Error al eliminar tarea {task_id}: {e}")
@@ -109,7 +122,7 @@ class Database:
             
     def delete_all_pending(self, user_id):
         try:
-            result = self.tasks.delete_many({"user_id": user_id, "status": "pending_review"})
+            result = self.tasks.delete_many({"user_id": int(user_id), "status": "pending_review"})
             return result.deleted_count
         except Exception as e:
             logger.error(f"Error al limpiar panel para {user_id}: {e}")
@@ -118,14 +131,15 @@ class Database:
     # --- Métodos de Ajustes de Usuario ---
     def get_user_settings(self, user_id):
         try:
-            settings = self.user_settings.find_one({"user_id": user_id})
+            settings = self.user_settings.find_one({"user_id": int(user_id)})
             if not settings:
                 default_settings = {
-                    "user_id": user_id,
-                    "naming": {"prefix": "", "suffix": ""},
-                    "watermark": {"type": "text", "content": f"@{user_id}", "position": "bottom-right", "opacity": 0.7, "enabled": False},
-                    "thumbnail": {"file_id": None},
-                    "auto_profile": {}
+                    "user_id": int(user_id),
+                    "naming_prefix": "",
+                    "naming_suffix": "- by @YourBot",
+                    "default_video_quality": "720p",
+                    "default_audio_format": "mp3",
+                    "default_audio_bitrate": "128k",
                 }
                 self.user_settings.insert_one(default_settings)
                 return default_settings
@@ -136,7 +150,7 @@ class Database:
 
     def update_user_setting(self, user_id, key, value):
         try:
-            self.user_settings.update_one({"user_id": user_id}, {"$set": {key: value}}, upsert=True)
+            self.user_settings.update_one({"user_id": int(user_id)}, {"$set": {key: value}}, upsert=True)
         except Exception as e:
             logger.error(f"Error al actualizar ajuste de usuario {user_id}: {e}")
 
