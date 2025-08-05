@@ -1,32 +1,29 @@
 import logging
-import os # Importamos os
+import os
 from telegram import Update
 from telegram.ext import ContextTypes
 from src.db.mongo_manager import db_instance
+from src.helpers.keyboards import build_panel_keyboard # Importamos nuestro generador de teclados
 
 logger = logging.getLogger(__name__)
 
-# --- Obtenemos el ADMIN_USER_ID de forma segura ---
-# Lo leemos una vez al cargar el módulo, después de que .env ya haya sido cargado por mongo_manager
 try:
     ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))
 except (TypeError, ValueError):
-    logger.critical("ADMIN_USER_ID no está definido en el archivo .env o no es un número válido. Saliendo.")
-    exit() # Detiene el bot si el ID del admin no es válido.
+    logger.critical("ADMIN_USER_ID no está definido o no es válido. Saliendo.")
+    exit()
 
-# ... La función format_bytes se mantiene igual ...
 def format_bytes(size):
     """Formatea bytes a un formato legible (KB, MB, GB)."""
     if size is None: return "N/A"
     power = 1024
     n = 0
     power_labels = {0: 'B', 1: 'KB', 2: 'MB', 3: 'GB', 4: 'TB'}
-    while size >= power and n < len(power_labels) -1 :
+    while size >= power and n < len(power_labels) - 1:
         size /= power
         n += 1
     return f"{size:.2f} {power_labels[n]}"
 
-# ... El resto del archivo se mantiene igual ...
 async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manejador que captura cualquier tipo de archivo enviado."""
     user = update.effective_user
@@ -50,7 +47,7 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if success:
         await update.message.reply_html(
-            f"✅ {greeting} recibido <code>{file_name}</code> y lo he añadido a su mesa de trabajo.\n"
+            f"✅ {greeting} recibido <code>{file_name}</code> y lo he añadido a su mesa de trabajo.\n\n"
             f"Use /panel para ver sus tareas pendientes."
         )
     else:
@@ -59,22 +56,21 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manejador para el comando /panel."""
+    """Manejador para el comando /panel, ahora con botones."""
     user = update.effective_user
     pending_tasks = db_instance.get_pending_tasks(user.id)
     
     greeting = "Jefe, esta es su" if user.id == ADMIN_USER_ID else "Esta es tu"
     
     if not pending_tasks:
-        await update.message.reply_html(f"✅ {greeting} mesa de trabajo está vacía.")
+        await update.message.reply_html(f"✅ ¡{greeting} mesa de trabajo está vacía!")
         return
         
+    # Construir el teclado de botones a partir de las tareas
+    keyboard = build_panel_keyboard(pending_tasks)
+    
     response_text = f"📋 **{greeting} mesa de trabajo actual:**\n\n"
-    
-    for i, task in enumerate(pending_tasks):
-        file_name = task.get('file_name', 'Nombre desconocido')
-        file_size = format_bytes(task.get('file_size'))
-        response_text += f"**Tarea {i+1}:** `{file_name}` ({file_size})\n"
-        response_text += f"**[ 🎬 Procesar ] [ 🗑️ Descartar ]**\n\n"
-    
-    await update.message.reply_markdown(response_text)
+    response_text += "Seleccione una acción para cada tarea o use los botones globales."
+
+    # Enviar el mensaje con el teclado adjunto. Usamos Markdown por el formato de **.
+    await update.message.reply_markdown_v2(response_text, reply_markup=keyboard)
