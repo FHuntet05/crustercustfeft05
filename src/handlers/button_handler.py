@@ -1,59 +1,86 @@
 import logging
 from telegram import Update
 from telegram.ext import ContextTypes
+
 from src.db.mongo_manager import db_instance
-from bson.objectid import ObjectId # Para convertir el string de vuelta a un ID de MongoDB
+from src.helpers.keyboards import build_processing_menu
+from src.helpers.utils import get_greeting, escape_html
+from . import processing_handler, command_handler
 
 logger = logging.getLogger(__name__)
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja todas las pulsaciones de botones inline."""
+    """Maneja TODAS las pulsaciones de botones inline y delega a otros módulos."""
     query = update.callback_query
-    
-    # Es buena práctica responder al callback inmediatamente.
-    # Esto le dice a Telegram "Recibido", y el ícono de carga en el botón del usuario desaparece.
     await query.answer()
 
-    # 'query.data' contiene el callback_data que definimos (ej. "delete_60b8d3b8f8a8d3b8f8a8d3b8")
     data = query.data
-    
-    # Usamos partition para dividir el string. Es más seguro que split si no hay '_'.
-    # ej: "delete_123" -> action="delete", task_id="123"
-    # ej: "process_all" -> action="process_all", task_id=""
-    action, _, task_id = data.partition('_')
-    
+    action, _, payload = data.partition('_')
     user_id = query.from_user.id
     
+    # --- Acciones del Panel Principal ---
     if action == "delete":
-        try:
-            # Convertir el string del ID de vuelta a un ObjectId de MongoDB
-            obj_id = ObjectId(task_id)
-            # Borrar la tarea de la base de datos, asegurándonos de que pertenece al usuario
-            delete_result = db_instance.tasks.delete_one({"_id": obj_id, "user_id": user_id})
-            
-            if delete_result.deleted_count > 0:
-                await query.edit_message_text(text=f"🗑️ Tarea descartada con éxito.")
-                logger.info(f"Tarea {task_id} borrada por el usuario {user_id}")
-            else:
-                await query.edit_message_text(text="❌ No se encontró la tarea o ya fue eliminada.")
-                
-        except Exception as e:
-            logger.error(f"Error al intentar borrar la tarea {task_id}: {e}")
-            await query.edit_message_text(text="❌ Ocurrió un error al intentar descartar la tarea.")
+        if db_instance.delete_task(payload, user_id):
+            await query.edit_message_text("🗑️ Tarea descartada con éxito.")
+            # Opcional: Refrescar el panel
+            # await command_handler.panel_command(update, context) 
+        else:
+            await query.edit_message_text("❌ Error al descartar la tarea.")
+
+    elif data == "delete_all":
+        count = db_instance.delete_all_pending(user_id)
+        await query.edit_message_text(f"💥 Limpieza completada. Se descartaron {count} tareas.")
 
     elif action == "process":
-        # Por ahora, solo confirmamos la acción. Aquí irá el menú de procesamiento.
-        await query.edit_message_text(text=f"🎬 ¡Entendido, Jefe! Preparando el menú de procesamiento para la tarea {task_id}...")
-        
-    elif data == "delete_all":
-        # Borra todas las tareas del usuario que estén pendientes de revisión
-        delete_result = db_instance.tasks.delete_many({"user_id": user_id, "status": "pending_review"})
-        await query.edit_message_text(text=f"💥 Limpieza completada. Se descartaron {delete_result.deleted_count} tareas.")
-        
-    elif data == "process_all":
-        # Por ahora, solo confirmamos. Aquí irá la lógica del modo bulk.
-        await query.edit_message_text(text="✨ ¡Entendido, Jefe! Añadiendo todas las tareas a la cola con el perfil automático...")
+        task_id = payload
+        task = db_instance.get_task(task_id)
+        if not task:
+            await query.edit_message_text("❌ Error: Tarea no encontrada.")
+            return
+
+        keyboard = build_processing_menu(task_id, task['file_type'])
+        text = (
+            f"🛠️ {get_greeting(user_id)}¿qué desea hacer con:\n"
+            f"<code>{escape_html(task['original_filename'])}</code>?"
+        )
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode='HTML')
+
+    # --- Acciones del Menú de Procesamiento ---
+    elif action == "config":
+        action_type = payload.split('_')[0]
+        task_id = payload.split('_', 1)[1]
+
+        if action_type == "rename":
+            await processing_handler.show_rename_menu(update, context, task_id)
+        else:
+            # Placeholder para todas las demás funciones
+            feature_map = {
+                "convert": "Optimizar/Convertir",
+                "trim": "Cortar (Trimmer)",
+                "watermark": "Marca de Agua",
+                "subs": "Subtítulos",
+                "screenshot": "Capturas",
+                "audio": "Funciones de Audio" # Genérico
+            }
+            feature_name = "Función Desconocida"
+            for key, name in feature_map.items():
+                if key in action_type:
+                    feature_name = name
+                    break
+            await processing_handler.show_unimplemented_menu(update, context, task_id, feature_name)
     
+    elif action == "queue":
+        task_id = payload
+        if db_instance.update_task_status(task_id, "queued"):
+            await query.edit_message_text("✅ ¡Entendido! La tarea ha sido enviada a la cola de procesamiento.")
+        else:
+            await query.edit_message_text("❌ Error al encolar la tarea.")
+
+    elif data == "back_to_panel":
+        # Simulamos una llamada al comando /panel para refrescar la vista
+        query.message.text = "/panel" # Modificamos el mensaje para que parezca un comando
+        await command_handler.panel_command(query, context)
+        await query.delete_message() # Borramos el mensaje del menú de procesamiento
+
     else:
-        # Fallback por si llega un callback desconocido
-        await query.edit_message_text(text="🤔 Acción desconocida o no implementada todavía.")
+        await query.edit_message_text("🤔 Acción desconocida o no implementada.")

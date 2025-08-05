@@ -1,15 +1,15 @@
 import logging
 import os
+import threading
 from dotenv import load_dotenv
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler
 
-# Importar los manejadores de sus respectivos módulos
-from src.handlers.media_handler import any_file_handler, panel_command
-from src.handlers.button_handler import button_callback_handler
-
-# Cargar las variables de entorno desde el archivo .env
-# Es importante que esto se haga antes de importar módulos que las necesiten
+# Cargar variables de entorno ANTES de importar otros módulos nuestros
 load_dotenv()
+
+# Importar los manejadores de sus respectivos módulos
+from src.handlers import command_handler, media_handler, button_handler
+from src.core import worker
 
 # Configurar el logging para ver errores y actividad en la consola
 logging.basicConfig(
@@ -26,26 +26,9 @@ except (TypeError, ValueError):
     logger.critical("ADMIN_USER_ID no está definido o no es válido. El bot no puede iniciar.")
     exit()
 
-# --- Definición de Comandos ---
-async def start(update, context):
-    """Manejador para el comando /start."""
-    user = update.effective_user
-    user_id = user.id
-    greeting = "A sus órdenes, Jefe. Bienvenido de vuelta." if user_id == ADMIN_USER_ID else "Hola."
-    await update.message.reply_html(
-        f"¡{greeting}!\n\n"
-        f"Soy su Asistente de Medios personal. "
-        f"Envíeme un archivo, un enlace o use un comando para empezar.\n\n"
-        f"Use /panel para ver su mesa de trabajo."
-    )
 
-async def error_handler(update, context):
-    """Manejador de errores para loggear excepciones."""
-    logger.error(f"Error: {context.error} causado por una actualización: {update}")
-
-# --- Función Principal ---
 def main():
-    """Inicia el bot y lo mantiene corriendo."""
+    """Inicia el bot y el worker, y los mantiene corriendo."""
     logger.info("Iniciando el bot...")
 
     if not TELEGRAM_TOKEN:
@@ -53,21 +36,36 @@ def main():
         return
 
     # Crear la aplicación del bot
+    # Usaremos persistencia para poder guardar datos entre reinicios si fuera necesario
+    # (por ejemplo, para conversaciones de varios pasos)
+    # persistence = PicklePersistence(filepath="bot_persistence")
+    # application = Application.builder().token(TELEGRAM_TOKEN).persistence(persistence).build()
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     # --- Registrar todos los manejadores ---
-    # Comandos
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("panel", panel_command))
-
-    # Manejador de archivos
-    application.add_handler(MessageHandler(filters.VIDEO | filters.AUDIO | filters.Document.ALL, any_file_handler))
+    # Comandos: /start, /panel, /settings, etc.
+    application.add_handler(CommandHandler("start", command_handler.start_command))
+    application.add_handler(CommandHandler("panel", command_handler.panel_command))
+    application.add_handler(CommandHandler("settings", command_handler.settings_command))
     
-    # Manejador de botones inline
-    application.add_handler(CallbackQueryHandler(button_callback_handler))
+    # Manejador de recepción de archivos y URLs
+    application.add_handler(MessageHandler(
+        filters.VIDEO | filters.AUDIO | filters.Document.ALL,
+        media_handler.any_file_handler
+    ))
+    # Aquí iría el handler para URLs (filters.Entity("url"))
+
+    # Manejador de botones inline. Este es el router principal para las acciones.
+    application.add_handler(CallbackQueryHandler(button_handler.button_callback_handler))
 
     # Manejador de errores (debe ser el último en registrarse)
-    application.add_error_handler(error_handler)
+    application.add_error_handler(command_handler.error_handler)
+
+    # Iniciar el worker en un hilo separado para que no bloquee el bot
+    worker_thread = threading.Thread(target=worker.start_worker_loop)
+    worker_thread.daemon = True  # El hilo morirá cuando el programa principal muera
+    worker_thread.start()
+    logger.info("Worker iniciado en segundo plano.")
 
     # Iniciar el bot
     logger.info("El bot está ahora en línea y escuchando...")

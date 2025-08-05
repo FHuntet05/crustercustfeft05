@@ -2,75 +2,42 @@ import logging
 import os
 from telegram import Update
 from telegram.ext import ContextTypes
+
 from src.db.mongo_manager import db_instance
-from src.helpers.keyboards import build_panel_keyboard
+from src.helpers.utils import get_greeting, escape_html
 
 logger = logging.getLogger(__name__)
-
-try:
-    ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))
-except (TypeError, ValueError):
-    logger.critical("ADMIN_USER_ID no está definido o no es válido. Saliendo.")
-    exit()
-
-def format_bytes(size):
-    """Formatea bytes a un formato legible (KB, MB, GB)."""
-    if size is None: return "N/A"
-    power = 1024
-    n = 0
-    power_labels = {0: 'B', 1: 'KB', 2: 'MB', 3: 'GB', 4: 'TB'}
-    while size >= power and n < len(power_labels) - 1:
-        size /= power
-        n += 1
-    return f"{size:.2f} {power_labels[n]}"
 
 async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manejador que captura cualquier tipo de archivo enviado."""
     user = update.effective_user
+    greeting_prefix = get_greeting(user.id)
     
-    if update.message.video:
-        file_obj, file_type = update.message.video, 'video'
-    elif update.message.audio:
-        file_obj, file_type = update.message.audio, 'audio'
-    elif update.message.document:
-        file_obj, file_type = update.message.document, 'document'
+    message = update.effective_message
+    
+    if message.video:
+        file_obj, file_type = message.video, 'video'
+    elif message.audio:
+        file_obj, file_type = message.audio, 'audio'
+    elif message.document:
+        file_obj, file_type = message.document, 'document'
     else:
+        # Ignorar otros tipos que no queremos manejar
         return
 
     file_id = file_obj.file_id
-    file_name = file_obj.file_name
+    file_name = escape_html(file_obj.file_name) if file_obj.file_name else "Archivo Sin Nombre"
     file_size = file_obj.file_size
     
+    # Guardar la tarea en la base de datos
     success = db_instance.add_task(user.id, file_id, file_name, file_size, file_type)
     
-    greeting = "Jefe, he" if user.id == ADMIN_USER_ID else "He"
-    
     if success:
-        await update.message.reply_html(
-            f"✅ {greeting} recibido <code>{file_name}</code> y lo he añadido a su mesa de trabajo.\n\n"
-            f"Use /panel para ver sus tareas pendientes."
+        await message.reply_html(
+            f"✅ {greeting_prefix}he recibido <code>{file_name}</code> y lo he añadido a su mesa de trabajo.\n\n"
+            "Use /panel para ver y gestionar sus tareas."
         )
     else:
-        await update.message.reply_html(
-            f"❌ Lo siento, Jefe. Hubo un error al registrar el archivo en la base de datos."
+        await message.reply_html(
+            f"❌ Lo siento, {greeting_prefix}hubo un error al registrar el archivo en la base de datos."
         )
-
-async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manejador para el comando /panel, ahora con botones."""
-    user = update.effective_user
-    pending_tasks = db_instance.get_pending_tasks(user.id)
-    
-    greeting = "Jefe, esta es su" if user.id == ADMIN_USER_ID else "Esta es tu"
-    
-    if not pending_tasks:
-        await update.message.reply_html(f"✅ ¡{greeting} mesa de trabajo está vacía!")
-        return
-        
-    keyboard = build_panel_keyboard(pending_tasks)
-    
-    # --- TEXTO CORREGIDO A FORMATO HTML ---
-    response_text = f"📋 <b>{greeting} mesa de trabajo actual:</b>\n\n"
-    response_text += "Seleccione una acción para cada tarea o use los botones globales."
-
-    # --- MÉTODO DE ENVÍO CORREGIDO A reply_html ---
-    await update.message.reply_html(response_text, reply_markup=keyboard)
