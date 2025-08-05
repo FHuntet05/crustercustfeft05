@@ -1,11 +1,11 @@
 import logging
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
 from src.db.mongo_manager import db_instance
 from src.helpers.keyboards import build_back_button, build_processing_menu
-from src.helpers.utils import get_greeting, escape_html
+from src.helpers.utils import get_greeting, escape_html, parse_reply_markup
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,6 @@ async def show_config_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, t
     query = update.callback_query
     greeting_prefix = get_greeting(query.from_user.id)
     
-    # Para bulk rename, task_id es en realidad una lista de IDs
     if menu_type != 'bulkrename':
         task = db_instance.get_task(task_id)
         if not task:
@@ -28,28 +27,26 @@ async def show_config_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, t
         original_filename = f"{len(task_id.split(','))} tareas"
 
     text = ""
-    # Guardar en el contexto qué estamos configurando y para qué tarea(s)
-    # La estructura de active_config varía según la necesidad del menú
     
-    # Flujos que inician una conversación de varios pasos
     if menu_type == "audiotags":
         context.user_data['active_config'] = {"task_id": task_id, "menu_type": "audiotags", "stage": "title"}
         text = f"🖼️ <b>Editar Tags</b>\n\n{greeting_prefix}envíeme el nuevo <b>título</b> de la canción.\nO envíe /skip para omitir."
     
-    # Flujos que esperan un solo input de texto
+    elif menu_type == "caption":
+        context.user_data['active_config'] = {"task_id": task_id, "menu_type": "caption", "stage": "text"}
+        text = f"📄 <b>Editar Caption y Botones</b>\n\n{greeting_prefix}primero, envíeme el nuevo texto para el <b>caption</b>.\nEnvíe /skip para no cambiar el caption."
+    
     else:
-        # Para bulk rename, el task_id es la lista de IDs
         context.user_data['active_config'] = {"task_id": task_id, "menu_type": menu_type, "payload": payload}
         menu_texts = {
             "rename": f"✏️ <b>Renombrar Archivo</b>\n\n{greeting_prefix}envíeme el nuevo nombre para <code>{escape_html(original_filename)}</code>.\n<i>No incluya la extensión del archivo.</i>",
-            "trim": f"✂️ <b>Cortar Video</b>\n\n{greeting_prefix}envíeme el tiempo de inicio y fin.\nFormatos: <code>HH:MM:SS-HH:MM:SS</code> o <code>MM:SS-MM:SS</code>.",
-            "audiotrim": f"✂️ <b>Cortar Audio</b>\n\n{greeting_prefix}envíeme el tiempo de inicio y fin.\nFormatos: <code>HH:MM:SS-HH:MM:SS</code> o <code>MM:SS-MM:SS</code>.",
+            "trim": f"✂️ <b>Cortar Video/Audio</b>\n\n{greeting_prefix}envíeme el tiempo de inicio y fin.\nFormatos: <code>HH:MM:SS-HH:MM:SS</code> o <code>MM:SS-MM:SS</code>.",
             "split": f"🧩 <b>Dividir Video</b>\n\n{greeting_prefix}envíeme el criterio de división: por tiempo (ej. <code>300s</code>) o por tamaño (ej. <code>50MB</code>).",
             "gif": f"🎞️ <b>Crear GIF</b>\n\n{greeting_prefix}envíeme la duración en segundos y los FPS.\nFormato: <code>[duración] [fps]</code> (ej: <code>5 15</code> para 5s a 15fps).",
             "screenshot": f"📸 <b>Capturas de Pantalla</b>\n\n{greeting_prefix}envíeme los timestamps de las capturas, separados por comas.\n(ej: <code>00:10, 01:25, 50%</code>).",
-            "caption": f"📄 <b>Editar Caption y Botones</b>\n\nPrimero, envíeme el nuevo texto para el caption. Luego le pediré los botones.",
+            "sample": f"🎞️ <b>Crear Muestra de Video</b>\n\n{greeting_prefix}envíeme la duración de la muestra en segundos (ej: <code>30</code>).",
+            "extract": f"📦 <b>Extraer Archivo</b>\n\n{greeting_prefix}envíeme la contraseña para el archivo. Envíe /skip si no tiene contraseña.",
             "addtrack": f"➕ <b>Añadir Pista</b>\n\n{greeting_prefix}envíeme ahora el archivo de <b>{payload}</b> que desea añadir al video.",
-            "audioeffect": f"🎧 <b>Ajustar Efecto</b>\n\n{greeting_prefix}envíeme el valor para <b>{payload}</b>.",
             "bulkrename": f"✏️ <b>Renombrar en Lote</b>\n\n{greeting_prefix}envíeme el patrón de nombre. Use <code>{{num}}</code> para el número de secuencia (ej: <code>Serie S01E{{num}}</code>)."
         }
         text = menu_texts.get(menu_type, "Configuración no reconocida.")
@@ -60,57 +57,43 @@ async def show_config_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, t
 
 
 async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Manejador genérico de texto que procesa la entrada del usuario según el menú de configuración
-    que esté activo en context.user_data.
-    """
+    """Manejador genérico de texto que procesa la entrada del usuario según el menú de configuración activo."""
     if 'active_config' not in context.user_data:
-        # Si no hay configuración activa, no hacer nada.
         return
         
     config = context.user_data['active_config']
     user_input = update.message.text.strip()
+    is_skip = user_input.lower() == "/skip"
     
-    # --- Manejar cancelación o skip ---
-    if user_input.lower() == "/skip":
-        await update.message.reply_html("Acción omitida.")
-        # Lógica para avanzar al siguiente paso si es una conversación
-        if config['menu_type'] == 'audiotags':
-            config['stage'] = 'artist' # Avanzar de todas formas
-            await _handle_audio_tags_conversation(update, context, config, None)
-        else:
-            context.user_data.pop('active_config', None)
-        return
-
-    # --- Delegar al manejador de conversación correspondiente ---
     if config['menu_type'] == 'audiotags':
-        await _handle_audio_tags_conversation(update, context, config, user_input)
+        await _handle_audio_tags_conversation(update, context, config, None if is_skip else user_input)
+    elif config['menu_type'] == 'caption':
+        await _handle_caption_conversation(update, context, config, None if is_skip else user_input)
     elif config['menu_type'] == 'bulkrename':
         await _handle_bulk_rename(update, context, config, user_input)
     else:
-        # Para todos los demás flujos de un solo paso
-        await _handle_single_input(update, context, config, user_input)
+        await _handle_single_input(update, context, config, None if is_skip else user_input)
 
 
-async def _handle_single_input(update: Update, context: ContextTypes.DEFAULT_TYPE, config: dict, user_input: str):
+async def _handle_single_input(update: Update, context: ContextTypes.DEFAULT_TYPE, config: dict, user_input: str or None):
     """Procesa configuraciones que solo requieren una entrada de texto."""
     task_id = config['task_id']
     menu_type = config['menu_type']
-    feedback_message = ""
     
-    # Mapeo de menu_type a (clave_db, mensaje_feedback)
-    single_input_map = {
-        "rename": ("final_filename", f"✅ Nombre de archivo de salida actualizado a <code>{escape_html(user_input)}</code>."),
-        "trim": ("trim_times", f"✅ Tiempos de corte establecidos: <code>{escape_html(user_input)}</code>."),
-        "audiotrim": ("trim_times", f"✅ Tiempos de corte establecidos: <code>{escape_html(user_input)}</code>."),
-        "split": ("split_criteria", f"✅ Criterio de división establecido: <code>{escape_html(user_input)}</code>."),
-        "screenshot": ("screenshot_points", f"✅ Puntos de captura establecidos."),
-        "caption": ("final_caption", "✅ Caption actualizado."),
-    }
+    if user_input is None:
+        await update.message.reply_html("Acción cancelada.")
+        context.user_data.pop('active_config', None)
+        return
 
-    if menu_type in single_input_map:
-        db_key, feedback_message = single_input_map[menu_type]
-        db_instance.update_task_config(task_id, db_key, user_input)
+    feedback_message = ""
+    db_key = None
+
+    if menu_type == "rename": db_key, feedback_message = "final_filename", f"✅ Nombre actualizado a <code>{escape_html(user_input)}</code>."
+    elif menu_type == "trim": db_key, feedback_message = "trim_times", f"✅ Tiempos de corte: <code>{escape_html(user_input)}</code>."
+    elif menu_type == "split": db_key, feedback_message = "split_criteria", f"✅ Criterio de división: <code>{escape_html(user_input)}</code>."
+    elif menu_type == "screenshot": db_key, feedback_message = "screenshot_points", "✅ Puntos de captura establecidos."
+    elif menu_type == "sample": db_key, feedback_message = "sample_duration", f"✅ Muestra se creará con {user_input}s de duración."
+    elif menu_type == "extract": db_key, feedback_message = "archive_password", "✅ Contraseña guardada para la extracción."
     
     elif menu_type == "gif":
         try:
@@ -120,7 +103,9 @@ async def _handle_single_input(update: Update, context: ContextTypes.DEFAULT_TYP
         except ValueError:
             feedback_message = "❌ Formato incorrecto. Debe ser: <code>[duración] [fps]</code>."
     
-    # Limpiar estado y devolver al menú
+    if db_key:
+        db_instance.update_task_config(task_id, db_key, user_input)
+
     context.user_data.pop('active_config', None)
     await update.message.reply_html(feedback_message)
     
@@ -135,7 +120,7 @@ async def _handle_audio_tags_conversation(update: Update, context: ContextTypes.
     task_id = config['task_id']
     stage = config.get('stage')
     
-    next_stage, prompt, db_key = None, None, None
+    next_stage, prompt = None, None
 
     if stage == "title":
         if user_input: db_instance.update_task_config(task_id, "audio_tags.title", user_input)
@@ -150,13 +135,40 @@ async def _handle_audio_tags_conversation(update: Update, context: ContextTypes.
     if next_stage:
         context.user_data['active_config']['stage'] = next_stage
         await update.message.reply_html(prompt)
-    else: # Conversación terminada
+    else:
         context.user_data.pop('active_config', None)
         await update.message.reply_html("✅ Configuración de tags guardada.")
         task = db_instance.get_task(task_id)
         if task:
             keyboard = build_processing_menu(task_id, task['file_type'], task.get('processing_config', {}), task.get('original_filename', ''))
             await update.message.reply_html("¿Algo más?", reply_markup=keyboard)
+
+async def _handle_caption_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE, config: dict, user_input: str or None):
+    """Maneja la conversación de dos pasos para caption y botones."""
+    task_id = config['task_id']
+    stage = config.get('stage')
+
+    if stage == "text":
+        if user_input:
+            db_instance.update_task_config(task_id, "final_caption", user_input)
+        
+        context.user_data['active_config']['stage'] = 'buttons'
+        await update.message.reply_html("✅ Caption guardado.\n\nAhora, envíeme los botones para el mensaje.\nFormato: <code>texto1 - url1, texto2 - url2</code>\nEnvíe /skip para no añadir botones.")
+    
+    elif stage == "buttons":
+        context.user_data.pop('active_config', None)
+        if user_input:
+            reply_markup_dict = parse_reply_markup(user_input)
+            if reply_markup_dict:
+                db_instance.update_task_config(task_id, "reply_markup", reply_markup_dict)
+                await update.message.reply_html("✅ Botones guardados.")
+            else:
+                await update.message.reply_html("❌ Formato de botones inválido. No se guardaron.")
+        
+        task = db_instance.get_task(task_id)
+        if task:
+            keyboard = build_processing_menu(task_id, task['file_type'], task.get('processing_config', {}), task.get('original_filename', ''))
+            await update.message.reply_html("Configuración finalizada. ¿Algo más?", reply_markup=keyboard)
 
 async def _handle_bulk_rename(update: Update, context: ContextTypes.DEFAULT_TYPE, config: dict, user_input: str):
     """Maneja la lógica de renombrado en lote."""
@@ -168,8 +180,7 @@ async def _handle_bulk_rename(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     for i, task in enumerate(tasks_to_rename):
         try:
-            # Asegurar que {num} exista en el patrón
-            final_name = pattern.format(num=str(i + 1).zfill(2))
+            final_name = pattern.format(num=str(i + 1).zfill(len(str(len(tasks_to_rename)))))
         except (KeyError, IndexError):
             await update.message.reply_html("❌ Patrón inválido. Asegúrese de usar <code>{num}</code> correctamente.")
             context.user_data.pop('active_config', None)
@@ -180,7 +191,6 @@ async def _handle_bulk_rename(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     context.user_data.pop('active_config', None)
     await update.message.reply_html(f"✅ {renamed_count} tareas renombradas. Vuelva al /panel para ver los cambios.")
-
 
 async def photo_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manejador específico para recibir la carátula del audio durante la configuración."""
@@ -199,3 +209,28 @@ async def photo_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if task:
         keyboard = build_processing_menu(task_id, task['file_type'], task.get('processing_config', {}), task.get('original_filename', ''))
         await update.message.reply_html("Toda la información de los tags ha sido guardada. ¿Algo más?", reply_markup=keyboard)
+
+
+async def document_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manejador para recibir archivos (documentos/audio) durante la configuración, como en el Muxer."""
+    config = context.user_data.get('active_config', {})
+    if not (config.get('menu_type') == 'addtrack'):
+        return
+        
+    context.user_data.pop('active_config', None)
+    task_id = config['task_id']
+    track_type = config['payload'] # 'audio' o 'subtitle'
+    
+    file_obj = update.message.document or update.message.audio
+    if not file_obj:
+        return
+
+    db_key = f"add_{track_type}_file_id"
+    db_instance.update_task_config(task_id, db_key, file_obj.file_id)
+    
+    await update.message.reply_html(f"✅ Pista de {track_type} recibida y vinculada a la tarea.")
+    
+    task = db_instance.get_task(task_id)
+    if task:
+        keyboard = build_processing_menu(task_id, task['file_type'], task.get('processing_config', {}), task.get('original_filename', ''))
+        await update.message.reply_html("Puede continuar configurando o enviar a la cola.", reply_markup=keyboard)

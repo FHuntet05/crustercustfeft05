@@ -1,5 +1,5 @@
 import logging
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
@@ -31,17 +31,15 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif message.document:
         file_obj, file_type = message.document, 'document'
     else:
-        # Esto no debería ocurrir si los filtros están bien configurados, pero es una salvaguarda.
-        logger.warning("any_file_handler recibió un mensaje sin archivo adjunto.")
+        logger.warning("any_file_handler recibió un mensaje sin archivo adjunto válido.")
         return
 
     if file_obj:
         file_id = file_obj.file_id
-        # Sanitizar el nombre del archivo para evitar problemas
         file_name = sanitize_filename(file_obj.file_name) if file_obj.file_name else "Archivo Sin Nombre"
         file_size = file_obj.file_size
     
-        success = db_instance.add_task(
+        task_id = db_instance.add_task(
             user_id=user.id,
             file_type=file_type,
             file_id=file_id,
@@ -49,7 +47,7 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_size=file_size
         )
     
-        if success:
+        if task_id:
             await message.reply_html(
                 f"✅ {greeting_prefix}He recibido <code>{escape_html(file_name)}</code> y lo he añadido a su mesa de trabajo.\n\n"
                 "Use /panel para ver y procesar sus tareas."
@@ -71,7 +69,6 @@ async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status_message = await update.message.reply_html(f"🔎 {greeting_prefix}Analizando enlace...")
 
-    # Obtener información del enlace
     info = downloader.get_url_info(url)
 
     if not info:
@@ -79,21 +76,18 @@ async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                        "Puede que no sea compatible o que el servicio esté caído.")
         return
 
-    # Crear una tarea en estado 'pending_review' pero sin file_id, solo con la URL.
-    # Esta tarea servirá para guardar la configuración de descarga.
     task_id = db_instance.add_task(
         user_id=user.id,
         file_type='video' if info['is_video'] else 'audio',
         url=info['url'],
         file_name=sanitize_filename(info['title']),
-        processing_config={'url_info': info} # Guardamos la info para no volver a consultarla
+        processing_config={'url_info': info}
     )
     
     if not task_id:
         await status_message.edit_text(f"❌ {greeting_prefix}Hubo un error al crear la tarea en la base de datos.")
         return
 
-    # Construir el teclado de selección de calidad
     keyboard = build_download_quality_menu(str(task_id), info['formats'])
     
     title = escape_html(info['title'])

@@ -1,6 +1,7 @@
 import os
 from html import escape
 from datetime import timedelta
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 # Cargar el ID del admin desde las variables de entorno de forma segura
 try:
@@ -33,7 +34,6 @@ def escape_html(text: str) -> str:
     """Escapa caracteres HTML de un texto para evitar problemas de parseo en Telegram."""
     if not isinstance(text, str): 
         return ""
-    # Evita escapar las comillas, que son válidas en los textos de Telegram
     return escape(text, quote=False)
 
 def create_progress_bar(percentage: float, length: int = 10) -> str:
@@ -55,14 +55,33 @@ def sanitize_filename(filename: str) -> str:
     if not isinstance(filename, str):
         return "archivo_invalido"
     
-    # Lista de caracteres no permitidos en la mayoría de sistemas de archivos
     invalid_chars = r'<>:"/\|?*'
-    
-    # Reemplaza los caracteres inválidos por un guion bajo
     sanitized = "".join(c if c not in invalid_chars else '_' for c in filename)
-    
-    # Reemplaza espacios múltiples y saltos de línea por un solo espacio
     sanitized = " ".join(sanitized.split())
-    
-    # Limita la longitud total para evitar problemas de filesystem (255 es un límite común)
     return sanitized[:200]
+
+def parse_reply_markup(text: str) -> dict or None:
+    """
+    Parsea un texto con formato 'texto1 - url1, texto2 - url2'
+    y lo convierte en un diccionario serializable para un InlineKeyboardMarkup.
+    Devuelve None si el formato es inválido.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    
+    keyboard = []
+    button_pairs = text.split(',')
+    
+    for pair in button_pairs:
+        parts = pair.split('-', 1)
+        if len(parts) == 2:
+            text = parts[0].strip()
+            url = parts[1].strip()
+            if text and url:
+                # La estructura debe ser compatible con JSON para guardarla en la DB
+                keyboard.append([{"text": text, "url": url}])
+        else:
+            # Si alguna parte no cumple el formato, se invalida todo el markup
+            return None
+            
+    return {"inline_keyboard": keyboard} if keyboard else None
