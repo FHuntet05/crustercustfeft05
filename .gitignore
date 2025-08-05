@@ -1,15 +1,36 @@
 # Entorno virtual
 .venv/
 venv/
+env/
+ENV/
 
 # Archivos de configuración sensibles
 .env
 credentials.json
+config.ini
 
 # Archivos temporales de Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.so
 
 # Descargas y salidas del bot
 /downloads/
 /outputs/
+/temp/
+
+# Archivos de log
+*.log
+logs/
+
+# Archivos de sesión de editores
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Archivos de sistema operativo
+.DS_Store
+Thumbs.db

@@ -3,103 +3,174 @@ import subprocess
 import shlex
 import os
 import re
+import json
 
 logger = logging.getLogger(__name__)
 
-def get_media_info(file_path):
-    """Usa ffprobe para obtener información detallada de un archivo."""
-    command = f"ffprobe -v error -show_format -show_streams -of default=noprint_wrappers=1 -print_format json {shlex.quote(file_path)}"
+def get_media_info(file_path: str):
+    """
+    Usa ffprobe para obtener información detallada de un archivo como un diccionario Python.
+    Devuelve un diccionario vacío si falla.
+    """
+    if not os.path.exists(file_path):
+        logger.error(f"ffprobe no puede encontrar el archivo: {file_path}")
+        return {}
+        
+    command = [
+        "ffprobe",
+        "-v", "error",
+        "-show_format",
+        "-show_streams",
+        "-of", "default=noprint_wrappers=1",
+        "-print_format", "json",
+        file_path
+    ]
     try:
-        result = subprocess.check_output(shlex.split(command), universal_newlines=True)
-        return result # Devuelve el JSON como string
-    except Exception as e:
+        # Usamos Popen para manejar mejor la salida y errores
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        stdout, stderr = process.communicate(timeout=60) # Timeout para evitar bloqueos
+        
+        if process.returncode != 0:
+            logger.error(f"ffprobe falló para {file_path}. Error: {stderr.strip()}")
+            return {}
+            
+        return json.loads(stdout)
+    except subprocess.TimeoutExpired:
+        logger.error(f"ffprobe timed out para {file_path}.")
+        process.kill()
+        return {}
+    except (json.JSONDecodeError, Exception) as e:
         logger.error(f"No se pudo obtener info de {file_path}: {e}")
-        return "{'error': 'No se pudo analizar el archivo.'}"
+        return {}
 
-def build_ffmpeg_command(task, input_path, output_path):
-    """Construye el comando FFmpeg completo basado en la configuración de la tarea."""
+def build_ffmpeg_command(task: dict, input_path: str, output_path: str) -> list:
+    """
+    Construye el comando FFmpeg completo basado en la configuración de la tarea.
+    Devuelve una lista de comandos para soportar operaciones de múltiples pasadas.
+    """
     config = task.get('processing_config', {})
     file_type = task.get('file_type')
     
-    # --- Partes del Comando ---
-    input_options = f"-i {shlex.quote(input_path)}"
-    video_codec_options = ""
-    audio_codec_options = ""
-    filter_complex_parts = []
-    map_options = ""
+    # --- Comandos Especiales que anulan el flujo normal ---
+    if 'gif_options' in config:
+        return build_gif_command(config, input_path, output_path)
+    if 'split_criteria' in config:
+        return [build_split_command(config, input_path, output_path)]
+
+    # --- Flujo de Transcodificación Normal ---
+    command_parts = ["nice -n 19", "ionice -c 3", "ffmpeg -y"]
     
-    # --- Lógica de Procesamiento de VIDEO ---
+    # 1. Opciones de Input (Trimmer debe ir aquí)
+    if 'trim_times' in config:
+        start, _, end = config['trim_times'].partition('-')
+        if start.strip(): command_parts.append(f"-ss {shlex.quote(start.strip())}")
+        if end.strip(): command_parts.append(f"-to {shlex.quote(end.strip())}")
+
+    command_parts.append(f"-i {shlex.quote(input_path)}")
+    
+    # Inputs Adicionales (para Muxer)
+    input_count = 1
+    if config.get('add_audio_file_id'):
+        command_parts.append(f"-i {shlex.quote(os.path.join('downloads', config['add_audio_file_id']))}")
+        input_count += 1
+    if config.get('add_subtitle_file_id'):
+        command_parts.append(f"-i {shlex.quote(os.path.join('downloads', config['add_subtitle_file_id']))}")
+        input_count += 1
+
+    # 2. Filtros (Video y Audio)
+    video_filters = []
+    audio_filters = []
+    
+    # Perfil de Calidad/Escalado
+    profile_map = {'1080p': ('1920:1080', '22', '192k'), '720p': ('1280:720', '24', '128k'),
+                   '480p': ('854:480', '28', '96k'), '360p': ('640:360', '32', '64k'),
+                   '240p': ('426:240', '34', '64k'), '144p': ('256:144', '36', '48k')}
+    if 'quality' in config and file_type == 'video':
+        res, _, _ = profile_map.get(config['quality'], profile_map['720p'])
+        video_filters.append(f"scale={res}:force_original_aspect_ratio=decrease")
+        video_filters.append(f"pad={res}:(ow-iw)/2:(oh-ih)/2:color=black")
+    
+    # Filtros de Audio
+    if config.get('slowed'): audio_filters.append("atempo=0.8")
+    if config.get('reverb'): audio_filters.append("aecho=0.8:0.9:1000:0.3")
+    if config.get('eight_d'): audio_filters.append("apulsator=hz=0.125")
+    if 'volume' in config: audio_filters.append(f"volume={shlex.quote(config['volume'])}")
+    if 'bass' in config: audio_filters.append(f"equalizer=f=60:width_type=h:width=20:g={shlex.quote(config['bass'])}")
+    if 'treble' in config: audio_filters.append(f"equalizer=f=14000:width_type=h:width=2000:g={shlex.quote(config['treble'])}")
+    
+    if video_filters: command_parts.append(f'-vf "{",".join(video_filters)}"')
+    if audio_filters: command_parts.append(f'-af "{",".join(audio_filters)}"')
+
+    # 3. Codecs
     if file_type == 'video':
-        # Perfil de Calidad (Default: 720p)
-        profile = config.get('quality', '720p')
-        profiles = {'1080p': ('1920x1080', '22', '192k'), '720p': ('1280x720', '24', '128k'),
-                    '480p': ('854x480', '28', '96k'), '360p': ('640x360', '32', '64k')}
-        res, crf, abr = profiles.get(profile, profiles['720p'])
-        
-        video_codec_options = f"-c:v libx264 -preset veryfast -crf {crf}"
-        audio_codec_options = f"-c:a aac -b:a {abr}"
-        
-        # Filtro de escalado es el base
-        filter_complex_parts.append(f"[0:v]scale={res}:force_original_aspect_ratio=decrease,pad={res}:-1:-1:color=black,format=yuv420p[v_scaled]")
-        current_video_stream = "[v_scaled]"
-
-        # Marca de Agua
-        if config.get('watermark_enabled'):
-            watermark_path = "assets/watermark.png"
-            if os.path.exists(watermark_path):
-                input_options += f" -i {shlex.quote(watermark_path)}"
-                pos = config.get('watermark_position', 'W-w-10:H-h-10') # Default bottom-right
-                filter_complex_parts.append(f"{current_video_stream}[1:v]overlay={pos}[v_watermarked]")
-                current_video_stream = "[v_watermarked]"
-        
-        # Mute
-        if config.get('mute_audio'):
-            map_options = f"-map {shlex.quote(current_video_stream)} -an"
-        else:
-            map_options = f"-map {shlex.quote(current_video_stream)} -map 0:a:0?"
-
-        # Trimmer (Cortar)
-        if 'trim_times' in config:
-            start, _, end = config['trim_times'].partition('-')
-            trim_options = f"-ss {start} " + (f"-to {end}" if end else "")
-            input_options = f"{trim_options} {input_options}" # El trim va antes del input
-            # Para evitar recodificar si solo se corta
-            if len(config) == 1:
-                video_codec_options = "-c:v copy"
-                audio_codec_options = "-c:a copy"
-                filter_complex_parts = [] # Anular filtros si solo es cortar
-
-    # --- Lógica de Procesamiento de AUDIO ---
+        if 'quality' in config:
+            _, crf, abr = profile_map.get(config['quality'], profile_map['720p'])
+            command_parts.extend([f"-c:v libx264", "-preset veryfast", f"-crf {crf}", "-pix_fmt yuv420p"])
+            command_parts.extend([f"-c:a aac", f"-b:a {abr}"])
+        else: # Si no se especifica calidad, intentar copiar codecs si no hay filtros
+            if not video_filters and not audio_filters:
+                command_parts.extend(["-c:v copy", "-c:a copy"])
     elif file_type == 'audio':
+        fmt = config.get('audio_format', 'mp3')
         bitrate = config.get('audio_bitrate', '128k')
-        audio_codec_options = f"-c:a libmp3lame -b:a {bitrate}" # Asumimos conversión a MP3 por defecto
-        map_options = "-map 0:a:0"
-        
-    # --- Ensamblaje Final del Comando ---
-    filter_complex = f'-filter_complex "{";".join(filter_complex_parts)}"' if filter_complex_parts else ""
+        codec_map = {'mp3': 'libmp3lame', 'flac': 'flac', 'opus': 'libopus'}
+        command_parts.append(f"-c:a {codec_map.get(fmt, 'libmp3lame')}")
+        if fmt != 'flac': command_parts.append(f"-b:a {bitrate}")
     
-    command = (f"nice -n 19 ionice -c 3 ffmpeg -y {input_options} {filter_complex} "
-               f"{map_options} {video_codec_options} {audio_codec_options} {shlex.quote(output_path)}")
-    
-    # Limpiar espacios extra
-    command = ' '.join(command.split())
-    logger.info(f"Comando FFmpeg construido: {command}")
-    return command
+    # 4. Mapeo de Pistas
+    map_options = ["-map 0:v?"] # Mapear video del primer input si existe
+    if not config.get('mute_audio'):
+        map_options.append("-map 0:a?") # Mapear audio del primer input si no está muteado
+    else:
+        command_parts.append("-an") # Opción más simple para mutear
 
-def run_ffmpeg_process(command, progress_callback=None, duration=None):
-    """Ejecuta un comando FFmpeg y parsea su progreso si se provee callback."""
-    process = subprocess.Popen(shlex.split(command), stderr=subprocess.PIPE, universal_newlines=True, encoding='utf-8', errors='ignore')
+    if config.get('add_audio_file_id'): map_options.append("-map 1:a")
+    if config.get('add_subtitle_file_id'): map_options.append(f"-map {input_count-1}:s")
     
-    progress_pattern = re.compile(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})")
+    command_parts.extend(map_options)
     
-    for line in iter(process.stderr.readline, ''):
-        if progress_callback and duration:
-            match = progress_pattern.search(line)
-            if match:
-                h, m, s, _ = map(int, match.groups())
-                time_processed = h * 3600 + m * 60 + s
-                percentage = (time_processed / duration) * 100 if duration > 0 else 0
-                progress_callback(min(100, percentage))
+    # Opciones de post-mapeo (ej. codec de subtítulos)
+    if config.get('add_subtitle_file_id') and output_path.endswith('.mp4'):
+        command_parts.append("-c:s mov_text")
     
-    process.wait()
-    return process.returncode == 0
+    # 5. Output
+    command_parts.append(shlex.quote(output_path))
+    
+    final_command = " ".join(part for part in command_parts if part)
+    logger.info(f"Comando FFmpeg construido: {final_command}")
+    return [final_command]
+
+def build_gif_command(config, input_path, output_path):
+    gif_opts = config['gif_options']
+    duration, fps = gif_opts['duration'], gif_opts['fps']
+    palette_path = f"{output_path}.palette.png"
+    filters = f"fps={fps},scale=480:-1:flags=lanczos"
+    cmd1 = (f"ffmpeg -y -i {shlex.quote(input_path)} -t {duration} -vf '{filters},palettegen' {shlex.quote(palette_path)}")
+    cmd2 = (f"ffmpeg -i {shlex.quote(input_path)} -i {shlex.quote(palette_path)} -t {duration} "
+            f"-lavfi '{filters} [x]; [x][1:v] paletteuse' {shlex.quote(output_path.replace('.mp4', '.gif'))}")
+    return [cmd1, cmd2]
+
+def build_split_command(config, input_path, output_path):
+    criteria = config['split_criteria']
+    base_name, ext = os.path.splitext(output_path)
+    if criteria.endswith('s'):
+        return (f"ffmpeg -y -i {shlex.quote(input_path)} -c copy -map 0 "
+                f"-segment_time {criteria[:-1]} -f segment -reset_timestamps 1 {shlex.quote(base_name)}_%03d{ext}")
+    return ""
+
+def build_unify_command(file_list_path: str, output_path: str) -> str:
+    return (f"ffmpeg -y -f concat -safe 0 -i {shlex.quote(file_list_path)} "
+            f"-c copy {shlex.quote(output_path)}")
+
+def generate_screenshot_command(timestamp: str, input_path: str, output_path: str) -> str:
+    return f"ffmpeg -y -ss {shlex.quote(timestamp)} -i {shlex.quote(input_path)} -frames:v 1 -q:v 2 {shlex.quote(output_path)}"
+
+def build_extract_command(archive_path: str, output_dir: str) -> str or None:
+    ext = os.path.splitext(archive_path)[1].lower()
+    if ext == '.zip':
+        return f"unzip -o {shlex.quote(archive_path)} -d {shlex.quote(output_dir)}"
+    elif ext == '.rar':
+        return f"unrar x -o+ {shlex.quote(archive_path)} {shlex.quote(output_dir)}/"
+    elif ext == '.7z':
+        return f"7z x -o{shlex.quote(output_dir)} {shlex.quote(archive_path)} -y"
+    return None
