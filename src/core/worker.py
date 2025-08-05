@@ -25,10 +25,11 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 BOT_API_DOWNLOAD_LIMIT = 20 * 1024 * 1024
+BOT_API_UPLOAD_LIMIT = 50 * 1024 * 1024
 progress_data = {}
 bot_instance = None
 
-# ... (Las funciones _edit_status_message, progress_callback, ffmpeg_progress_callback, _run_subprocess_with_progress, _apply_audio_tags, y _upload_file no cambian)
+
 async def _edit_status_message(text: str):
     if not (bot := progress_data.get('bot')) or not (msg := progress_data.get('message')): return
     try:
@@ -95,12 +96,37 @@ async def _apply_audio_tags(output_path, audio_tags, files_to_clean):
         logger.error(f"Fallo al aplicar tags con mutagen: {e}")
         await _edit_status_message("⚠️ No se pudieron aplicar los metadatos.")
 
-async def _upload_file(user_id, file_handle, filename, file_type, caption, reply_markup):
-    common_args = {'caption': caption, 'reply_markup': reply_markup, 'write_timeout': 300, 'connect_timeout': 30, 'read_timeout': 300, 'pool_timeout': 300, 'callback': lambda c, t: progress_callback(c, t, "⬆️ Subiendo...")}
-    if os.path.splitext(filename)[1].lower() == '.gif': await bot_instance.send_animation(user_id, animation=file_handle, filename=filename, **common_args)
-    elif file_type == 'video': await bot_instance.send_video(user_id, video=file_handle, filename=filename, **common_args)
-    elif file_type == 'audio': await bot_instance.send_audio(user_id, audio=file_handle, filename=filename, **common_args)
-    else: await bot_instance.send_document(user_id, document=file_handle, filename=filename, **common_args)
+async def _upload_file(user_id, output_path, file_type, caption, reply_markup):
+    """Sube un archivo, priorizando el Userbot para archivos grandes."""
+    filename = os.path.basename(output_path)
+    
+    if userbot_instance.is_active():
+        await _edit_status_message("⬆️ Subiendo (Userbot)...")
+        progress = lambda c, t: progress_callback(c, t, "⬆️ Subiendo...")
+        if os.path.splitext(filename)[1].lower() == '.gif':
+            await userbot_instance.client.send_animation(user_id, animation=output_path, caption=caption, progress=progress)
+        elif file_type == 'video':
+            await userbot_instance.client.send_video(user_id, video=output_path, caption=caption, progress=progress)
+        elif file_type == 'audio':
+            await userbot_instance.client.send_audio(user_id, audio=output_path, caption=caption, progress=progress)
+        else:
+            await userbot_instance.client.send_document(user_id, document=output_path, caption=caption, progress=progress)
+    else:
+        file_size = os.path.getsize(output_path)
+        if file_size > BOT_API_UPLOAD_LIMIT:
+            raise Exception(f"El archivo de salida ({format_bytes(file_size)}) excede el límite de 50MB de la API de Bots, y el Userbot no está activo.")
+        
+        await _edit_status_message("⬆️ Subiendo (Bot API)...")
+        common_args = {'caption': caption, 'reply_markup': reply_markup, 'write_timeout': 300, 'connect_timeout': 30, 'read_timeout': 300, 'pool_timeout': 300, 'callback': lambda c, t: progress_callback(c, t, "⬆️ Subiendo...")}
+        with open(output_path, 'rb') as file_handle:
+            if os.path.splitext(filename)[1].lower() == '.gif':
+                await bot_instance.send_animation(user_id, animation=file_handle, filename=filename, **common_args)
+            elif file_type == 'video':
+                await bot_instance.send_video(user_id, video=file_handle, filename=filename, **common_args)
+            elif file_type == 'audio':
+                await bot_instance.send_audio(user_id, audio=file_handle, filename=filename, **common_args)
+            else:
+                await bot_instance.send_document(user_id, document=file_handle, filename=filename, **common_args)
 
 async def _download_file_helper(file_id: str, file_size: int | None, download_path: str):
     """Función auxiliar para descargar un archivo, priorizando el Userbot."""
@@ -154,8 +180,6 @@ async def _handle_standard_task(task, files_to_clean):
     if file_type == 'audio' and 'audio_tags' in config: await _apply_audio_tags(output_path, config['audio_tags'], files_to_clean)
     return output_path
 
-# ... (_handle_special_task, process_task, y worker_thread_runner no cambian significativamente en su lógica principal, pero se benefician de la descarga helper)
-
 async def _handle_special_task(task, files_to_clean):
     special_type = task.get('special_type'); task_id = task['_id']; config = task.get('processing_config', {}); source_task_ids = config.get('source_task_ids', []); source_tasks = db_instance.get_multiple_tasks(source_task_ids)
     if special_type == "zip_bulk":
@@ -199,15 +223,22 @@ async def process_task(task: dict):
     try:
         if special_type := task.get('special_type'): output_path = await _handle_special_task(task, files_to_clean)
         else: output_path = await _handle_standard_task(task, files_to_clean)
-        if not output_path or not os.path.exists(output_path): raise Exception("No se generó el archivo de salida.")
-        await _edit_status_message("⬆️ Subiendo resultado..."); progress_data['start_time'] = time.time()
+        
+        if not output_path or not os.path.exists(output_path): 
+            raise Exception("No se generó el archivo de salida.")
+            
+        progress_data['start_time'] = time.time()
         config = task.get('processing_config', {}); caption = config.get('final_caption', f"✅ Proceso completado, Jefe.")
         reply_markup = InlineKeyboardMarkup.from_dict(config['reply_markup']) if 'reply_markup' in config else None
-        with open(output_path, 'rb') as f: await _upload_file(user_id, f, os.path.basename(output_path), task.get('file_type'), caption, reply_markup)
-        db_instance.update_task(task_id, "status", "done"); await status_message.delete()
+        
+        await _upload_file(user_id, output_path, task.get('file_type'), caption, reply_markup)
+        
+        db_instance.update_task(task_id, "status", "done"); 
+        await status_message.delete()
     except Exception as e:
         logger.critical(f"Error al procesar la tarea {task_id}: {e}", exc_info=True)
-        db_instance.update_task(task_id, "status", "error"); await _edit_status_message(f"❌ Error grave:\n<code>{escape_html(str(e))}</code>")
+        db_instance.update_task(task_id, "status", "error"); 
+        await _edit_status_message(f"❌ Error grave:\n<code>{escape_html(str(e))}</code>")
     finally:
         for fpath in files_to_clean:
             try:
@@ -223,7 +254,11 @@ def worker_thread_runner():
     while True:
         try:
             task = db_instance.tasks.find_one_and_update({"status": "queued"}, {"$set": {"status": "processing", "processed_at": datetime.utcnow()}})
-            if task: logger.info(f"[WORKER] Procesando tarea {task['_id']}"); loop.run_until_complete(process_task(task))
-            else: time.sleep(5)
+            if task: 
+                logger.info(f"[WORKER] Procesando tarea {task['_id']}")
+                loop.run_until_complete(process_task(task))
+            else: 
+                time.sleep(5)
         except Exception as e:
-            logger.critical(f"[WORKER] Bucle falló críticamente: {e}", exc_info=True); time.sleep(30)
+            logger.critical(f"[WORKER] Bucle falló críticamente: {e}", exc_info=True)
+            time.sleep(30)
