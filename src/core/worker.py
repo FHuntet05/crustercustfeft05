@@ -11,7 +11,7 @@ from src.db.mongo_manager import db_instance
 from src.helpers.utils import format_status_message, sanitize_filename
 from src.core import ffmpeg, downloader
 from src.core.userbot_manager import userbot_instance
-from src.core.ffmpeg import get_media_info # <-- ESTA ES LA LÍNEA CORREGIDA
+from src.core.ffmpeg import get_media_info
 
 logger = logging.getLogger(__name__)
 DOWNLOAD_DIR, OUTPUT_DIR = os.path.join(os.getcwd(), "downloads"), os.path.join(os.getcwd(), "outputs")
@@ -88,7 +88,6 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
             processed_sec = h * 3600 + m * 60 + s + ms / 100
             percentage = (processed_sec / total_duration_sec) * 100
             
-            # Reutilizamos el callback de progreso para la UI
             await progress_callback(processed_sec, total_duration_sec, user_id, "⚙️ Codificando...", "FFmpeg")
     
     stdout, stderr = await process.communicate()
@@ -136,15 +135,15 @@ async def _download_file_helper(task: dict, download_path: str):
 
     dl_progress = lambda c, t: progress_callback(c, t, user_id, "📥 Descargando...")
     
-    if userbot_instance.is_active() and task.get('chat_id') and task.get('message_id'):
-        await userbot_instance.download_file(task['chat_id'], task['message_id'], download_path, dl_progress)
+    if userbot_instance.is_active() and task.get('message_url'):
+        await userbot_instance.download_file(task['message_url'], download_path, dl_progress)
     elif task.get('file_id') and task.get('file_size', 0) <= BOT_API_DOWNLOAD_LIMIT:
         ctx = progress_tracker.get(user_id)
         if not ctx: raise Exception("Contexto de progreso no encontrado para la descarga con bot API.")
         file_from_api = await ctx.bot.get_file(task['file_id'])
-        await file_from_api.download_to_drive(download_path) # El callback de progreso no es fiable aquí
+        await file_from_api.download_to_drive(download_path)
     else:
-        raise Exception("Archivo requiere Userbot para descargar (privado, grande o sin `file_id`).")
+        raise Exception("Archivo requiere Userbot para descargar (sin URL) o excede el límite de la API de Bots.")
 
 
 async def process_task(bot, task: dict):
@@ -161,12 +160,12 @@ async def process_task(bot, task: dict):
 
         if url := task.get('url'):
             format_id = task.get('processing_config', {}).get('download_format_id', 'best')
-            if not downloader.download_from_url(url, download_path, format_id, lambda d: None): # progreso de yt-dlp es por consola
+            if not downloader.download_from_url(url, download_path, format_id, lambda d: None):
                 raise Exception("La descarga desde la URL falló.")
-        elif file_id := task.get('file_id'):
+        elif task.get('message_url') or task.get('file_id'):
             await _download_file_helper(task, download_path)
         else:
-            raise Exception("La tarea no tiene ni URL ni file_id para descargar.")
+            raise Exception("La tarea no tiene URL, message_url ni file_id para descargar.")
         
         await _edit_status_message(user_id, "⚙️ Preparando para procesar...")
         config = task.get('processing_config', {})

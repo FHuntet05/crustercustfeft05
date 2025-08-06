@@ -68,58 +68,25 @@ class UserbotManager:
         """Comprueba si el cliente está inicializado y conectado."""
         return self.client and self.client.is_connected
 
-    async def download_file(self, chat_id: int, message_id: int, download_path: str, progress_callback=None):
+    async def download_file(self, message_url: str, download_path: str, progress_callback=None):
         """
-        Descarga un archivo, manejando mensajes directos y todos los tipos de reenvíos.
+        Descarga un archivo usando su URL universal de Telegram (t.me).
+        Este es el método más robusto para evitar problemas de contexto.
         """
         if not self.is_active():
             raise ConnectionError("El Userbot no está activo o conectado.")
         
         try:
-            logger.info(f"[USERBOT] Obteniendo mensaje contenedor {message_id} del chat {chat_id}")
-            wrapper_message = await self.client.get_messages(chat_id, message_id)
-            
-            # --- SONDA DE DIAGNÓSTICO ---
-            logger.info(f"[USERBOT] ESTRUCTURA DEL MENSAJE: {wrapper_message}")
-            # ---------------------------
-
-            if not wrapper_message:
-                raise FileNotFoundError(f"El mensaje {message_id} no fue encontrado en el chat {chat_id}.")
-
-            message_to_download = None
-
-            # Escenario 1: El mensaje tiene el medio directamente
-            if wrapper_message.media:
-                logger.info("[USERBOT] Escenario 1: Medio directo detectado en el mensaje contenedor.")
-                message_to_download = wrapper_message
-            
-            # Escenario 2: El mensaje es un reenvío anónimo/privado
-            elif wrapper_message.forward_date and hasattr(wrapper_message, 'forward') and wrapper_message.forward.media:
-                logger.info("[USERBOT] Escenario 2: Reenvío privado/anónimo detectado. Usando el objeto de mensaje anidado.")
-                message_to_download = wrapper_message.forward
-
-            # Escenario 3: El mensaje es un reenvío público (con link al original)
-            elif wrapper_message.forward_from_message_id:
-                logger.info("[USERBOT] Escenario 3: Reenvío público detectado. Obteniendo mensaje original.")
-                original_chat_id = wrapper_message.forward_from_chat.id
-                original_message_id = wrapper_message.forward_from_message_id
-                message_to_download = await self.client.get_messages(original_chat_id, original_message_id)
-            
-            # Validación final
-            if not message_to_download or not message_to_download.media:
-                raise ValueError("No se encontró un archivo descargable en el mensaje directo, ni en un posible reenvío anónimo o público.")
-
-            # Proceder con la descarga
-            logger.info(f"[USERBOT] Procediendo a descargar desde el mensaje {message_to_download.id} del chat {message_to_download.chat.id}")
+            logger.info(f"[USERBOT] Intentando descarga universal con URL: {message_url}")
             await self.client.download_media(
-                message=message_to_download,
+                message=message_url,
                 file_name=download_path,
                 progress=progress_callback
             )
-            logger.info(f"[USERBOT] Descarga completada exitosamente en {download_path}")
+            logger.info(f"[USERBOT] Descarga universal completada exitosamente en {download_path}")
 
         except Exception as e:
-            logger.error(f"[USERBOT] Falló la descarga del mensaje {message_id}. Error: {e}")
+            logger.error(f"[USERBOT] Falló la descarga universal desde {message_url}. Error: {e}")
             raise
 
 # Instancia única para ser importada globalmente

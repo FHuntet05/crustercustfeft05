@@ -20,7 +20,6 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user:
         return
 
-    # Comprobar si hay una configuración activa que espera un archivo (para carátulas, etc.)
     if config := context.user_data.get('active_config'):
         if config.get('menu_type') == 'audiotags' and config.get('stage') == 'cover':
             await processing_handler.handle_cover_art_input(update, context, config)
@@ -29,7 +28,6 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await processing_handler.handle_track_input(update, context, config)
             return
 
-    # Flujo normal: tratarlo como una nueva tarea para el panel
     greeting_prefix = get_greeting(user.id)
     message = update.effective_message
     
@@ -44,15 +42,22 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning("any_file_handler recibió un mensaje sin archivo adjunto válido.")
         return
 
-    # Capturar el contexto completo del mensaje para el Userbot
+    # --- INGENIERÍA DE REFERENCIA ROBUSTA ---
+    chat = message.chat
+    if chat.username:
+        message_url = f"https://t.me/{chat.username}/{message.message_id}"
+    else:
+        # Para chats privados, el ID empieza con -100, quitamos eso para el enlace
+        chat_id_short = str(chat.id).replace("-100", "")
+        message_url = f"https://t.me/c/{chat_id_short}/{message.message_id}"
+    
     task_id = db_instance.add_task(
         user_id=user.id,
         file_type=file_type,
         file_id=file_obj.file_id,
         file_name=sanitize_filename(getattr(file_obj, 'file_name', "Archivo Sin Nombre")),
         file_size=file_obj.file_size,
-        message_id=message.message_id,
-        chat_id=message.chat_id
+        message_url=message_url # <-- GUARDAMOS LA URL
     )
 
     if task_id:
