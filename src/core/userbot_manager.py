@@ -3,7 +3,7 @@ import logging
 import asyncio
 from pyrogram import Client
 from pyrogram.errors import AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated
-from pyrogram.errors.exceptions.user_and_chats import UserAlreadyParticipant, InviteRequestSent
+from pyrogram.errors import UserAlreadyParticipant, InviteRequestSent
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ class UserbotManager:
             from_chat_id = chat_id
             msg_id = message_id
 
-            # Unión proactiva al chat de origen (solo relevante para chats públicos)
+            # Unión proactiva al chat de origen (solo relevante para canales/grupos)
             try:
                 if from_chat_id < 0: # IDs negativos suelen ser canales/grupos
                     logger.info(f"[USERBOT] Intentando unirse proactivamente a {from_chat_id}...")
