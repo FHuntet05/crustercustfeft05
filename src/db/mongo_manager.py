@@ -1,3 +1,5 @@
+# src/db/mongo_manager.py
+
 import os
 import motor.motor_asyncio
 import logging
@@ -19,15 +21,18 @@ class Database:
                 if not mongo_uri: raise ValueError("MONGO_URI no está definida.")
                 cls._instance.client = motor.motor_asyncio.AsyncIOMotorClient(mongo_uri)
                 cls._instance.db = cls._instance.client.get_database("JefesMediaSuiteDB")
+                # Colecciones principales
                 cls._instance.tasks = cls._instance.db.tasks
                 cls._instance.user_settings = cls._instance.db.user_settings
+                # Nueva colección para resultados de búsqueda
+                cls._instance.search_results = cls._instance.db.search_results
                 logger.info("Cliente de base de datos Motor (asíncrono) inicializado.")
             except Exception as e:
                 logger.critical(f"FALLO CRÍTICO DB: {e}")
                 raise ConnectionError(f"No se pudo inicializar el cliente de la DB: {e}")
         return cls._instance
 
-    async def add_task(self, user_id, file_type, file_name=None, file_size=None, url=None, file_id=None, message_id=None, processing_config=None):
+    async def add_task(self, user_id, file_type, file_name=None, file_size=None, url=None, file_id=None, message_id=None, processing_config=None, url_info=None):
         task_doc = {
             "user_id": int(user_id),
             "url": url,
@@ -41,6 +46,7 @@ class Database:
             "created_at": datetime.utcnow(),
             "processed_at": None,
             "processing_config": processing_config or {},
+            "url_info": url_info or {}, # Guardar la info de la URL
             "last_error": None,
         }
         try:

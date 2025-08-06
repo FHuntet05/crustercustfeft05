@@ -1,3 +1,5 @@
+# src/helpers/keyboards.py
+
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from .utils import escape_html, format_bytes
 
@@ -24,6 +26,10 @@ def build_processing_menu(task_id: str, file_type: str, task_config: dict, filen
     """Construye el menú principal de procesamiento para una tarea."""
     keyboard = []
     
+    # Menú específico para tareas de URL que aún no han sido descargadas
+    if task_config.get('url_info') and not task_config.get('download_format_id'):
+         keyboard.append([InlineKeyboardButton("💿 Elegir Calidad de Descarga", callback_data=f"config_dlquality_{task_id}")])
+
     if file_type == 'video':
         quality_text = f"⚙️ Convertir ({task_config.get('quality', 'Original')})"
         mute_text = "🔇 Silenciar" if not task_config.get('mute_audio') else "🔊 Desilenciar"
@@ -43,7 +49,6 @@ def build_processing_menu(task_id: str, file_type: str, task_config: dict, filen
             [InlineKeyboardButton("🖼️ Editar Tags", callback_data=f"config_audiotags_{task_id}")],
         ])
 
-    # Botones comunes a todos los tipos de archivo
     keyboard.extend([
         [InlineKeyboardButton("✏️ Renombrar", callback_data=f"config_rename_{task_id}")],
         [InlineKeyboardButton("🔙 Volver al Panel", callback_data="panel_show"), InlineKeyboardButton("🔥 Procesar Ahora", callback_data=f"task_queuesingle_{task_id}")]
@@ -54,6 +59,7 @@ def build_processing_menu(task_id: str, file_type: str, task_config: dict, filen
 def build_quality_menu(task_id: str) -> InlineKeyboardMarkup:
     """Construye el menú para seleccionar la calidad de un video."""
     keyboard = [
+        [InlineKeyboardButton("Original", callback_data=f"set_quality_{task_id}_Original")],
         [InlineKeyboardButton("🎬 1080p", callback_data=f"set_quality_{task_id}_1080p")],
         [InlineKeyboardButton("🎬 720p", callback_data=f"set_quality_{task_id}_720p")],
         [InlineKeyboardButton("🎬 480p", callback_data=f"set_quality_{task_id}_480p")],
@@ -71,29 +77,46 @@ def build_download_quality_menu(task_id: str, formats: list) -> InlineKeyboardMa
     
     if video_formats:
         keyboard.append([InlineKeyboardButton("--- 🎬 Video ---", callback_data="noop")])
-        for f in video_formats[:5]: # Mostrar solo los 5 mejores formatos de video
-            label = f"{f.get('resolution', f.get('height', 0))}p ({f.get('ext')}) ~{format_bytes(f.get('filesize'))}".strip()
+        for f in video_formats[:5]:
+            label = f"{f.get('resolution', f.get('height', '...'))} ({f.get('ext')}) ~{format_bytes(f.get('filesize') or f.get('filesize_approx'))}".strip()
             keyboard.append([InlineKeyboardButton(label, callback_data=f"set_dlformat_{task_id}_{f.get('format_id')}")])
             
     if audio_formats:
         keyboard.append([InlineKeyboardButton("--- 🎵 Audio ---", callback_data="noop")])
-        for f in audio_formats[:3]: # Mostrar solo los 3 mejores formatos de audio
-            label = f"Audio {f.get('acodec')} ~{int(f.get('abr',0))}k ~{format_bytes(f.get('filesize'))}".strip()
+        for f in audio_formats[:3]:
+            label = f"Audio {f.get('acodec')} ~{int(f.get('abr',0))}k ~{format_bytes(f.get('filesize') or f.get('filesize_approx'))}".strip()
             keyboard.append([InlineKeyboardButton(label, callback_data=f"set_dlformat_{task_id}_{f.get('format_id')}")])
             
     keyboard.append([InlineKeyboardButton("🔙 Volver al Panel", callback_data="panel_show")])
     return InlineKeyboardMarkup(keyboard)
 
+def build_search_results_keyboard(results: list) -> InlineKeyboardMarkup:
+    """Construye el teclado para los resultados de búsqueda de música."""
+    keyboard = []
+    source_emojis = {"spotify": "🟢", "youtube": "🔴"}
+    for res in results:
+        res_id = str(res['_id'])
+        source_emoji = source_emojis.get(res.get('source', 'youtube'), '❓')
+        title = res.get('title', 'Título desconocido')
+        artist = res.get('artist', 'Artista desconocido')
+        
+        display_text = f"{source_emoji} {title} - {artist}"
+        short_text = (display_text[:60] + '...') if len(display_text) > 64 else display_text
+
+        keyboard.append([InlineKeyboardButton(short_text, callback_data=f"song_select_{res_id}")])
+    
+    keyboard.append([InlineKeyboardButton("❌ Cancelar Búsqueda", callback_data="cancel_search")])
+    return InlineKeyboardMarkup(keyboard)
+
+
 def build_audio_convert_menu(task_id: str) -> InlineKeyboardMarkup:
     """Construye el menú para configurar la conversión de audio."""
     keyboard = [
-        # Fila de formatos
         [
             InlineKeyboardButton("MP3", callback_data=f"set_audioprop_{task_id}_format_mp3"),
             InlineKeyboardButton("FLAC", callback_data=f"set_audioprop_{task_id}_format_flac"),
             InlineKeyboardButton("Opus", callback_data=f"set_audioprop_{task_id}_format_opus")
         ],
-        # Fila de bitrates
         [
             InlineKeyboardButton("128k", callback_data=f"set_audioprop_{task_id}_bitrate_128k"),
             InlineKeyboardButton("192k", callback_data=f"set_audioprop_{task_id}_bitrate_192k"),

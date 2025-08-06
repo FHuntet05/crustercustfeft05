@@ -52,8 +52,6 @@ async def progress_callback(current, total, user_id, operation):
     if user_id not in progress_tracker: return
     ctx = progress_tracker[user_id]
     
-    # --- CORRECCIÓN CRÍTICA DE LA BARRA DE PROGRESO ---
-    # Usar el 'total' del callback, pero si es 0, usar el 'file_size' guardado en la tarea.
     final_total = total or ctx.task.get('file_size', 0)
 
     percentage = (current / final_total) * 100 if final_total > 0 else 0
@@ -70,7 +68,7 @@ async def progress_callback(current, total, user_id, operation):
         filename=ctx.task.get('original_filename', 'archivo'),
         percentage=percentage,
         processed_bytes=current,
-        total_bytes=final_total, # Usamos el total corregido
+        total_bytes=final_total,
         speed=speed,
         eta=eta,
         engine="Pyrogram",
@@ -158,13 +156,23 @@ async def process_task(bot, task: dict):
         files_to_clean.add(output_path)
         
         commands = ffmpeg.build_ffmpeg_command(task, download_path, output_path)
-        for i, cmd in enumerate(commands):
-            if not cmd: continue
-            await _run_ffmpeg_with_progress(user_id, cmd, download_path)
-        
+        if commands and commands[0]: # Si hay un comando que ejecutar
+            await _edit_status_message(user_id, "⚙️ Iniciando codificación...")
+            for cmd in commands:
+                await _run_ffmpeg_with_progress(user_id, cmd, download_path)
+            
+            # --- CORRECCIÓN Y OPTIMIZACIÓN DEL FLUJO ---
+            await _edit_status_message(user_id, "⚙️ Finalizando proceso...")
+            await asyncio.sleep(1) # Pequeña pausa para que el usuario vea el mensaje
+        else:
+            # Si no hay comandos, significa que es una copia directa (renombrar)
+            logger.info("No se requiere procesamiento FFmpeg, se moverá el archivo.")
+            os.rename(download_path, output_path)
+
         caption = config.get('final_caption', f"✅ Proceso completado.")
         file_type = task.get('file_type')
         
+        # El callback de progreso se reiniciará automáticamente para la subida
         if file_type == 'video':
             await bot.send_video(user_id, video=output_path, caption=caption, progress=progress_callback, progress_args=(user_id, "⬆️ Subiendo..."))
         elif file_type == 'audio':
