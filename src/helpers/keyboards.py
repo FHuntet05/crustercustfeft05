@@ -71,23 +71,31 @@ def build_quality_menu(task_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
     
 def build_download_quality_menu(task_id: str, formats: list) -> InlineKeyboardMarkup:
-    """Construye el menú de calidades de descarga para una URL."""
+    """Construye el menú de calidades de descarga para una URL, separando video y audio."""
     keyboard = []
     
-    video_formats = sorted([f for f in formats if f.get('vcodec', 'none') != 'none' and f.get('height')], key=lambda x: x.get('height', 0), reverse=True)
-    audio_formats = sorted([f for f in formats if f.get('vcodec', 'none') == 'none' and f.get('abr')], key=lambda x: x.get('abr', 0), reverse=True)
+    video_formats = sorted(
+        [f for f in formats if f.get('vcodec', 'none') != 'none' and f.get('acodec', 'none') != 'none' and f.get('height')],
+        key=lambda x: x.get('height', 0),
+        reverse=True
+    )
+    audio_formats = sorted(
+        [f for f in formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none' and f.get('abr')],
+        key=lambda x: x.get('abr', 0),
+        reverse=True
+    )
     
     if video_formats:
         keyboard.append([InlineKeyboardButton("--- 🎬 Video ---", callback_data="noop")])
-        for f in video_formats[:5]:
+        for f in video_formats[:5]: # Limitar a 5 para no saturar
             resolution = f.get('resolution') or f.get('height')
             filesize = f.get('filesize') or f.get('filesize_approx')
             label = f"{resolution} ({f.get('ext')}) ~{format_bytes(filesize)}".strip()
             keyboard.append([InlineKeyboardButton(label, callback_data=f"set_dlformat_{task_id}_{f.get('format_id')}")])
             
     if audio_formats:
-        keyboard.append([InlineKeyboardButton("--- 🎵 Audio ---", callback_data="noop")])
-        for f in audio_formats[:3]:
+        keyboard.append([InlineKeyboardButton("--- 🎵 Solo Audio ---", callback_data="noop")])
+        for f in audio_formats[:4]: # Limitar a 4 para no saturar
             filesize = f.get('filesize') or f.get('filesize_approx')
             label = f"Audio {f.get('acodec')} ~{int(f.get('abr',0))}k ~{format_bytes(filesize)}".strip()
             keyboard.append([InlineKeyboardButton(label, callback_data=f"set_dlformat_{task_id}_{f.get('format_id')}")])
@@ -99,13 +107,11 @@ def build_search_results_keyboard(all_results: list, search_id: str, page: int =
     """Construye el teclado paginado para los resultados de búsqueda de música."""
     keyboard = []
     
-    # Paginación
     start_index = (page - 1) * page_size
     end_index = start_index + page_size
     paginated_results = all_results[start_index:end_index]
     total_pages = math.ceil(len(all_results) / page_size)
 
-    # Construir botones de resultados
     for res in paginated_results:
         res_id = str(res['_id'])
         duration = format_time(res.get('duration'))
@@ -116,7 +122,6 @@ def build_search_results_keyboard(all_results: list, search_id: str, page: int =
         short_text = (display_text[:60] + '...') if len(display_text) > 64 else display_text
         keyboard.append([InlineKeyboardButton(short_text, callback_data=f"song_select_{res_id}")])
     
-    # Construir botones de paginación
     nav_buttons = []
     if page > 1:
         nav_buttons.append(InlineKeyboardButton("⬅️ Anterior", callback_data=f"search_page_{search_id}_{page - 1}"))

@@ -3,7 +3,7 @@
 import os
 import motor.motor_asyncio
 import logging
-from pymongo.errors import OperationFailure # <-- IMPORTANTE
+from pymongo.errors import OperationFailure
 from datetime import datetime
 from dotenv import load_dotenv
 from bson.objectid import ObjectId
@@ -38,7 +38,6 @@ class Database:
             return
         logger.info("Asegurando índices de la base de datos...")
         try:
-            # <-- CAMBIO: Se añade try-except para manejar conflictos de índices existentes
             await self.search_sessions.create_index("created_at", expireAfterSeconds=3600, name="search_sessions_ttl")
             await self.search_results.create_index("created_at", expireAfterSeconds=3600, name="search_results_ttl")
             logger.info("Índices TTL de búsqueda verificados y listos.")
@@ -50,8 +49,6 @@ class Database:
         finally:
             self._initialized = True
 
-
-    # ... (El resto de las funciones permanecen sin cambios) ...
     async def add_task(self, user_id, file_type, file_name=None, file_size=None, url=None, file_id=None, message_id=None, processing_config=None, url_info=None):
         task_doc = {
             "user_id": int(user_id), "url": url, "file_id": file_id, "message_id": message_id,

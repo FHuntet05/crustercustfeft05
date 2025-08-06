@@ -1,3 +1,5 @@
+# src/core/worker.py
+
 import logging
 import time
 import os
@@ -38,66 +40,109 @@ async def _edit_status_message(user_id: int, text: str):
     current_time = time.time()
     if current_time - ctx.last_edit_time > 1.5:
         try:
+            user_mention = "Usuario"
+            if hasattr(ctx.message, 'chat') and ctx.message.chat:
+                user_mention = ctx.message.chat.mention
+            
+            # Reemplazar el placeholder del mention si existe
+            final_text = text.replace("{mention}", user_mention)
+
             await ctx.bot.edit_message_text(
                 chat_id=ctx.message.chat.id, 
                 message_id=ctx.message.id, 
-                text=text, 
+                text=final_text, 
                 parse_mode=ParseMode.HTML
             )
             ctx.last_edit_time = current_time
-        except Exception:
+        except Exception as e:
+            # logger.warning(f"No se pudo editar el mensaje de estado: {e}")
             pass
 
-async def progress_callback(current, total, user_id, operation):
+async def _progress_callback_pyrogram(current, total, user_id, operation):
+    """Callback para descargas/subidas de Pyrogram."""
     if user_id not in progress_tracker: return
     ctx = progress_tracker[user_id]
     
-    final_total = total or ctx.task.get('file_size', 0)
-
-    percentage = (current / final_total) * 100 if final_total > 0 else 0
     elapsed = time.time() - ctx.start_time
     speed = current / elapsed if elapsed > 0 else 0
-    eta = (final_total - current) / speed if speed > 0 else 0
+    eta = (total - current) / speed if speed > 0 else 0
+    percentage = (current / total) * 100 if total > 0 else 0
     
-    user_mention = "Usuario"
-    if hasattr(ctx.message, 'from_user') and ctx.message.from_user:
-        user_mention = ctx.message.from_user.mention
-
     text = format_status_message(
         operation=operation,
         filename=ctx.task.get('original_filename', 'archivo'),
         percentage=percentage,
         processed_bytes=current,
-        total_bytes=final_total,
+        total_bytes=total,
         speed=speed,
         eta=eta,
         engine="Pyrogram",
         user_id=user_id,
-        user_mention=user_mention
+        user_mention="{mention}"
     )
     await _edit_status_message(user_id, text)
+
+def _progress_hook_yt_dlp(d, user_id, operation):
+    """Hook para descargas de yt-dlp. Es síncrono, por lo que crea una tarea asyncio."""
+    if d['status'] == 'downloading':
+        total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+        downloaded_bytes = d.get('downloaded_bytes', 0)
+        if total_bytes > 0:
+            speed = d.get('speed', 0)
+            eta = d.get('eta', 0)
+            percentage = (downloaded_bytes / total_bytes) * 100
+            
+            ctx = progress_tracker.get(user_id)
+            if not ctx: return
+
+            text = format_status_message(
+                operation=operation,
+                filename=ctx.task.get('original_filename', 'archivo'),
+                percentage=percentage,
+                processed_bytes=downloaded_bytes,
+                total_bytes=total_bytes,
+                speed=speed,
+                eta=eta,
+                engine="yt-dlp",
+                user_id=user_id,
+                user_mention="{mention}"
+            )
+            asyncio.run_coroutine_threadsafe(_edit_status_message(user_id, text), asyncio.get_event_loop())
 
 async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
     duration_info = get_media_info(input_path)
     total_duration_sec = float(duration_info.get('format', {}).get('duration', 0))
-    if total_duration_sec == 0:
-        logger.warning("No se pudo obtener la duración, el progreso de FFmpeg no funcionará.")
+    if total_duration_sec == 0: logger.warning("No se pudo obtener la duración, el progreso de FFmpeg no funcionará.")
+    
     time_pattern = re.compile(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})")
-    process = await asyncio.create_subprocess_shell(
-        cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
+    process = await asyncio.create_subprocess_shell(cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    
+    ctx = progress_tracker.get(user_id)
+    start_time = time.time()
+
     all_stderr_lines = []
     while True:
         line = await process.stderr.readline()
-        if not line:
-            break
+        if not line: break
         line_str = line.decode('utf-8', 'ignore').strip()
         all_stderr_lines.append(line_str)
         match = time_pattern.search(line_str)
         if match and total_duration_sec > 0:
             h, m, s, ms = map(int, match.groups())
             processed_sec = h * 3600 + m * 60 + s + ms / 100
-            await progress_callback(processed_sec, total_duration_sec, user_id, "⚙️ Codificando...")
+            percentage = (processed_sec / total_duration_sec) * 100
+            elapsed = time.time() - start_time
+            speed_factor = processed_sec / elapsed if elapsed > 0 else 0
+            eta = (total_duration_sec - processed_sec) / speed_factor if speed_factor > 0 else 0
+            
+            text = format_status_message(
+                operation="⚙️ Codificando...", filename=ctx.task.get('original_filename', 'archivo'),
+                percentage=percentage, processed_bytes=processed_sec, total_bytes=total_duration_sec,
+                speed=0, eta=eta, engine="FFmpeg", user_id=user_id,
+                user_mention="{mention}"
+            )
+            await _edit_status_message(user_id, text)
+            
     await process.wait()
     if process.returncode != 0:
         error_message = "\n".join(all_stderr_lines)
@@ -120,66 +165,70 @@ async def process_task(bot, task: dict):
 
         download_path = os.path.join(DOWNLOAD_DIR, f"{task_id}_{sanitize_filename(task.get('original_filename', 'file'))}")
         files_to_clean.add(download_path)
-
+        
+        thumbnail_path = download_path + ".jpg"
+        if os.path.exists(thumbnail_path): # Limpiar si existe de una ejecución anterior
+            os.remove(thumbnail_path)
+        files_to_clean.add(thumbnail_path)
+        
         if url := task.get('url'):
-            logger.info(f"Iniciando descarga de URL para la tarea {task_id}")
-            format_id = task.get('processing_config', {}).get('download_format_id', 'best')
-            if not downloader.download_from_url(url, download_path, format_id, lambda d: None):
+            config = task.get('processing_config', {})
+            format_id = config.get('download_format_id', 'best')
+            if not await asyncio.to_thread(downloader.download_from_url, url, download_path, format_id, lambda d: _progress_hook_yt_dlp(d, user_id, "📥 Descargando...")):
                 raise Exception("La descarga desde la URL falló.")
         elif file_id := task.get('file_id'):
-            logger.info(f"Iniciando descarga de Telegram para la tarea {task_id}")
-            await bot.download_media(
-                message=file_id, file_name=download_path,
-                progress=progress_callback, progress_args=(user_id, "📥 Descargando...")
-            )
+            progress_tracker[user_id].start_time = time.time() # Reiniciar timer para la descarga
+            await bot.download_media(message=file_id, file_name=download_path, progress=_progress_callback_pyrogram, progress_args=(user_id, "📥 Descargando..."))
         else:
             raise Exception("La tarea no tiene URL ni file_id para descargar.")
         
         logger.info(f"Descarga de la tarea {task_id} completada en: {download_path}")
-
         await _edit_status_message(user_id, "⚙️ Preparando para procesar...")
+        
         config = task.get('processing_config', {})
+        file_type = task.get('file_type')
+        final_filename_base = sanitize_filename(config.get('final_filename', os.path.splitext(task.get('original_filename', 'procesado'))[0]))
         
-        original_filename = task.get('original_filename', 'archivo.dat')
-        base_name, original_ext = os.path.splitext(original_filename)
-        final_filename_base = sanitize_filename(config.get('final_filename', base_name))
-        
-        final_ext = original_ext
+        final_ext = ".dat"
         if 'gif_options' in config:
             final_ext = ".gif"
-        elif task.get('file_type') == 'audio' and 'audio_format' in config:
-            final_ext = f".{config['audio_format']}"
-            
+        elif file_type == 'audio':
+            final_ext = f".{config.get('audio_format', 'mp3')}"
+        elif file_type == 'video':
+            final_ext = ".mp4"
+        else:
+            _, original_ext = os.path.splitext(task.get('original_filename', '.dat'))
+            final_ext = original_ext if original_ext else '.dat'
+
         final_filename = f"{final_filename_base}{final_ext}"
-        
         output_path = os.path.join(OUTPUT_DIR, final_filename)
         files_to_clean.add(output_path)
-        
+
         commands = ffmpeg.build_ffmpeg_command(task, download_path, output_path)
-        if commands and commands[0]: # Si hay un comando que ejecutar
+        if commands and commands[0]:
+            progress_tracker[user_id].start_time = time.time() # Reiniciar timer para la codificación
             await _edit_status_message(user_id, "⚙️ Iniciando codificación...")
-            for cmd in commands:
-                await _run_ffmpeg_with_progress(user_id, cmd, download_path)
-            
-            # --- CORRECCIÓN Y OPTIMIZACIÓN DEL FLUJO ---
-            await _edit_status_message(user_id, "⚙️ Finalizando proceso...")
-            await asyncio.sleep(1) # Pequeña pausa para que el usuario vea el mensaje
+            for cmd in commands: await _run_ffmpeg_with_progress(user_id, cmd, download_path)
         else:
-            # Si no hay comandos, significa que es una copia directa (renombrar)
-            logger.info("No se requiere procesamiento FFmpeg, se moverá el archivo.")
+            if os.path.exists(output_path): os.remove(output_path)
             os.rename(download_path, output_path)
 
-        caption = config.get('final_caption', f"✅ Proceso completado.")
-        file_type = task.get('file_type')
+        caption = f"✅ <code>{escape_html(final_filename)}</code>"
+        sent_message = None
         
-        # El callback de progreso se reiniciará automáticamente para la subida
+        progress_tracker[user_id].start_time = time.time() # Reiniciar timer para la subida
+        thumb_to_use = thumbnail_path if os.path.exists(thumbnail_path) else None
+
         if file_type == 'video':
-            await bot.send_video(user_id, video=output_path, caption=caption, progress=progress_callback, progress_args=(user_id, "⬆️ Subiendo..."))
+            sent_message = await bot.send_video(user_id, video=output_path, thumb=thumb_to_use, caption=caption, progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
         elif file_type == 'audio':
-            await bot.send_audio(user_id, audio=output_path, caption=caption, progress=progress_callback, progress_args=(user_id, "⬆️ Subiendo..."))
+            sent_message = await bot.send_audio(user_id, audio=output_path, thumb=thumb_to_use, caption=caption, progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
         else:
-            await bot.send_document(user_id, document=output_path, caption=caption, progress=progress_callback, progress_args=(user_id, "⬆️ Subiendo..."))
+            sent_message = await bot.send_document(user_id, document=output_path, thumb=thumb_to_use, caption=caption, progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
         
+        if sent_message and (lyrics := config.get('lyrics')):
+            await bot.send_message(user_id, text=f"📜 <b>Letra</b>\n\n{escape_html(lyrics)}", reply_to_message_id=sent_message.id, parse_mode=ParseMode.HTML)
+
         await db_instance.update_task(task_id, "status", "done")
         await status_message.delete()
 
@@ -189,38 +238,23 @@ async def process_task(bot, task: dict):
         await db_instance.update_task(task_id, "last_error", str(e))
         await _edit_status_message(user_id, f"❌ <b>Error Grave</b>\n\n<code>{escape_html(str(e))}</code>")
     finally:
-        if user_id in progress_tracker:
-            del progress_tracker[user_id]
+        if user_id in progress_tracker: del progress_tracker[user_id]
         for fpath in files_to_clean:
             if os.path.exists(fpath): 
-                try: 
-                    os.remove(fpath)
-                    logger.info(f"Archivo temporal limpiado: {fpath}")
-                except Exception as e: 
-                    logger.error(f"No se pudo limpiar el archivo {fpath}: {e}")
+                try: os.remove(fpath)
+                except Exception as e: logger.error(f"No se pudo limpiar el archivo {fpath}: {e}")
 
 async def worker_loop(bot_instance):
     logger.info("[WORKER] Bucle del worker iniciado.")
     while True:
         try:
             task = await db_instance.tasks.find_one_and_update(
-                {"status": "queued"},
+                {"status": "queued", "user_id": {"$nin": list(progress_tracker.keys())}},
                 {"$set": {"status": "processing", "processed_at": datetime.utcnow()}}
             )
-            
             if task:
-                user_id = task['user_id']
-                if user_id in progress_tracker:
-                    logger.warning(f"El usuario {user_id} ya tiene una tarea en proceso. Re-encolando.")
-                    await db_instance.update_task(str(task['_id']), "status", "queued")
-                    await asyncio.sleep(10)
-                    continue
-                
-                logger.info(f"Iniciando procesamiento de la tarea {task['_id']} para el usuario {user_id}")
-                task_obj = asyncio.create_task(process_task(bot_instance, task))
-                task_obj.add_done_callback(
-                    lambda t: logger.error(f"La tarea falló con una excepción no recuperada: {t.exception()}", exc_info=t.exception()) if t.exception() else None
-                )
+                logger.info(f"Iniciando procesamiento de la tarea {task['_id']} para el usuario {task['user_id']}")
+                asyncio.create_task(process_task(bot_instance, task))
             else:
                 await asyncio.sleep(5)
         except Exception as e:

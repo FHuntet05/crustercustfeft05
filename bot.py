@@ -57,7 +57,6 @@ class MediaSuiteBot(Client):
             await db_instance.client.admin.command('ping')
             logger.info("Conexión con MongoDB Atlas establecida.")
             
-            # <-- CAMBIO: Llamamos a la inicialización de la DB aquí
             await db_instance.init_db()
 
         except Exception as e:

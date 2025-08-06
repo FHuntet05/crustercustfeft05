@@ -67,9 +67,9 @@ async def media_handler(client: Client, message: Message):
         else:
             await message.reply("❌ Hubo un error al registrar la tarea.")
 
-    else: # Es una URL
+    else: # Es una URL - CAMINO B (Interactivo)
         status_msg = await message.reply("🔎 Analizando enlace...", parse_mode=ParseMode.HTML)
-        info = downloader.get_url_info(message.text)
+        info = await asyncio.to_thread(downloader.get_url_info, message.text)
 
         if not info or not info.get('formats'):
             return await status_msg.edit("❌ No pude obtener información o formatos válidos de ese enlace.")
@@ -90,7 +90,7 @@ async def media_handler(client: Client, message: Message):
             f"✅ Enlace analizado:\n\n"
             f"<b>Título:</b> {escape_html(info['title'])}\n"
             f"<b>Canal:</b> {escape_html(info['uploader'])}\n\n"
-            "Seleccione la calidad que desea descargar:"
+            "Seleccione el formato que desea descargar:"
         )
         await status_msg.edit(text, reply_markup=keyboard, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
@@ -102,15 +102,14 @@ async def text_handler(client: Client, message: Message):
         # Esto es una respuesta a una configuración (ej. renombrar)
         await processing_handler.handle_text_input_for_config(client, message)
     elif not message.command:
-        # Esto es texto libre, lo tratamos como una búsqueda de música paginada
+        # Esto es texto libre, lo tratamos como una búsqueda de música - CAMINO A (Automático)
         query = message.text.strip()
         status_msg = await message.reply(f"🔎 Buscando música: <code>{escape_html(query)}</code>...", parse_mode=ParseMode.HTML)
         
-        search_results = downloader.search_music(query, limit=20)
+        search_results = await asyncio.to_thread(downloader.search_music, query, limit=20)
         if not search_results:
             return await status_msg.edit("❌ No encontré resultados para su búsqueda.")
 
-        # Crear una sesión de búsqueda para agrupar los resultados
         session_res = await db_instance.search_sessions.insert_one({
             "user_id": user_id,
             "query": query,
@@ -128,7 +127,6 @@ async def text_handler(client: Client, message: Message):
         if docs_to_insert:
             await db_instance.search_results.insert_many(docs_to_insert)
         
-        # Recuperamos los documentos insertados para tener los _id
         all_results_from_db = await db_instance.search_results.find({"search_id": search_id}).to_list(length=100)
             
         keyboard = build_search_results_keyboard(all_results_from_db, search_id, page=1)

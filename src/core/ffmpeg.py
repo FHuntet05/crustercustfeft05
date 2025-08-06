@@ -1,3 +1,5 @@
+# src/core/ffmpeg.py
+
 import logging
 import subprocess
 import shlex
@@ -68,21 +70,18 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str) -> list:
     
     force_recode_video = False
     force_recode_audio = False
-    force_recode_subtitle = False
     
     input_ext = os.path.splitext(input_path)[1].lower()
     output_ext = os.path.splitext(output_path)[1].lower()
     
-    if 'quality' in config:
+    if 'quality' in config and config['quality'] != 'Original':
         force_recode_video = True
         force_recode_audio = True
 
     if input_ext != output_ext:
-        logger.info(f"Cambio de contenedor detectado ({input_ext} -> {output_ext}).")
-        force_recode_video = True
+        logger.info(f"Cambio de contenedor detectado ({input_ext} -> {output_ext}). Forzando recodificación.")
+        if task.get('file_type') == 'video': force_recode_video = True
         force_recode_audio = True
-        if output_ext == '.mp4':
-            force_recode_subtitle = True
             
     # Asignar códecs basados en si se necesita recodificar o no
     if task.get('file_type') == 'video':
@@ -98,10 +97,7 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str) -> list:
         else:
             audio_codec_options.append("-c:a copy")
             
-        if force_recode_subtitle:
-            subtitle_codec_options.append("-c:s mov_text")
-        else:
-            subtitle_codec_options.append("-c:s copy")
+        subtitle_codec_options.append("-c:s mov_text" if output_ext == '.mp4' else "-c:s copy")
 
     elif task.get('file_type') == 'audio':
         fmt = config.get('audio_format', 'mp3')
@@ -129,9 +125,9 @@ def build_gif_command(config, input_path, output_path):
     duration, fps = gif_opts['duration'], gif_opts['fps']
     palette_path = f"{output_path}.palette.png"
     filters = f"fps={fps},scale=480:-1:flags=lanczos"
-    cmd1 = (f"ffmpeg -y -i {shlex.quote(input_path)} -t {duration} -vf '{filters},palettegen' {shlex.quote(palette_path)}")
+    cmd1 = (f"ffmpeg -y -i {shlex.quote(input_path)} -t {duration} -vf \"{filters},palettegen\" {shlex.quote(palette_path)}")
     cmd2 = (f"ffmpeg -i {shlex.quote(input_path)} -i {shlex.quote(palette_path)} -t {duration} "
-            f"-lavfi '{filters} [x]; [x][1:v] paletteuse' {shlex.quote(output_path.replace('.mkv', '.gif').replace('.mp4', '.gif'))}")
+            f"-lavfi \"{filters} [x]; [x][1:v] paletteuse\" {shlex.quote(output_path.replace('.mkv', '.gif').replace('.mp4', '.gif'))}")
     return [cmd1, cmd2]
 
 def build_split_command(config, input_path, output_path):
@@ -141,29 +137,3 @@ def build_split_command(config, input_path, output_path):
         return (f"ffmpeg -y -i {shlex.quote(input_path)} -c copy -map 0 "
                 f"-segment_time {criteria.lower().replace('s', '')} -f segment -reset_timestamps 1 {shlex.quote(base_name)}_part%03d{ext}")
     return ""
-
-def build_unify_command(file_list_path: str, output_path: str) -> str:
-    return (f"ffmpeg -y -f concat -safe 0 -i {shlex.quote(file_list_path)} "
-            f"-c copy {shlex.quote(output_path)}")
-
-def build_subtitle_convert_command(input_path: str, output_path: str) -> str:
-    return f"ffmpeg -y -i {shlex.quote(input_path)} {shlex.quote(output_path)}"
-
-def generate_screenshot_command(timestamp: str, input_path: str, output_path: str) -> str:
-    return f"ffmpeg -y -ss {shlex.quote(timestamp)} -i {shlex.quote(input_path)} -frames:v 1 -q:v 2 {shlex.quote(output_path)}"
-
-def build_extract_command(archive_path: str, output_dir: str, password: str = None) -> str or None:
-    ext = os.path.splitext(archive_path)[1].lower()
-    password_part = ""
-    if password:
-        if ext == '.zip': password_part = f"-P {shlex.quote(password)}"
-        elif ext == '.rar': password_part = f"-p{shlex.quote(password)}"
-        elif ext == '.7z': password_part = f"-p{shlex.quote(password)}"
-            
-    if ext == '.zip':
-        return f"unzip -o {password_part} {shlex.quote(archive_path)} -d {shlex.quote(output_dir)}"
-    elif ext == '.rar':
-        return f"unrar x {password_part} -o+ {shlex.quote(archive_path)} {shlex.quote(output_dir)}/"
-    elif ext == '.7z':
-        return f"7z x {password_part} -o{shlex.quote(output_dir)} {shlex.quote(archive_path)} -y"
-    return None

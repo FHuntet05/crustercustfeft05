@@ -30,15 +30,64 @@ if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
 def get_common_ydl_opts():
     """Opciones comunes para yt-dlp, incluyendo cookies si están disponibles."""
     opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'forcejson': True,
+        'quiet': True, 'no_warnings': True, 'forcejson': True,
+        'ignoreerrors': True
     }
     if YOUTUBE_COOKIES_FILE:
         opts['cookiefile'] = YOUTUBE_COOKIES_FILE
     return opts
 
+def get_best_audio_format(formats: list) -> str:
+    """
+    Selecciona el mejor formato de solo audio basado en el bitrate (abr).
+    Devuelve el format_id o 'bestaudio' como fallback.
+    """
+    audio_formats = [f for f in formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none' and f.get('abr')]
+    if not audio_formats:
+        logger.warning("No se encontraron formatos de solo audio, se usará 'bestaudio/best'.")
+        return 'bestaudio/best'
+    
+    best_format = sorted(audio_formats, key=lambda x: x.get('abr', 0), reverse=True)[0]
+    logger.info(f"Mejor formato de audio seleccionado: ID {best_format.get('format_id')} con ABR {best_format.get('abr')}k")
+    return best_format.get('format_id', 'bestaudio/best')
+
+def get_lyrics(url: str) -> str or None:
+    """Intenta descargar la letra (subtítulos) de una URL."""
+    ydl_opts = get_common_ydl_opts()
+    ydl_opts.update({
+        'writesubtitles': True,
+        'subtitleslangs': ['es', 'en'],
+        'skip_download': True,
+        'outtmpl': {'default': 'temp_lyrics'}
+    })
+    
+    lyrics_filename = ""
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            sub_file = ydl.prepare_filename(info).rsplit('.', 1)[0]
+            
+            for ext in ['.es.vtt', '.en.vtt', '.vtt', '.srt']:
+                if os.path.exists(sub_file + ext):
+                    lyrics_filename = sub_file + ext
+                    break
+            
+            if lyrics_filename:
+                with open(lyrics_filename, 'r', encoding='utf-8') as f:
+                    lines = [line.strip() for line in f if not line.strip().isdigit() and '-->' not in line and line.strip() and "WEBVTT" not in line]
+                    return "\n".join(lines)[:4000]
+    except Exception as e:
+        logger.warning(f"No se pudo obtener la letra para {url}: {e}")
+    finally:
+        if lyrics_filename and os.path.exists(lyrics_filename):
+            os.remove(lyrics_filename)
+        if os.path.exists('temp_lyrics.info.json'):
+            os.remove('temp_lyrics.info.json')
+
+    return None
+
 def get_url_info(url: str) -> dict or None:
+    """Usa yt-dlp para obtener información detallada de una URL sin descargarla."""
     ydl_opts = get_common_ydl_opts()
     ydl_opts['skip_download'] = True
 
@@ -59,25 +108,29 @@ def get_url_info(url: str) -> dict or None:
                             'fps': f.get('fps'), 'filesize': f.get('filesize') or f.get('filesize_approx'),
                             'abr': f.get('abr'), 'vbr': f.get('vbr'), 'acodec': f.get('acodec'), 'vcodec': f.get('vcodec'),
                         })
+            
+            is_video = any(f.get('vcodec', 'none') != 'none' and f.get('acodec', 'none') != 'none' for f in formats)
+
             return {
                 'url': entry.get('webpage_url', url), 'title': entry.get('title', 'Título Desconocido'),
                 'uploader': entry.get('uploader', 'Uploader Desconocido'), 'duration': entry.get('duration'),
-                'thumbnail': entry.get('thumbnail'), 'is_video': any(f.get('vcodec', 'none') != 'none' for f in formats),
-                'formats': formats,
+                'thumbnail': entry.get('thumbnail'), 'is_video': is_video, 'formats': formats
             }
     except Exception as e:
         logger.error(f"yt-dlp no pudo obtener info de {url}: {e}")
         return None
 
 def download_from_url(url: str, output_path: str, format_id: str = 'best', progress_hook=None) -> bool:
+    """Descarga contenido desde una URL usando yt-dlp con un formato específico."""
     ydl_opts = get_common_ydl_opts()
     ydl_opts.update({
         'format': format_id, 'outtmpl': {'default': output_path},
         'progress_hooks': [progress_hook] if progress_hook else [],
         'noplaylist': True, 'merge_output_format': 'mp4',
         'http_chunk_size': 10485760, 'retries': 5, 'fragment_retries': 5,
+        'writethumbnail': True
     })
-    del ydl_opts['forcejson'] # No es necesaria para la descarga
+    if 'forcejson' in ydl_opts: del ydl_opts['forcejson']
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -88,6 +141,7 @@ def download_from_url(url: str, output_path: str, format_id: str = 'best', progr
         return False
 
 def search_music(query: str, limit: int = 20) -> list:
+    """Busca música usando la API de Spotify y/o YouTube."""
     results = []
     if spotify_api:
         try:
@@ -102,11 +156,10 @@ def search_music(query: str, limit: int = 20) -> list:
         except Exception as e:
             logger.warning(f"Búsqueda en Spotify falló: {e}")
 
-    # Si Spotify no dio resultados o no está configurado, usamos YouTube como fallback
     if not results:
-        logger.info(f"No se encontraron resultados en Spotify para '{query}'. Usando YouTube como fallback.")
+        logger.info(f"No se encontraron resultados en Spotify para '{query}'. Usando YouTube.")
         try:
-            info = get_url_info(f"ytsearch{limit}:{query} audio")
+            info = get_url_info(f"ytsearch{limit}:{query} official audio")
             if info and 'entries' in info:
                 for entry in info['entries']:
                     title = entry.get('title', 'Título Desconocido')
@@ -114,7 +167,6 @@ def search_music(query: str, limit: int = 20) -> list:
                     if ' - ' in title:
                         parts = title.split(' - ', 1)
                         if len(parts) == 2: artist, title = parts[0], parts[1]
-                    
                     results.append({
                         'source': 'youtube', 'title': title.strip(), 'artist': artist.strip(),
                         'album': 'YouTube', 'duration': entry.get('duration'), 'url': entry.get('webpage_url'),

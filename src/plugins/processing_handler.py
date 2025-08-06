@@ -5,6 +5,7 @@ from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery
 from pyrogram.enums import ParseMode
 from bson.objectid import ObjectId
+import asyncio
 
 from src.db.mongo_manager import db_instance
 from src.core import downloader
@@ -15,8 +16,6 @@ from src.helpers.keyboards import (build_back_button, build_processing_menu,
 from src.helpers.utils import get_greeting, escape_html, sanitize_filename
 
 logger = logging.getLogger(__name__)
-
-# ... (show_config_menu y handle_text_input_for_config permanecen sin cambios) ...
 
 @Client.on_callback_query(filters.regex(r"^config_"))
 async def show_config_menu(client: Client, query: CallbackQuery):
@@ -98,6 +97,13 @@ async def set_value_callback(client: Client, query: CallbackQuery):
     if not task: return await query.message.edit_text("❌ Error: Tarea no encontrada.")
 
     if config_type == "dlformat":
+        chosen_format_id = value
+        url_info = task.get('url_info', {})
+        chosen_format = next((f for f in url_info.get('formats', []) if f.get('format_id') == chosen_format_id), None)
+        
+        if chosen_format and chosen_format.get('vcodec', 'none') == 'none':
+            await db_instance.update_task(task_id, 'file_type', 'audio')
+            
         await db_instance.update_task_config(task_id, "download_format_id", value)
         await db_instance.update_task(task_id, "status", "queued")
         return await query.message.edit_text(f"✅ Formato <code>{value}</code> seleccionado.\n\n🔥 Tarea enviada a la forja.", parse_mode=ParseMode.HTML)
@@ -107,7 +113,7 @@ async def set_value_callback(client: Client, query: CallbackQuery):
     elif config_type == "audioprop": prop_key, prop_value = parts[3], parts[4]; await db_instance.update_task_config(task_id, f"audio_{prop_key}", prop_value)
     elif config_type == "audioeffect": effect = parts[3]; current = task.get('processing_config', {}).get(effect, False); await db_instance.update_task_config(task_id, effect, not current)
 
-    task = await db_instance.get_task(task_id)
+    task = await db_instance.get_task(task_id) # Recargar
     keyboard = build_processing_menu(task_id, task['file_type'], task, task.get('original_filename', ''))
     await query.message.edit_text(
         f"🛠️ Configuración actualizada.",
@@ -119,27 +125,48 @@ async def on_song_select(client: Client, query: CallbackQuery):
     result_id = query.data.split("_")[2]
     user = query.from_user
 
-    await query.message.edit_text("🔎 Obteniendo detalles de la canción...", parse_mode=ParseMode.HTML)
+    await query.message.edit_text(f"✅ Canción seleccionada. Preparando...", parse_mode=ParseMode.HTML)
 
     search_result = await db_instance.search_results.find_one({"_id": ObjectId(result_id), "user_id": user.id})
     if not search_result: return await query.message.edit_text("❌ Error: Resultado expirado o no es tuyo.")
     
-    # Limpiar todos los resultados de esta búsqueda para no dejar basura
     if search_id := search_result.get('search_id'):
         await db_instance.search_results.delete_many({"search_id": search_id})
         await db_instance.search_sessions.delete_one({"_id": ObjectId(search_id)})
 
-    search_term_or_url = search_result.get('url') or f"ytsearch:{search_result.get('search_term')}"
-    info = downloader.get_url_info(search_term_or_url)
-    if not info or not info.get('formats'):
-        return await query.message.edit_text("❌ No pude obtener información o formatos para esa selección.")
+    search_term_or_url = search_result.get('url') or f"ytsearch1:{search_result.get('search_term')}"
     
-    task_id = await db_instance.add_task(user_id=user.id, file_type='video' if info.get('is_video') else 'audio', url=info['url'], file_name=sanitize_filename(info['title']), url_info=info)
-    if not task_id: return await query.message.edit_text("❌ Error al crear la tarea en la DB.")
+    info = await asyncio.to_thread(downloader.get_url_info, search_term_or_url)
+    if not info or not info.get('formats'):
+        return await query.message.edit_text("❌ No pude obtener información para esa selección.")
+    
+    if info.get('is_video'):
+        task_id = await db_instance.add_task(user_id=user.id, file_type='video', url=info['url'], file_name=sanitize_filename(info['title']), url_info=info)
+        keyboard = build_download_quality_menu(str(task_id), info['formats'])
+        text = f"✅ Video seleccionado:\n\n<b>{escape_html(info['title'])}</b>\n\nSeleccione el formato a descargar:"
+        await query.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    else:
+        best_audio_format = downloader.get_best_audio_format(info['formats'])
+        lyrics = await asyncio.to_thread(downloader.get_lyrics, info['url'])
 
-    keyboard = build_download_quality_menu(str(task_id), info['formats'])
-    text = (f"✅ Canción seleccionada:\n\n<b>{escape_html(info['title'])}</b>\n\nSeleccione la calidad para descargar:")
-    await query.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        processing_config = {
+            "download_format_id": best_audio_format,
+            "lyrics": lyrics,
+            "thumbnail_url": info.get('thumbnail')
+        }
+        
+        task_id = await db_instance.add_task(
+            user_id=user.id, file_type='audio', url=info['url'], 
+            file_name=sanitize_filename(info['title']), 
+            url_info=info, processing_config=processing_config
+        )
+
+        if not task_id: return await query.message.edit_text("❌ Error al crear la tarea en la DB.")
+        
+        await db_instance.update_task(str(task_id), "status", "queued")
+        
+        await query.message.edit_text(f"🔥 <b>{escape_html(info['title'])}</b>\n\nTu canción ha sido enviada a la forja. El procesamiento comenzará en breve.", parse_mode=ParseMode.HTML)
+
 
 @Client.on_callback_query(filters.regex(r"^search_page_"))
 async def on_search_page(client: Client, query: CallbackQuery):
