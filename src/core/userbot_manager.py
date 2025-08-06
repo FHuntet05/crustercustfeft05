@@ -20,18 +20,15 @@ class UserbotManager:
         if not self.is_active():
             return
         
-        # Esperar unos segundos para no sobrecargar el arranque inicial
         await asyncio.sleep(10) 
         
         logger.info("[USERBOT] Tarea en segundo plano: Iniciando precarga de diálogos...")
         try:
             count = 0
-            # Usar get_dialogs() es la forma correcta de poblar la caché de peers
             async for _ in self.client.get_dialogs():
                 count += 1
             logger.info(f"[USERBOT] Tarea en segundo plano: Caché poblada con {count} diálogos.")
         except Exception as e:
-            # Capturar CUALQUIER error para que esta tarea nunca bloquee el bot
             logger.error(f"[USERBOT] Tarea en segundo plano: Falló la precarga de diálogos. Error: {e}")
 
     async def start(self):
@@ -52,8 +49,6 @@ class UserbotManager:
             await self.client.start()
             me = await self.client.get_me()
             logger.info(f"[USERBOT] Cliente Pyrogram conectado como: {me.username or me.first_name}")
-
-            # --- ARQUITECTURA HÍBRIDA: Lanzar la precarga como una tarea de fondo segura ---
             asyncio.create_task(self._preload_dialogs_background_task())
 
         except (AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated) as e:
@@ -74,16 +69,31 @@ class UserbotManager:
         return self.client and self.client.is_connected
 
     async def download_file(self, chat_id: int, message_id: int, download_path: str, progress_callback=None):
-        """Descarga un archivo usando el contexto del mensaje (chat_id, message_id)."""
+        """
+        Descarga un archivo usando el contexto del mensaje.
+        Primero obtiene el objeto del mensaje y luego lo pasa a download_media.
+        """
         if not self.is_active():
             raise ConnectionError("El Userbot no está activo o conectado.")
         
-        await self.client.download_media(
-            message=message_id,
-            chat_id=chat_id,
-            file_name=download_path,
-            progress=progress_callback
-        )
+        try:
+            # PASO 1: Obtener el objeto del mensaje completo
+            logger.info(f"[USERBOT] Obteniendo mensaje {message_id} del chat {chat_id}")
+            message = await self.client.get_messages(chat_id, message_id)
+            if not message:
+                raise FileNotFoundError(f"El mensaje {message_id} no fue encontrado en el chat {chat_id}.")
+            
+            if not (message.video or message.audio or message.document):
+                raise ValueError("El mensaje recuperado no contiene un archivo descargable.")
 
-# Instancia única para ser importada globalmente
-userbot_instance = UserbotManager()
+            # PASO 2: Pasar el objeto del mensaje a la función de descarga
+            await self.client.download_media(
+                message=message,
+                file_name=download_path,
+                progress=progress_callback
+            )
+            logger.info(f"[USERBOT] Descarga completada exitosamente en {download_path}")
+
+        except Exception as e:
+            logger.error(f"[USERBOT] Falló la descarga del mensaje {message_id}. Error: {e}")
+            raise  # Re-lanzar la excepción para que el worker la maneje
