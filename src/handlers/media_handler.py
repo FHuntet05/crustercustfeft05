@@ -41,15 +41,6 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not file_obj:
         logger.warning("any_file_handler recibió un mensaje sin archivo adjunto válido.")
         return
-
-    # --- INGENIERÍA DE REFERENCIA ROBUSTA ---
-    chat = message.chat
-    if chat.username:
-        message_url = f"https://t.me/{chat.username}/{message.message_id}"
-    else:
-        # Para chats privados, el ID empieza con -100, quitamos eso para el enlace
-        chat_id_short = str(chat.id).replace("-100", "")
-        message_url = f"https://t.me/c/{chat_id_short}/{message.message_id}"
     
     task_id = db_instance.add_task(
         user_id=user.id,
@@ -57,7 +48,8 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id=file_obj.file_id,
         file_name=sanitize_filename(getattr(file_obj, 'file_name', "Archivo Sin Nombre")),
         file_size=file_obj.file_size,
-        message_url=message_url # <-- GUARDAMOS LA URL
+        message_id=message.message_id,
+        chat_id=message.chat_id
     )
 
     if task_id:

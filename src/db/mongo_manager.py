@@ -38,12 +38,13 @@ class Database:
                 raise ConnectionError("No se pudo conectar a la base de datos.")
         return cls._instance
 
-    def add_task(self, user_id, file_type, file_id=None, file_name=None, file_size=None, url=None, special_type=None, processing_config=None, message_url=None):
+    def add_task(self, user_id, file_type, file_id=None, file_name=None, file_size=None, url=None, special_type=None, processing_config=None, message_id=None, chat_id=None):
         task_doc = {
             "user_id": int(user_id),
             "file_id": file_id,
             "url": url,
-            "message_url": message_url,
+            "message_id": message_id,
+            "chat_id": chat_id,
             "original_filename": file_name,
             "final_filename": os.path.splitext(file_name)[0] if file_name else "descarga_url",
             "file_size": file_size,

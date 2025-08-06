@@ -135,15 +135,15 @@ async def _download_file_helper(task: dict, download_path: str):
 
     dl_progress = lambda c, t: progress_callback(c, t, user_id, "📥 Descargando...")
     
-    if userbot_instance.is_active() and task.get('message_url'):
-        await userbot_instance.download_file(task['message_url'], download_path, dl_progress)
+    if userbot_instance.is_active() and task.get('chat_id') and task.get('message_id'):
+        await userbot_instance.download_file(task['chat_id'], task['message_id'], download_path, dl_progress)
     elif task.get('file_id') and task.get('file_size', 0) <= BOT_API_DOWNLOAD_LIMIT:
         ctx = progress_tracker.get(user_id)
         if not ctx: raise Exception("Contexto de progreso no encontrado para la descarga con bot API.")
         file_from_api = await ctx.bot.get_file(task['file_id'])
         await file_from_api.download_to_drive(download_path)
     else:
-        raise Exception("Archivo requiere Userbot para descargar (sin URL) o excede el límite de la API de Bots.")
+        raise Exception("Archivo requiere Userbot para descargar (sin referencia directa) o excede el límite de la API de Bots.")
 
 
 async def process_task(bot, task: dict):
@@ -162,10 +162,10 @@ async def process_task(bot, task: dict):
             format_id = task.get('processing_config', {}).get('download_format_id', 'best')
             if not downloader.download_from_url(url, download_path, format_id, lambda d: None):
                 raise Exception("La descarga desde la URL falló.")
-        elif task.get('message_url') or task.get('file_id'):
+        elif task.get('chat_id') and task.get('message_id') or task.get('file_id'):
             await _download_file_helper(task, download_path)
         else:
-            raise Exception("La tarea no tiene URL, message_url ni file_id para descargar.")
+            raise Exception("La tarea no tiene URL ni referencia de mensaje para descargar.")
         
         await _edit_status_message(user_id, "⚙️ Preparando para procesar...")
         config = task.get('processing_config', {})
