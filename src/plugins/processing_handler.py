@@ -28,10 +28,6 @@ async def show_config_menu(client: Client, query: CallbackQuery):
     original_filename = task.get('original_filename', 'archivo')
     greeting_prefix = get_greeting(query.from_user.id)
     
-    # Guardar el estado de la conversación en user_data
-    # Pyrogram no tiene un context.user_data como python-telegram-bot,
-    # así que usaremos un diccionario global simple para este propósito.
-    # Para un bot más grande, se usaría una DB (Redis) para esto.
     if not hasattr(client, 'user_data'):
         client.user_data = {}
     client.user_data[query.from_user.id] = {"task_id": task_id, "menu_type": menu_type}
@@ -53,12 +49,10 @@ async def show_config_menu(client: Client, query: CallbackQuery):
 async def handle_text_input_for_config(client: Client, message: Message):
     """
     Procesa la entrada de texto del usuario según el menú de configuración activo.
-    Esta función será llamada desde el handler principal.
     """
     user_id = message.from_user.id
     user_input = message.text.strip()
     
-    # Recuperar el estado de la conversación
     active_config = client.user_data.get(user_id)
     if not active_config:
         return
@@ -66,7 +60,6 @@ async def handle_text_input_for_config(client: Client, message: Message):
     task_id = active_config['task_id']
     menu_type = active_config['menu_type']
     
-    # Limpiar el estado de la conversación
     del client.user_data[user_id]
     
     feedback_message = "✅ Configuración guardada."
@@ -96,16 +89,17 @@ async def handle_text_input_for_config(client: Client, message: Message):
         await message.reply("❌ Ocurrió un error al guardar la configuración.")
         return
 
-    # Enviar feedback y volver al menú principal de procesamiento
-    await message.reply_html(feedback_message)
+    # --- MÉTODO CORREGIDO ---
+    await message.reply(feedback_message, parse_mode=ParseMode.HTML)
     
     task = await db_instance.get_task(task_id)
     if task:
         keyboard = build_processing_menu(task_id, task['file_type'], task.get('processing_config', {}), task.get('original_filename', ''))
-        await message.reply_html("¿Algo más?", reply_markup=keyboard)
+        # --- MÉTODO CORREGIDO ---
+        await message.reply("¿Algo más?", reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
 
-# --- Manejador para los botones que establecen valores directamente (calidad, efectos, etc.) ---
+# --- Manejador para los botones que establecen valores directamente ---
 @Client.on_callback_query(filters.regex(r"^set_"))
 async def set_value_callback(client: Client, query: CallbackQuery):
     await query.answer()
@@ -133,12 +127,7 @@ async def set_value_callback(client: Client, query: CallbackQuery):
         effect = parts[3]
         current_effect_status = task.get('processing_config', {}).get(effect, False)
         await db_instance.update_task_config(task_id, effect, not current_effect_status)
-        # Recargar para mostrar el estado actualizado
-        task = await db_instance.get_task(task_id)
-        # Aquí necesitaríamos el teclado de efectos de audio para volver a mostrarlo
-        # Por ahora, volvemos al menú principal para mantenerlo simple.
-    
-    # Recargar la tarea para obtener la configuración actualizada
+
     task = await db_instance.get_task(task_id)
     keyboard = build_processing_menu(task_id, task['file_type'], task.get('processing_config', {}), task.get('original_filename', ''))
     await query.message.edit_text(
