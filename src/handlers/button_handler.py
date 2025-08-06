@@ -29,17 +29,11 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif action == "panel":
         payload = parts[1]
         if payload == "delete_all":
+            # CORRECCIÓN: el estado es 'pending_processing'
             count = db_instance.tasks.delete_many({"user_id": query.from_user.id, "status": "pending_processing"}).deleted_count
             await query.edit_message_text(f"💥 Limpieza completada. Se descartaron {count} tareas.")
         elif payload == "show":
             await command_handler.panel_command(update, context, is_callback=True)
-        elif payload == "start_processing":
-            count = db_instance.set_pending_to_queued(query.from_user.id)
-            if count > 0:
-                await query.edit_message_text(f"🔥 ¡A la forja! {count} tareas han sido enviadas a la cola de procesamiento.")
-            else:
-                await query.edit_message_text("No hay tareas listas para procesar.")
-
 
     elif action == "task":
         action_type, task_id = parts[1], parts[2]
@@ -52,9 +46,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             keyboard = build_processing_menu(task_id, task['file_type'], task.get('processing_config', {}), task.get('original_filename', ''))
             await query.edit_message_text(f"🛠️ ¿Qué desea hacer con:\n<code>{escape_html(task.get('original_filename', '...'))}</code>?", reply_markup=keyboard, parse_mode=ParseMode.HTML)
         
-        elif action_type == "queue":
-            db_instance.update_task(task_id, "status", "pending_processing")
-            await query.edit_message_text("✅ Configuración guardada. La tarea está lista en el /panel para ser procesada.")
+        elif action_type == "queuesingle": # NUEVA ACCIÓN
+            db_instance.update_task(task_id, "status", "queued")
+            await query.edit_message_text("🔥 Tarea enviada a la forja. El procesamiento comenzará en breve.")
             
     elif action == "config":
         action_type, task_id = parts[1], parts[2]

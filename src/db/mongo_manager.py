@@ -47,7 +47,7 @@ class Database:
             "final_filename": os.path.splitext(file_name)[0] if file_name else "descarga_url",
             "file_size": file_size,
             "file_type": file_type,
-            "status": "pending_processing", # <-- CAMBIO CLAVE
+            "status": "pending_processing",
             "special_type": special_type,
             "created_at": datetime.utcnow(),
             "processed_at": None,
@@ -78,7 +78,6 @@ class Database:
             return []
 
     def get_pending_tasks(self, user_id):
-        # Ahora busca 'pending_processing' para el panel
         return list(self.tasks.find({"user_id": int(user_id), "status": "pending_processing"}).sort("created_at", 1))
 
     def update_task_config(self, task_id, config_key, value):
@@ -101,19 +100,6 @@ class Database:
         except Exception as e:
             logger.error(f"Error al actualizar tarea {task_id}: {e}")
             return None
-    
-    def set_pending_to_queued(self, user_id: int):
-        """Cambia todas las tareas 'pending_processing' de un usuario a 'queued'."""
-        try:
-            result = self.tasks.update_many(
-                {"user_id": user_id, "status": "pending_processing"},
-                {"$set": {"status": "queued"}}
-            )
-            logger.info(f"Cambiadas {result.modified_count} tareas a 'queued' para el usuario {user_id}.")
-            return result.modified_count
-        except Exception as e:
-            logger.error(f"Error al mover tareas a la cola para el usuario {user_id}: {e}")
-            return 0
             
     def update_many_tasks_status(self, task_ids, new_status):
         try:
