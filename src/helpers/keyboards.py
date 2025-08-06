@@ -2,19 +2,29 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from .utils import escape_html, format_bytes
 
 def build_panel_keyboard(tasks: list) -> InlineKeyboardMarkup:
-    keyboard, task_ids = [], [str(t['_id']) for t in tasks]
+    keyboard = []
+    task_ids = [str(t['_id']) for t in tasks]
     for task in tasks:
-        task_id, file_type = str(task.get('_id')), task.get('file_type', 'document')
-        emoji = {'video': '🎬', 'audio': '🎵', 'document': '📄'}.get(file_type, '📁')
+        task_id = str(task.get('_id'))
+        file_type = task.get('file_type', 'document')
+        emoji_map = {'video': '🎬', 'audio': '🎵', 'document': '📄'}
+        emoji = emoji_map.get(file_type, '📁')
         display_name = task.get('original_filename') or task.get('url', 'Tarea de URL')
         short_name = (display_name[:35] + '...') if len(display_name) > 38 else display_name
         keyboard.append([InlineKeyboardButton(f"{emoji} {escape_html(short_name)}", callback_data=f"task_process_{task_id}")])
+    
     if tasks:
-        keyboard.append([
-            InlineKeyboardButton("✨ Procesar en Lote", callback_data=f"bulk_start_{','.join(task_ids)}"),
-            InlineKeyboardButton("💥 Limpiar Panel", callback_data="panel_delete_all")
-        ])
+        action_buttons = [
+            InlineKeyboardButton("🔥 Iniciar Procesamiento", callback_data="panel_start_processing")
+        ]
+        # Opcional: añadir botones de lote si se necesitan en el futuro
+        # action_buttons.append(InlineKeyboardButton("✨ Procesar en Lote", callback_data=f"bulk_start_{','.join(task_ids)}"))
+        
+        keyboard.append(action_buttons)
+        keyboard.append([InlineKeyboardButton("💥 Limpiar Panel", callback_data="panel_delete_all")])
+        
     return InlineKeyboardMarkup(keyboard)
+
 
 def build_processing_menu(task_id: str, file_type: str, task_config: dict, filename: str = "") -> InlineKeyboardMarkup:
     keyboard = []
@@ -39,7 +49,7 @@ def build_processing_menu(task_id: str, file_type: str, task_config: dict, filen
         ])
     keyboard.extend([
         [InlineKeyboardButton("✏️ Renombrar", callback_data=f"config_rename_{task_id}")],
-        [InlineKeyboardButton("🔙 Volver", callback_data="panel_show"), InlineKeyboardButton("✅ Enviar a Cola", callback_data=f"task_queue_{task_id}")]
+        [InlineKeyboardButton("🔙 Volver", callback_data="panel_show"), InlineKeyboardButton("✅ Guardar y Esperar", callback_data=f"task_queue_{task_id}")]
     ])
     return InlineKeyboardMarkup(keyboard)
 

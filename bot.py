@@ -1,6 +1,5 @@
 import logging
 import os
-import threading
 import asyncio
 from dotenv import load_dotenv
 from telegram import Update
@@ -48,6 +47,11 @@ async def post_init(application: Application):
     """Se ejecuta después de que la aplicación se inicialice pero antes de que empiece el polling."""
     logger.info("Hook post_init: Iniciando conexión del Userbot...")
     await userbot_instance.start()
+    
+    logger.info("Hook post_init: Lanzando el worker de procesamiento como tarea de fondo...")
+    asyncio.create_task(worker.worker_loop(application))
+    logger.info("Worker de procesamiento iniciado en el mismo bucle de eventos.")
+
 
 async def post_shutdown(application: Application):
     """Se ejecuta después de que el polling se detenga."""
@@ -107,13 +111,8 @@ def main():
     
     application.add_error_handler(command_handler.error_handler)
 
-    # --- Inicio del Worker en un Hilo Separado ---
-    worker_thread = threading.Thread(target=worker.worker_thread_runner, daemon=True)
-    worker_thread.start()
-    logger.info("Worker de procesamiento iniciado en segundo plano.")
-
     # --- Inicio del Bot (llamada bloqueante que gestiona todo) ---
-    logger.info("La aplicación del bot se está iniciando... El Userbot se conectará a continuación.")
+    logger.info("La aplicación del bot se está iniciando... El Userbot se conectará y el worker se lanzará a continuación.")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':

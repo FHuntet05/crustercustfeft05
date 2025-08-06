@@ -15,7 +15,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manejador para el comando /start. Saluda al usuario y crea su perfil si no existe."""
     user = update.effective_user
     greeting_prefix = get_greeting(user.id)
-    db_instance.get_user_settings(user.id)
+    db_instance.get_user_settings(user.id) # Asegura que el usuario exista en la DB
     start_message = (
         f"A sus órdenes, {greeting_prefix}bienvenido a la <b>Suite de Medios</b>.\n\n"
         "Soy su Asistente personal, Forge. Estoy listo para procesar sus archivos.\n\n"
@@ -40,7 +40,7 @@ async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE, is_c
     if not pending_tasks:
         text = f"✅ ¡{greeting_prefix}Su mesa de trabajo está vacía!"
         try:
-            if is_callback: await message.edit_text(text, parse_mode=ParseMode.HTML)
+            if is_callback: await message.edit_text(text, reply_markup=None, parse_mode=ParseMode.HTML)
             else: await message.reply_html(text)
         except Exception as e: logger.warning(f"No se pudo editar/enviar mensaje del panel: {e}")
         return

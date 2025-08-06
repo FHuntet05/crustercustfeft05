@@ -29,10 +29,17 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif action == "panel":
         payload = parts[1]
         if payload == "delete_all":
-            count = db_instance.tasks.delete_many({"user_id": query.from_user.id, "status": "pending_review"}).deleted_count
+            count = db_instance.tasks.delete_many({"user_id": query.from_user.id, "status": "pending_processing"}).deleted_count
             await query.edit_message_text(f"💥 Limpieza completada. Se descartaron {count} tareas.")
         elif payload == "show":
             await command_handler.panel_command(update, context, is_callback=True)
+        elif payload == "start_processing":
+            count = db_instance.set_pending_to_queued(query.from_user.id)
+            if count > 0:
+                await query.edit_message_text(f"🔥 ¡A la forja! {count} tareas han sido enviadas a la cola de procesamiento.")
+            else:
+                await query.edit_message_text("No hay tareas listas para procesar.")
+
 
     elif action == "task":
         action_type, task_id = parts[1], parts[2]
@@ -46,8 +53,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             await query.edit_message_text(f"🛠️ ¿Qué desea hacer con:\n<code>{escape_html(task.get('original_filename', '...'))}</code>?", reply_markup=keyboard, parse_mode=ParseMode.HTML)
         
         elif action_type == "queue":
-            db_instance.update_task(task_id, "status", "queued")
-            await query.edit_message_text("✅ Tarea enviada a la cola de procesamiento.")
+            db_instance.update_task(task_id, "status", "pending_processing")
+            await query.edit_message_text("✅ Configuración guardada. La tarea está lista en el /panel para ser procesada.")
             
     elif action == "config":
         action_type, task_id = parts[1], parts[2]
@@ -71,7 +78,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         
         if config_type == "dlformat":
             db_instance.update_task_config(task_id, "download_format_id", value)
-            db_instance.update_task(task_id, "status", "queued")
+            db_instance.update_task(task_id, "status", "queued") # Descargas de URL van directo a la cola
             await query.edit_message_text(f"✅ Descarga de <code>{value}</code> encolada.", parse_mode=ParseMode.HTML)
             return
         elif config_type == "quality": db_instance.update_task_config(task_id, "quality", value)
