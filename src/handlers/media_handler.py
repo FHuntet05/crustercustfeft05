@@ -1,4 +1,5 @@
 import logging
+import os
 from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
@@ -10,6 +11,7 @@ from src.core import downloader
 from . import processing_handler
 
 logger = logging.getLogger(__name__)
+BOT_USERNAME = os.getenv("BOT_USERNAME")
 
 async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -42,6 +44,10 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning("any_file_handler recibió un mensaje sin archivo adjunto válido.")
         return
     
+    if not BOT_USERNAME:
+        await message.reply_html("❌ <b>Error de Configuración del Sistema:</b> La variable BOT_USERNAME no está definida.")
+        return
+
     task_id = db_instance.add_task(
         user_id=user.id,
         file_type=file_type,
@@ -49,7 +55,7 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_name=sanitize_filename(getattr(file_obj, 'file_name', "Archivo Sin Nombre")),
         file_size=file_obj.file_size,
         message_id=message.message_id,
-        chat_id=message.chat_id
+        bot_username=BOT_USERNAME
     )
 
     if task_id:
