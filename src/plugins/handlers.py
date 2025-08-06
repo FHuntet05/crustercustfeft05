@@ -6,7 +6,6 @@ from pyrogram.enums import ParseMode
 from src.db.mongo_manager import db_instance
 from src.helpers.utils import sanitize_filename, escape_html
 from src.helpers.keyboards import build_panel_keyboard, build_processing_menu
-# --- Importamos la función de manejo de texto ---
 from . import processing_handler 
 
 logger = logging.getLogger(__name__)
@@ -41,7 +40,6 @@ async def main_commands(client: Client, message: Message):
 async def media_handler(client: Client, message: Message):
     user = message.from_user
     
-    # Si es un archivo
     if message.media:
         file = getattr(message, message.media.value)
         file_type = message.media.value.lower()
@@ -55,10 +53,7 @@ async def media_handler(client: Client, message: Message):
             file_size=file.file_size, file_id=file.file_id, message_id=message.id
         )
         reply_text = f"✅ He recibido <code>{escape_html(sanitize_filename(getattr(file, 'file_name', 'archivo')))}</code>"
-    # Si es una URL
     else:
-        # Aquí iría la lógica de downloader.get_url_info que ya teníamos
-        # Por ahora, un placeholder:
         task_id = await db_instance.add_task(user_id=user.id, file_type='video', url=message.text)
         reply_text = f"✅ He recibido el enlace <code>{escape_html(message.text)}</code>"
 
@@ -72,17 +67,22 @@ async def media_handler(client: Client, message: Message):
         await message.reply("❌ Hubo un error al registrar la tarea.")
 
 # --- Handler para texto (delegación) ---
-@Client.on_message(filters.private & filters.text & ~filters.command())
+# --- CORRECCIÓN ---
+# Se elimina `& ~filters.command()` que era sintácticamente incorrecto.
+# Pyrogram procesa los handlers en orden, así que este solo se activará
+# si el mensaje de texto no fue capturado por el `main_commands` handler.
+@Client.on_message(filters.private & filters.text)
 async def text_handler(client: Client, message: Message):
     """
-    Este handler se activa con cualquier mensaje de texto que no sea un comando.
+    Este handler se activa con cualquier mensaje de texto.
     Delega la lógica al processing_handler si el usuario está en medio de una configuración.
     """
     if hasattr(client, 'user_data') and message.from_user.id in client.user_data:
         await processing_handler.handle_text_input_for_config(client, message)
     else:
-        # Opcional: responder si el texto no se espera
-        await message.reply("No entiendo ese comando. Envíe un archivo, un enlace o use /start.")
+        # El handler de comandos ya se habrá ejecutado si es un comando.
+        # Si llega aquí, es texto normal que no esperamos.
+        await message.reply("No entiendo ese comando. Envíe un archivo, un enlace o use /start o /panel.")
 
 # --- Handlers para los callbacks de botones ---
 @Client.on_callback_query(filters.regex(r"^task_process_"))
