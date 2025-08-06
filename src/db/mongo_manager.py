@@ -59,14 +59,6 @@ class Database:
         try: return self.tasks.find_one({"_id": ObjectId(task_id)})
         except: return None
 
-    def get_multiple_tasks(self, task_ids):
-        try:
-            object_ids = [ObjectId(tid) for tid in task_ids]
-            return list(self.tasks.find({"_id": {"$in": object_ids}}))
-        except Exception as e:
-            logger.error(f"Error al obtener múltiples tareas: {e}")
-            return []
-
     def get_pending_tasks(self, user_id):
         return list(self.tasks.find({"user_id": int(user_id), "status": "pending_processing"}).sort("created_at", 1))
 

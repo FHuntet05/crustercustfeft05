@@ -14,10 +14,6 @@ logger = logging.getLogger(__name__)
 USERBOT_ID = os.getenv("USERBOT_ID")
 
 async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Manejador UNIFICADO. Realiza el "Pase de Testigo" reenviando el mensaje
-    al Userbot y guardando la referencia de la copia.
-    """
     user = update.effective_user
     if not user: return
 
@@ -38,7 +34,6 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # --- ARQUITECTURA "PASE DE TESTIGO" ---
         logger.info(f"Realizando pase de testigo del mensaje {message.message_id} al Userbot ID {USERBOT_ID}")
         forwarded_message = await context.bot.forward_message(
             chat_id=USERBOT_ID,
@@ -62,7 +57,6 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await message.reply_html(f"❌ {greeting_prefix}Hubo un error al registrar la tarea.")
-
     except Exception as e:
         logger.error(f"Fallo en el 'Pase de Testigo': {e}")
         await message.reply_html(f"❌ {greeting_prefix}Hubo un error crítico al transferir el archivo al procesador.")
