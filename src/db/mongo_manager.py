@@ -1,113 +1,129 @@
 import os
-import pymongo
-from pymongo.errors import ConnectionFailure
 import logging
-from datetime import datetime
-from dotenv import load_dotenv
-from bson.objectid import ObjectId
+import asyncio
+from pyrogram import Client
+from pyrogram.errors import AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated
 
-load_dotenv()
 logger = logging.getLogger(__name__)
 
-class Database:
-    _instance = None
+class UserbotManager:
+    """Gestiona la inicialización y el acceso al cliente Pyrogram (Userbot)."""
+
+    def __init__(self):
+        self.api_id = os.getenv("API_ID")
+        self.api_hash = os.getenv("API_HASH")
+        self.session_string = os.getenv("USERBOT_SESSION_STRING")
+        self.saved_messages_id = 0  # Se autoconfigurará al iniciar
+        self.client: Client | None = None
+
+    async def _preload_dialogs_background_task(self):
+        """Tarea en segundo plano para poblar la caché de diálogos de forma segura."""
+        if not self.is_active():
+            return
+        
+        await asyncio.sleep(10) 
+        
+        logger.info("[USERBOT] Tarea en segundo plano: Iniciando precarga de diálogos...")
+        try:
+            count = 0
+            async for _ in self.client.get_dialogs():
+                count += 1
+            logger.info(f"[USERBOT] Tarea en segundo plano: Caché poblada con {count} diálogos.")
+        except Exception as e:
+            logger.error(f"[USERBOT] Tarea en segundo plano: Falló la precarga de diálogos. Error: {e}")
+
+    async def start(self):
+        """Inicia el cliente Pyrogram y se autoconfigura con el ID de Mensajes Guardados."""
+        if not all([self.api_id, self.api_hash, self.session_string]):
+            logger.warning("[USERBOT] Faltan credenciales (API_ID, API_HASH, o SESSION_STRING). El Userbot no se iniciará.")
+            return
+
+        logger.info("[USERBOT] Iniciando cliente Pyrogram...")
+        self.client = Client(
+            name="userbot_session",
+            api_id=int(self.api_id),
+            api_hash=self.api_hash,
+            session_string=self.session_string,
+            in_memory=True
+        )
+        try:
+            await self.client.start()
+            me = await self.client.get_me()
+            self.saved_messages_id = me.id  # <-- INGENIERÍA AUTÓNOMA
+            logger.info(f"[USERBOT] Cliente conectado como: {me.username or me.first_name}")
+            logger.info(f"[USERBOT] Proxy de 'Mensajes Guardados' autoconfigurado con ID: {self.saved_messages_id}")
+            asyncio.create_task(self._preload_dialogs_background_task())
+
+        except (AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated) as e:
+            logger.critical(f"[USERBOT] ¡Error de autenticación! La SESSION_STRING es inválida. Error: {e}")
+            self.client = None
+        except Exception as e:
+            logger.critical(f"[USERBOT] No se pudo iniciar el cliente Pyrogram. Error: {e}")
+            self.client = None
     
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(Database, cls).__new__(cls)
-            try:
-                mongo_uri = os.getenv("MONGO_URI")
-                if not mongo_uri:
-                    raise ValueError("La variable de entorno MONGO_URI no está definida.")
-                
-                cls._instance.client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000, connectTimeoutMS=10000)
-                cls._instance.client.admin.command('ping')
-                logger.info("Conexión con MongoDB Atlas establecida con éxito.")
-                
-                cls._instance.db = cls._instance.client.get_database("JefesMediaSuiteDB")
-                cls._instance.tasks = cls._instance.db.tasks
-                cls._instance.user_settings = cls._instance.db.user_settings
-                cls._instance.search_results = cls._instance.db.search_results
-                
-                if "created_at_ttl" not in cls._instance.search_results.index_information():
-                    cls._instance.search_results.create_index("created_at", expireAfterSeconds=3600, name="created_at_ttl")
-                    logger.info("Índice TTL para 'search_results' creado/verificado.")
+    async def stop(self):
+        """Detiene el cliente Pyrogram si está activo."""
+        if self.is_active():
+            await self.client.stop()
+            logger.info("[USERBOT] Cliente Pyrogram detenido.")
 
-            except (ConnectionFailure, ValueError) as e:
-                logger.critical(f"¡FALLO CRÍTICO AL INICIAR LA BASE DE DATOS! Error: {e}")
-                raise ConnectionError("No se pudo conectar a la base de datos.")
-        return cls._instance
+    def is_active(self) -> bool:
+        """Comprueba si el cliente está inicializado y conectado."""
+        return self.client and self.client.is_connected
 
-    def add_task(self, user_id, file_type, file_id=None, file_name=None, file_size=None, url=None, special_type=None, processing_config=None, message_url=None):
-        task_doc = {
-            "user_id": int(user_id),
-            "file_id": file_id,
-            "url": url,
-            "message_url": message_url,
-            "original_filename": file_name,
-            "final_filename": os.path.splitext(file_name)[0] if file_name else "descarga_url",
-            "file_size": file_size,
-            "file_type": file_type,
-            "status": "pending_processing", # <-- CAMBIO CLAVE
-            "special_type": special_type,
-            "created_at": datetime.utcnow(),
-            "processed_at": None,
-            "processing_config": processing_config if processing_config else {},
-        }
+    async def download_file(self, message_url: str, download_path: str, progress_callback=None):
+        """
+        Descarga un archivo usando la estrategia de reenvío a un proxy autoconfigurado.
+        """
+        if not self.is_active():
+            raise ConnectionError("El Userbot no está activo o conectado.")
+        
+        proxy_message = None
         try:
-            result = self.tasks.insert_one(task_doc)
-            logger.info(f"Nueva tarea {result.inserted_id} añadida para {user_id}")
-            return result.inserted_id
-        except Exception as e:
-            logger.error(f"Error al añadir tarea a la DB: {e}")
-            return None
-
-    def get_task(self, task_id):
-        try:
-            return self.tasks.find_one({"_id": ObjectId(task_id)})
-        except Exception: 
-            return None
-
-    def get_multiple_tasks(self, task_ids):
-        try:
-            object_ids = [ObjectId(tid) for tid in task_ids]
-            return list(self.tasks.find({"_id": {"$in": object_ids}}))
-        except Exception as e:
-            logger.error(f"Error al obtener múltiples tareas: {e}")
-            return []
-
-    def get_pending_tasks(self, user_id):
-        return list(self.tasks.find({"user_id": int(user_id), "status": "pending_processing"}).sort("created_at", 1))
-
-    def update_task_config(self, task_id, config_key, value):
-        try:
-            return self.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": {f"processing_config.{config_key}": value}})
-        except Exception as e:
-            logger.error(f"Error al actualizar config de tarea {task_id}: {e}")
-            return None
+            # 1. Parsear la URL para obtener los IDs
+            logger.info(f"[USERBOT] Parseando URL: {message_url}")
+            parts = message_url.split("/")
+            chat_id_str = parts[-2]
+            msg_id = int(parts[-1])
             
-    def push_to_task_config_list(self, task_id, list_key, value):
-        try:
-            return self.tasks.update_one({"_id": ObjectId(task_id)}, {"$addToSet": {f"processing_config.{list_key}": value}})
-        except Exception as e:
-            logger.error(f"Error al añadir a lista en tarea {task_id}: {e}")
-            return None
+            from_chat_id = f"@{chat_id_str}" if not chat_id_str.lstrip('-').isdigit() else int(chat_id_str)
+            if "t.me/c/" in message_url:
+                 from_chat_id = int(f"-100{chat_id_str}")
 
-    def update_task(self, task_id, field, value):
-        try:
-            return self.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": {field: value}})
-        except Exception as e:
-            logger.error(f"Error al actualizar tarea {task_id}: {e}")
-            return None
+            # 2. Reenviar el mensaje al chat proxy (Mensajes Guardados)
+            logger.info(f"[USERBOT] Reenviando mensaje {msg_id} desde {from_chat_id} al proxy autoconfigurado {self.saved_messages_id}")
+            proxy_message = await self.client.forward_messages(
+                chat_id=self.saved_messages_id,
+                from_chat_id=from_chat_id,
+                message_ids=msg_id
+            )
             
-    def update_many_tasks_status(self, task_ids, new_status):
-        try:
-            object_ids = [ObjectId(tid) for tid in task_ids]
-            result = self.tasks.update_many({"_id": {"$in": object_ids}}, {"$set": {"status": new_status}})
-            return result.modified_count
-        except Exception as e:
-            logger.error(f"Error al actualizar estado de múltiples tareas: {e}")
-            return 0
+            if not proxy_message:
+                raise Exception("El reenvío al chat proxy no devolvió un mensaje.")
 
-# Instancia única para ser importada en otros módulos
-db_instance = Database()
+            # 3. Descargar desde el mensaje proxy
+            logger.info(f"[USERBOT] Descargando desde el mensaje proxy {proxy_message.id}")
+            await self.client.download_media(
+                message=proxy_message,
+                file_name=download_path,
+                progress=progress_callback
+            )
+            logger.info(f"[USERBOT] Descarga completada exitosamente en {download_path}")
+
+        except Exception as e:
+            logger.error(f"[USERBOT] Falló la descarga con proxy. Error: {e}")
+            raise
+        finally:
+            # 4. Limpiar el chat proxy
+            if proxy_message:
+                try:
+                    await self.client.delete_messages(
+                        chat_id=self.saved_messages_id,
+                        message_ids=proxy_message.id
+                    )
+                    logger.info("[USERBOT] Mensaje proxy eliminado.")
+                except Exception as e:
+                    logger.warning(f"[USERBOT] No se pudo eliminar el mensaje proxy. Error: {e}")
+
+# Instancia única para ser importada globalmente
+userbot_instance = UserbotManager()
