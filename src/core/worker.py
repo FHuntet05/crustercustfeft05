@@ -18,7 +18,6 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 class ProgressContext:
-    # ... (sin cambios)
     def __init__(self, bot, message, task):
         self.bot = bot
         self.message = message
@@ -30,82 +29,84 @@ class ProgressContext:
 progress_tracker = {}
 
 async def _edit_status_message(user_id: int, text: str):
-    # ... (sin cambios)
     if user_id not in progress_tracker: return
     ctx = progress_tracker[user_id]
+    
     if text == ctx.last_update_text: return
     ctx.last_update_text = text
+    
     current_time = time.time()
     if current_time - ctx.last_edit_time > 1.5:
         try:
             await ctx.bot.edit_message_text(
-                chat_id=ctx.message.chat.id, message_id=ctx.message.id, 
-                text=text, parse_mode=ParseMode.HTML
+                chat_id=ctx.message.chat.id, 
+                message_id=ctx.message.id, 
+                text=text, 
+                parse_mode=ParseMode.HTML
             )
             ctx.last_edit_time = current_time
         except Exception:
             pass
 
 async def progress_callback(current, total, user_id, operation):
-    # ... (sin cambios)
     if user_id not in progress_tracker: return
     ctx = progress_tracker[user_id]
-    percentage = (current / total) * 100 if total > 0 else 0
+    
+    # --- CORRECCIÓN CRÍTICA DE LA BARRA DE PROGRESO ---
+    # Usar el 'total' del callback, pero si es 0, usar el 'file_size' guardado en la tarea.
+    final_total = total or ctx.task.get('file_size', 0)
+
+    percentage = (current / final_total) * 100 if final_total > 0 else 0
     elapsed = time.time() - ctx.start_time
     speed = current / elapsed if elapsed > 0 else 0
-    eta = (total - current) / speed if speed > 0 else 0
+    eta = (final_total - current) / speed if speed > 0 else 0
+    
     user_mention = "Usuario"
     if hasattr(ctx.message, 'from_user') and ctx.message.from_user:
         user_mention = ctx.message.from_user.mention
+
     text = format_status_message(
-        operation=operation, filename=ctx.task.get('original_filename', 'archivo'),
-        percentage=percentage, processed_bytes=current, total_bytes=total,
-        speed=speed, eta=eta, engine="Pyrogram", user_id=user_id, user_mention=user_mention
+        operation=operation,
+        filename=ctx.task.get('original_filename', 'archivo'),
+        percentage=percentage,
+        processed_bytes=current,
+        total_bytes=final_total, # Usamos el total corregido
+        speed=speed,
+        eta=eta,
+        engine="Pyrogram",
+        user_id=user_id,
+        user_mention=user_mention
     )
     await _edit_status_message(user_id, text)
 
-# --- FUNCIÓN CRÍTICA CORREGIDA ---
 async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
     duration_info = get_media_info(input_path)
     total_duration_sec = float(duration_info.get('format', {}).get('duration', 0))
     if total_duration_sec == 0:
         logger.warning("No se pudo obtener la duración, el progreso de FFmpeg no funcionará.")
-
     time_pattern = re.compile(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})")
-    
     process = await asyncio.create_subprocess_shell(
-        cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
+        cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
-
-    all_stderr_lines = [] # Acumular el error completo
-    
-    # Bucle único para leer stderr
+    all_stderr_lines = []
     while True:
         line = await process.stderr.readline()
         if not line:
             break
-        
         line_str = line.decode('utf-8', 'ignore').strip()
-        all_stderr_lines.append(line_str) # Guardar línea para posible error
-        
+        all_stderr_lines.append(line_str)
         match = time_pattern.search(line_str)
         if match and total_duration_sec > 0:
             h, m, s, ms = map(int, match.groups())
             processed_sec = h * 3600 + m * 60 + s + ms / 100
             await progress_callback(processed_sec, total_duration_sec, user_id, "⚙️ Codificando...")
-
-    # Esperar a que el proceso termine y obtener el código de salida
     await process.wait()
-
     if process.returncode != 0:
-        error_message = "\n".join(all_stderr_lines) # Unir todas las líneas de error
+        error_message = "\n".join(all_stderr_lines)
         logger.error(f"FFmpeg falló. Código: {process.returncode}\nError: {error_message}")
         raise Exception(f"El proceso de FFmpeg falló: {error_message[-500:]}")
 
 async def process_task(bot, task: dict):
-    # ... (sin cambios)
     task_id, user_id = str(task['_id']), task['user_id']
     status_message = await bot.send_message(user_id, f"Iniciando: <code>{task.get('original_filename') or task.get('url', 'Tarea')}</code>", parse_mode=ParseMode.HTML)
     
@@ -140,12 +141,18 @@ async def process_task(bot, task: dict):
 
         await _edit_status_message(user_id, "⚙️ Preparando para procesar...")
         config = task.get('processing_config', {})
-        base_name, _ = os.path.splitext(task.get('original_filename', 'archivo'))
+        
+        original_filename = task.get('original_filename', 'archivo.dat')
+        base_name, original_ext = os.path.splitext(original_filename)
         final_filename_base = sanitize_filename(config.get('final_filename', base_name))
         
-        ext_map = {'audio': f".{config.get('audio_format', 'mp3')}", 'video': ".mp4", 'document': os.path.splitext(task.get('original_filename', ''))[1]}
-        ext = ".gif" if 'gif_options' in config else ext_map.get(task.get('file_type'), '.dat')
-        final_filename = f"{final_filename_base}{ext}"
+        final_ext = original_ext
+        if 'gif_options' in config:
+            final_ext = ".gif"
+        elif task.get('file_type') == 'audio' and 'audio_format' in config:
+            final_ext = f".{config['audio_format']}"
+            
+        final_filename = f"{final_filename_base}{final_ext}"
         
         output_path = os.path.join(OUTPUT_DIR, final_filename)
         files_to_clean.add(output_path)
@@ -185,7 +192,6 @@ async def process_task(bot, task: dict):
                     logger.error(f"No se pudo limpiar el archivo {fpath}: {e}")
 
 async def worker_loop(bot_instance):
-    # ... (sin cambios)
     logger.info("[WORKER] Bucle del worker iniciado.")
     while True:
         try:
