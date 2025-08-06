@@ -111,7 +111,8 @@ async def main():
         logger.info("Detención del bot solicitada.")
     finally:
         logger.info("Iniciando secuencia de apagado...")
-        if application.updater and application.updater.is_running():
+        # CORRECCIÓN: Se eliminó la llamada al método inexistente 'is_running'
+        if application.updater:
             await application.updater.stop()
         await application.stop()
         await userbot_instance.stop()
