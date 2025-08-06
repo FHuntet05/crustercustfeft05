@@ -2,27 +2,12 @@ import logging
 import os
 import asyncio
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import (
-    Application,
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    CallbackQueryHandler,
-    PicklePersistence,
-    Defaults
-)
-from telegram.constants import ParseMode, UpdateType
 
-# --- Carga de Entorno y Configuración Inicial ---
+from pyrogram import Client, __version__
+from pyrogram.raw.all import layer
+
+# Carga de Entorno
 load_dotenv()
-
-# --- Importación de Módulos del Proyecto ---
-from src.handlers import command_handler, media_handler, button_handler
-from src.core import worker
-from src.core.userbot_manager import userbot_instance
-from src.db.mongo_manager import db_instance
 
 # --- Configuración del Logging ---
 logging.basicConfig(
@@ -33,88 +18,67 @@ logging.basicConfig(
         logging.FileHandler("bot.log", mode='a', encoding='utf-8')
     ]
 )
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("telegram.ext").setLevel(logging.WARNING)
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# --- Constantes ---
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")
-# --- NUEVA CONSTANTE ---
-FORWARD_CHAT_ID = os.getenv("FORWARD_CHAT_ID")
+# --- Importación de Módulos del Proyecto ---
+from src.core import worker # Importamos nuestro worker
+from src.db.mongo_manager import db_instance # Importamos la instancia de la DB
 
-# --- Hooks de Inicialización y Apagado ---
-async def post_init(application: Application):
-    logger.info("Hook post_init: Iniciando conexión del Userbot...")
-    await userbot_instance.start()
-    
-    logger.info("Hook post_init: Lanzando el worker de procesamiento como tarea de fondo...")
-    asyncio.create_task(worker.worker_loop(application))
-    logger.info("Worker de procesamiento iniciado en el mismo bucle de eventos.")
+class MediaSuiteBot(Client):
+    def __init__(self):
+        # Leemos las variables desde el entorno
+        self.api_id = os.getenv("API_ID")
+        self.api_hash = os.getenv("API_HASH")
+        self.bot_token = os.getenv("TELEGRAM_TOKEN")
+        self.admin_id = int(os.getenv("ADMIN_USER_ID", 0))
 
+        # Verificaciones críticas
+        if not all([self.api_id, self.api_hash, self.bot_token]):
+            logger.critical("¡ERROR CRÍTICO! Faltan API_ID, API_HASH o TELEGRAM_TOKEN en el .env")
+            exit(1)
 
-async def post_shutdown(application: Application):
-    logger.info("Hook post_shutdown: Deteniendo conexión del Userbot...")
-    await userbot_instance.stop()
+        super().__init__(
+            name="MediaSuiteBot",
+            api_id=int(self.api_id),
+            api_hash=self.api_hash,
+            bot_token=self.bot_token,
+            workers=200,  # Alto número de workers para concurrencia
+            plugins={"root": "src/plugins"}, # Pyrogram carga los handlers desde esta carpeta
+            sleep_threshold=15,
+        )
 
-def main():
-    if not TELEGRAM_TOKEN:
-        logger.critical("¡ERROR CRÍTICO! La variable de entorno TELEGRAM_TOKEN no está definida.")
-        return
-    # --- NUEVA VERIFICACIÓN CRÍTICA ---
-    if not FORWARD_CHAT_ID:
-        logger.critical("¡ERROR CRÍTICO! La variable de entorno FORWARD_CHAT_ID no está definida. Es necesario un canal privado para el 'Pase de Testigo'.")
-        return
-    if not ADMIN_USER_ID:
-        logger.warning("ADVERTENCIA: La variable de entorno ADMIN_USER_ID no está definida. No habrá un 'Jefe'.")
-    
-    try:
-        db_instance.client.admin.command('ping')
-    except Exception as e:
-        logger.critical(f"¡ERROR CRÍTICO! No se pudo conectar a MongoDB al iniciar. Error: {e}")
-        return
+    async def start(self):
+        await super().start()
+        
+        # Guardar información útil del bot
+        me = await self.get_me()
+        self.mention = me.mention
+        self.username = me.username
+        logger.info(f"Bot {me.first_name} iniciado. Versión de Pyrogram: {__version__} (Layer {layer})")
+        
+        # Ping a la DB
+        try:
+            await db_instance.client.admin.command('ping')
+            logger.info("Conexión con MongoDB Atlas establecida.")
+        except Exception as e:
+            logger.critical(f"¡ERROR CRÍTICO! No se pudo conectar a MongoDB al iniciar. Error: {e}")
+            exit(1)
 
-    persistence = PicklePersistence(filepath="bot_persistence")
-    defaults = Defaults(parse_mode=ParseMode.HTML)
-    
-    application = (
-        ApplicationBuilder()
-        .token(TELEGRAM_TOKEN)
-        .persistence(persistence)
-        .defaults(defaults)
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
-        .build()
-    )
+        # Lanzar nuestro worker de procesamiento de tareas en segundo plano
+        logger.info("Lanzando el worker de procesamiento de tareas...")
+        asyncio.create_task(worker.worker_loop(self)) # Le pasamos el propio bot al worker
+        
+        # Notificar al admin que el bot ha iniciado
+        if self.admin_id:
+            try:
+                await self.send_message(self.admin_id, f"✅ **Bot reiniciado con éxito**\n\nEstoy listo para procesar tareas.")
+            except Exception as e:
+                logger.warning(f"No se pudo enviar el mensaje de inicio al admin ({self.admin_id}). Error: {e}")
 
-    # --- Registro de Manejadores (Handlers) ---
-    application.add_handler(CommandHandler("start", command_handler.start_command))
-    application.add_handler(CommandHandler("panel", command_handler.panel_command))
-    application.add_handler(CommandHandler("settings", command_handler.settings_command))
-    application.add_handler(CommandHandler("findmusic", command_handler.findmusic_command))
-    
-    application.add_handler(CallbackQueryHandler(button_handler.button_callback_handler))
+    async def stop(self):
+        await super().stop()
+        logger.info("Bot detenido correctamente.")
 
-    application.add_handler(MessageHandler(
-        (filters.Entity("url") | filters.Entity("text_link")) & (~filters.UpdateType.EDITED_MESSAGE), 
-        media_handler.url_handler
-    ))
-    
-    application.add_handler(MessageHandler(
-        (filters.VIDEO | filters.AUDIO | filters.PHOTO | filters.Document.ALL) & (~filters.UpdateType.EDITED_MESSAGE), 
-        media_handler.any_file_handler
-    ))
-    
-    application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & (~filters.UpdateType.EDITED_MESSAGE), 
-        media_handler.text_input_handler
-    ))
-    
-    application.add_error_handler(command_handler.error_handler)
-
-    logger.info("La aplicación del bot se está iniciando... El Userbot se conectará y el worker se lanzará a continuación.")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    MediaSuiteBot().run()
