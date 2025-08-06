@@ -15,10 +15,23 @@ class UserbotManager:
         self.session_string = os.getenv("USERBOT_SESSION_STRING")
         self.client: Client | None = None
 
+    async def _preload_dialogs(self):
+        """Tarea en segundo plano para poblar la caché de diálogos."""
+        if not self.is_active():
+            return
+        logger.info("[USERBOT] Tarea en segundo plano: Iniciando precarga de diálogos...")
+        try:
+            count = 0
+            async for _ in self.client.get_dialogs():
+                count += 1
+            logger.info(f"[USERBOT] Tarea en segundo plano: Caché poblada con {count} diálogos.")
+        except Exception as e:
+            logger.error(f"[USERBOT] Tarea en segundo plano: Falló la precarga de diálogos. Error: {e}")
+
     async def start(self):
-        """Inicia el cliente Pyrogram y precarga los diálogos."""
+        """Inicia el cliente Pyrogram y lanza la precarga de diálogos en segundo plano."""
         if not all([self.api_id, self.api_hash, self.session_string]):
-            logger.warning("[USERBOT] Faltan API_ID, API_HASH o SESSION_STRING. El Userbot no se iniciará.")
+            logger.warning("[USERBOT] Faltan credenciales. El Userbot no se iniciará.")
             return
 
         logger.info("[USERBOT] Iniciando cliente Pyrogram...")
@@ -34,14 +47,12 @@ class UserbotManager:
             me = await self.client.get_me()
             logger.info(f"[USERBOT] Cliente Pyrogram conectado como: {me.username or me.first_name}")
 
-            # --- NUEVO: Precargar diálogos para evitar errores de 'Peer id invalid' ---
-            logger.info("[USERBOT] Precargando diálogos para poblar caché...")
-            async for _ in self.client.get_dialogs():
-                await asyncio.sleep(0.1) # Pequeña pausa para no sobrecargar
-            logger.info("[USERBOT] Caché de diálogos poblada.")
+            # --- ARQUITECTURA MEJORADA: Lanzar la precarga como una tarea en segundo plano ---
+            # Esto permite que la función start() termine inmediatamente, desbloqueando el bot.
+            asyncio.create_task(self._preload_dialogs())
 
         except (AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated) as e:
-            logger.critical(f"[USERBOT] ¡Error CRÍTICO de autenticación! La SESSION_STRING es inválida. Regenerarla. Error: {e}")
+            logger.critical(f"[USERBOT] ¡Error de autenticación! La SESSION_STRING es inválida. Regenerarla. Error: {e}")
             self.client = None
         except Exception as e:
             logger.critical(f"[USERBOT] No se pudo iniciar el cliente Pyrogram. Error: {e}")
