@@ -41,10 +41,11 @@ logger = logging.getLogger(__name__)
 # --- Constantes ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")
+# --- NUEVA CONSTANTE ---
+FORWARD_CHAT_ID = os.getenv("FORWARD_CHAT_ID")
 
 # --- Hooks de Inicialización y Apagado ---
 async def post_init(application: Application):
-    """Se ejecuta después de que la aplicación se inicialice pero antes de que empiece el polling."""
     logger.info("Hook post_init: Iniciando conexión del Userbot...")
     await userbot_instance.start()
     
@@ -54,14 +55,16 @@ async def post_init(application: Application):
 
 
 async def post_shutdown(application: Application):
-    """Se ejecuta después de que el polling se detenga."""
     logger.info("Hook post_shutdown: Deteniendo conexión del Userbot...")
     await userbot_instance.stop()
 
 def main():
-    """Punto de entrada principal. Configura y ejecuta el bot."""
     if not TELEGRAM_TOKEN:
         logger.critical("¡ERROR CRÍTICO! La variable de entorno TELEGRAM_TOKEN no está definida.")
+        return
+    # --- NUEVA VERIFICACIÓN CRÍTICA ---
+    if not FORWARD_CHAT_ID:
+        logger.critical("¡ERROR CRÍTICO! La variable de entorno FORWARD_CHAT_ID no está definida. Es necesario un canal privado para el 'Pase de Testigo'.")
         return
     if not ADMIN_USER_ID:
         logger.warning("ADVERTENCIA: La variable de entorno ADMIN_USER_ID no está definida. No habrá un 'Jefe'.")
@@ -75,7 +78,6 @@ def main():
     persistence = PicklePersistence(filepath="bot_persistence")
     defaults = Defaults(parse_mode=ParseMode.HTML)
     
-    # --- Construcción de la Aplicación con Hooks ---
     application = (
         ApplicationBuilder()
         .token(TELEGRAM_TOKEN)
@@ -111,7 +113,6 @@ def main():
     
     application.add_error_handler(command_handler.error_handler)
 
-    # --- Inicio del Bot (llamada bloqueante que gestiona todo) ---
     logger.info("La aplicación del bot se está iniciando... El Userbot se conectará y el worker se lanzará a continuación.")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 

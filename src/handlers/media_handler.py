@@ -12,22 +12,21 @@ from src.core import downloader
 from . import processing_handler
 
 logger = logging.getLogger(__name__)
-# Se lee el USERBOT_ID como un string, ya que es la forma segura de manejarlo desde .env
-USERBOT_ID = os.getenv("USERBOT_ID")
+# Se lee el FORWARD_CHAT_ID, que es el ID del canal privado compartido.
+FORWARD_CHAT_ID = os.getenv("FORWARD_CHAT_ID")
 
 async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user: return
 
-    if not USERBOT_ID:
-        await update.message.reply_html("❌ <b>Error de Configuración del Sistema:</b> La variable <code>USERBOT_ID</code> no está definida en el entorno.")
-        logger.critical("La variable de entorno USERBOT_ID no está definida.")
+    if not FORWARD_CHAT_ID:
+        await update.message.reply_html("❌ <b>Error de Configuración del Sistema:</b> La variable <code>FORWARD_CHAT_ID</code> no está definida en el entorno.")
+        logger.critical("La variable de entorno FORWARD_CHAT_ID no está definida. Es necesario crear un canal privado.")
         return
 
     greeting_prefix = get_greeting(user.id)
     message = update.effective_message
     
-    # Este bloque determina el tipo de archivo y el objeto de archivo original
     original_media_object, file_type = None, None
     if message.video: original_media_object, file_type = message.video, 'video'
     elif message.audio: original_media_object, file_type = message.audio, 'audio'
@@ -38,18 +37,15 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        logger.info(f"Realizando pase de testigo del mensaje {message.message_id} al Userbot ID {USERBOT_ID}")
+        logger.info(f"Realizando pase de testigo del mensaje {message.message_id} al canal de trabajo {FORWARD_CHAT_ID}")
         
-        # El reenvío es el núcleo del "Pase de Testigo"
+        # El reenvío ahora se hace al canal compartido
         forwarded_message = await context.bot.forward_message(
-            chat_id=USERBOT_ID,
+            chat_id=FORWARD_CHAT_ID,
             from_chat_id=message.chat_id,
             message_id=message.message_id
         )
         
-        # --- LÓGICA CRÍTICA CORREGIDA ---
-        # Después de reenviar, obtenemos la nueva referencia del archivo desde el mensaje reenviado.
-        # Esta es nuestra nueva "fuente de verdad" para el nombre y tamaño.
         media_in_forwarded_msg = (
             forwarded_message.video or 
             forwarded_message.audio or 
@@ -57,18 +53,16 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         if not media_in_forwarded_msg:
-            raise TelegramError("El mensaje reenviado al Userbot no contiene un medio válido.")
+            raise TelegramError("El mensaje reenviado al canal de trabajo no contiene un medio válido.")
 
-        # Usamos el nombre y tamaño del archivo de la copia del Userbot
         final_file_name = sanitize_filename(getattr(media_in_forwarded_msg, 'file_name', "Archivo Sin Nombre"))
         final_file_size = media_in_forwarded_msg.file_size
         
         task_id = db_instance.add_task(
             user_id=user.id,
             file_type=file_type,
-            file_name=final_file_name, # <-- Nombre de archivo corregido y sanitizado
-            file_size=final_file_size, # <-- Tamaño de archivo corregido
-            # Guardamos las coordenadas del mensaje en el chat del Userbot
+            file_name=final_file_name,
+            file_size=final_file_size,
             forwarded_chat_id=forwarded_message.chat_id,
             forwarded_message_id=forwarded_message.message_id
         )
@@ -84,12 +78,10 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except TelegramError as e:
         logger.error(f"Fallo en el 'Pase de Testigo' debido a un error de Telegram: {e}")
         error_text = str(e)
-        if "bot was blocked by the user" in error_text:
-            user_facing_error = "El Userbot me ha bloqueado. No puedo enviarle archivos."
-        elif "USER_DEACTIVATED" in error_text:
-            user_facing_error = "La cuenta del Userbot ha sido desactivada."
+        if "chat not found" in error_text:
+            user_facing_error = "El canal de trabajo no fue encontrado. Verifique el <code>FORWARD_CHAT_ID</code> y que el bot sea administrador del canal."
         else:
-            user_facing_error = "Hubo un error crítico al transferir el archivo al procesador. Verifique que el Userbot esté activo y que no me haya bloqueado."
+            user_facing_error = f"Hubo un error crítico al transferir el archivo al procesador: {e}"
         await message.reply_html(f"❌ {greeting_prefix}{user_facing_error}")
     except Exception as e:
         logger.error(f"Fallo inesperado en el 'Pase de Testigo': {e}", exc_info=True)

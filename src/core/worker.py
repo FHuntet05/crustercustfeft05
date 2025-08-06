@@ -8,7 +8,9 @@ from telegram.ext import Application
 from telegram.error import BadRequest, NetworkError
 
 from src.db.mongo_manager import db_instance
-from src.helpers.utils import format_status_message, sanitize_filename
+# --- LÍNEA CRÍTICA AÑADIDA ---
+# Se importa la función que faltaba para el manejo de errores.
+from src.helpers.utils import format_status_message, sanitize_filename, escape_html
 from src.core import ffmpeg, downloader
 from src.core.userbot_manager import userbot_instance
 from src.core.ffmpeg import get_media_info
@@ -47,17 +49,14 @@ async def _edit_status_message(user_id: int, text: str):
             if "Message is not modified" not in str(e): logger.warning(f"No se pudo editar msg: {e}")
 
 def sync_progress_callback(current, total, user_id, operation, engine="Userbot"):
-    """Callback síncrono que Pyrogram puede llamar."""
     if user_id in progress_tracker:
         ctx = progress_tracker[user_id]
-        # Programar la corutina en el bucle de eventos principal de forma segura
         asyncio.run_coroutine_threadsafe(
             async_progress_callback(current, total, user_id, operation, engine),
             ctx.loop
         )
 
 async def async_progress_callback(current, total, user_id, operation, engine="Userbot"):
-    """Corutina que realmente formatea y edita el mensaje."""
     if user_id not in progress_tracker: return
     ctx = progress_tracker[user_id]
     
@@ -98,8 +97,6 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
         if match and total_duration_sec > 0:
             h, m, s, ms = map(int, match.groups())
             processed_sec = h * 3600 + m * 60 + s + ms / 100
-            
-            # Usar directamente la corutina aquí, ya que estamos en un entorno async
             await async_progress_callback(processed_sec, total_duration_sec, user_id, "⚙️ Codificando...", "FFmpeg")
     
     stdout, stderr = await process.communicate()
@@ -142,9 +139,6 @@ async def _download_file_helper(task: dict, download_path: str):
 
     dl_progress = lambda c, t: sync_progress_callback(c, t, user_id, "📥 Descargando...")
     
-    # --- LÓGICA CRÍTICA CORREGIDA ---
-    # Se verifica la existencia de 'forwarded_chat_id' y 'forwarded_message_id' que ahora
-    # son guardados correctamente por el media_handler.
     if userbot_instance.is_active() and task.get('forwarded_chat_id') and task.get('forwarded_message_id'):
         logger.info(f"Iniciando descarga con Userbot para la tarea {task['_id']}")
         await userbot_instance.download_file(
@@ -174,8 +168,6 @@ async def process_task(bot, task: dict):
     
     files_to_clean = set()
     try:
-        # La tarea ya tiene toda la información correcta desde su creación,
-        # así que no es estrictamente necesario recargarla, pero es buena práctica.
         task = db_instance.get_task(task_id)
         progress_tracker[user_id].task = task
 
@@ -186,7 +178,6 @@ async def process_task(bot, task: dict):
             format_id = task.get('processing_config', {}).get('download_format_id', 'best')
             if not downloader.download_from_url(url, download_path, format_id, lambda d: None):
                 raise Exception("La descarga desde la URL falló.")
-        # La condición ahora es más genérica para cubrir cualquier caso con referencia de archivo
         elif task.get('forwarded_message_id') or task.get('file_id'):
             await _download_file_helper(task, download_path)
         else:
@@ -216,6 +207,8 @@ async def process_task(bot, task: dict):
         logger.critical(f"Error al procesar la tarea {task_id}: {e}", exc_info=True)
         db_instance.update_task(task_id, "status", "error")
         db_instance.update_task(task_id, "last_error", str(e))
+        # --- BLOQUE DE MANEJO DE ERROR CORREGIDO ---
+        # Ahora escape_html está disponible y el mensaje de error se enviará correctamente.
         await _edit_status_message(user_id, f"❌ <b>Error Grave</b>\n\nHa ocurrido un fallo durante el procesamiento.\n\n<b>Motivo:</b>\n<code>{escape_html(str(e))}</code>")
     finally:
         if user_id in progress_tracker:
@@ -242,8 +235,10 @@ async def worker_loop(application: Application):
                     await asyncio.sleep(10)
                     continue
                 
-                # Lanzamos la tarea de procesamiento en segundo plano para no bloquear el worker
-                asyncio.create_task(process_task(bot, task))
+                # Crear la tarea y añadir un "done callback" para registrar excepciones
+                task_obj = asyncio.create_task(process_task(bot, task))
+                task_obj.add_done_callback(lambda t: logger.error(f"La tarea {t.get_name()} falló con una excepción no recuperada: {t.exception()}", exc_info=t.exception()) if t.exception() else None)
+
             else:
                 await asyncio.sleep(5)
         except Exception as e:
