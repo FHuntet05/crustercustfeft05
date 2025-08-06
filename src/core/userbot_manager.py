@@ -55,9 +55,11 @@ class UserbotManager:
         if not self.is_active():
             raise ConnectionError("El Userbot no está activo o conectado.")
         
+        # --- CORRECCIÓN ARQUITECTÓNICA FINAL ---
+        # El message_id va como argumento posicional, y el chat_id como argumento nombrado.
         await self.client.download_media(
+            message=message_id,
             chat_id=chat_id,
-            message_id=message_id,
             file_name=download_path,
             progress=progress_callback
         )
