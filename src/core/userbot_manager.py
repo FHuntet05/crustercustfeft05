@@ -2,8 +2,6 @@ import os
 import logging
 import asyncio
 from pyrogram import Client
-# --- LÍNEA CRÍTICA CORREGIDA ---
-# Se cambió RpcError por RPCError, que es el nombre correcto de la clase.
 from pyrogram.errors import MessageIdInvalid, ChannelInvalid, PeerIdInvalid, UserIsBlocked, RPCError
 
 from src.db.mongo_manager import db_instance
@@ -20,6 +18,8 @@ class UserbotManager:
             cls._instance.api_id = os.getenv("API_ID")
             cls._instance.api_hash = os.getenv("API_HASH")
             cls._instance.session_string = os.getenv("USERBOT_SESSION_STRING")
+            # --- NUEVA VARIABLE DE INSTANCIA ---
+            cls._instance.forward_chat_id = os.getenv("FORWARD_CHAT_ID")
             cls._instance.client = None
         return cls._instance
 
@@ -27,19 +27,39 @@ class UserbotManager:
         if not all([self.api_id, self.api_hash, self.session_string]):
             logger.warning("[USERBOT] Faltan credenciales. Userbot no se iniciará.")
             return
+        # --- NUEVA VERIFICACIÓN ---
+        if not self.forward_chat_id:
+            # No se detiene, pero se advierte que la funcionalidad clave no funcionará.
+            logger.warning("[USERBOT] FORWARD_CHAT_ID no está definido. El Userbot no podrá descargar archivos reenviados.")
+        
         logger.info("[USERBOT] Iniciando cliente Pyrogram...")
         self.client = Client("userbot_session", api_id=int(self.api_id), api_hash=self.api_hash, session_string=self.session_string, in_memory=True)
+        
         try:
             await self.client.start()
             me = await self.client.get_me()
             logger.info(f"[USERBOT] Cliente conectado como: {me.username or me.first_name}")
+
+            # --- VERIFICACIÓN DE CANAL AÑADIDA ---
+            if self.forward_chat_id:
+                logger.info(f"[USERBOT] Verificando acceso al canal de trabajo: {self.forward_chat_id}")
+                await self.client.get_chat(int(self.forward_chat_id))
+                logger.info("[USERBOT] Verificación del canal de trabajo exitosa.")
+
+        except ValueError as e:
+            # Captura el error "Peer id invalid" y lo traduce a un mensaje útil.
+            if "Peer id invalid" in str(e):
+                logger.critical(f"[USERBOT] FALLO CRÍTICO DE CONFIGURACIÓN: El Userbot no puede encontrar o acceder al canal con ID {self.forward_chat_id}.")
+                logger.critical("[USERBOT] POSIBLES CAUSAS: 1) El Userbot no es miembro del canal. 2) El FORWARD_CHAT_ID es incorrecto. 3) El Userbot acaba de unirse y necesita 'despertar' (enviar un mensaje en el canal).")
+                raise ConnectionError(f"El Userbot no pudo acceder al FORWARD_CHAT_ID. Por favor, revise la configuración.")
+            else:
+                raise e # Re-lanza otros ValueErrors
         except RPCError as e:
             logger.critical(f"[USERBOT] Error de autenticación o conexión con Pyrogram: {e}")
             self.client = None
         except Exception as e:
             logger.critical(f"[USERBOT] Error inesperado al iniciar el Userbot: {e}")
             self.client = None
-
 
     async def stop(self):
         if self.is_active():
@@ -56,7 +76,6 @@ class UserbotManager:
         message_to_delete = None
         try:
             logger.info(f"[USERBOT] Obteniendo mensaje de trabajo {message_id} desde chat {chat_id}")
-            # get_messages puede devolver una lista, tomamos el primer elemento
             message_to_download = await self.client.get_messages(chat_id, message_id)
             
             if not message_to_download or not message_to_download.media:
@@ -80,7 +99,6 @@ class UserbotManager:
             raise ConnectionError("El Userbot fue bloqueado y no puede enviar/recibir mensajes.")
         except Exception as e:
             logger.error(f"[USERBOT] Falló la descarga desde el chat de trabajo. Error: {e}")
-            # Re-lanzamos la excepción para que el worker la capture y marque la tarea como fallida.
             raise
         finally:
             if message_to_delete:

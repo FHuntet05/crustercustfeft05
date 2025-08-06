@@ -12,7 +12,6 @@ from src.core import downloader
 from . import processing_handler
 
 logger = logging.getLogger(__name__)
-# Se lee el FORWARD_CHAT_ID, que es el ID del canal privado compartido.
 FORWARD_CHAT_ID = os.getenv("FORWARD_CHAT_ID")
 
 async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -39,7 +38,6 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         logger.info(f"Realizando pase de testigo del mensaje {message.message_id} al canal de trabajo {FORWARD_CHAT_ID}")
         
-        # El reenvío ahora se hace al canal compartido
         forwarded_message = await context.bot.forward_message(
             chat_id=FORWARD_CHAT_ID,
             from_chat_id=message.chat_id,
@@ -116,7 +114,10 @@ async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await status_message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if 'active_config' in context.user_data:
+    # --- LÍNEA CRÍTICA CORREGIDA ---
+    # Se comprueba primero que context.user_data no sea None antes de buscar la clave.
+    # Esto evita el TypeError y hace que el bot ignore texto aleatorio sin crashear.
+    if context.user_data and 'active_config' in context.user_data:
         config = context.user_data['active_config']
         user_input = update.message.text.strip()
         is_skip = user_input.lower() == "/skip"
