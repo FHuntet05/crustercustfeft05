@@ -25,6 +25,7 @@ def build_processing_menu(task_id: str, file_type: str, task_config: dict, filen
         keyboard.extend([
             [InlineKeyboardButton(quality_text, callback_data=f"config_quality_{task_id}")],
             [InlineKeyboardButton("✂️ Cortar", callback_data=f"config_trim_{task_id}"), InlineKeyboardButton("🎞️ a GIF", callback_data=f"config_gif_{task_id}")],
+            [InlineKeyboardButton("🎵/📜 Pistas (Muxer)", callback_data=f"config_tracks_{task_id}")],
             [InlineKeyboardButton(mute_text, callback_data=f"set_mute_{task_id}_toggle")],
         ])
     elif file_type == 'audio':
@@ -45,6 +46,15 @@ def build_processing_menu(task_id: str, file_type: str, task_config: dict, filen
 def build_quality_menu(task_id: str) -> InlineKeyboardMarkup:
     keyboard = [[InlineKeyboardButton(f"🎬 {q}", callback_data=f"set_quality_{task_id}_{q}")] for q in ['1080p', '720p', '480p', '360p']]
     keyboard.append([InlineKeyboardButton("🔙 Volver", callback_data=f"task_process_{task_id}")])
+    return InlineKeyboardMarkup(keyboard)
+
+def build_tracks_menu(task_id: str) -> InlineKeyboardMarkup:
+    """Función restaurada para evitar el ImportError. La funcionalidad está pendiente."""
+    keyboard = [
+        [InlineKeyboardButton("➕ Añadir Pista de Audio (Próximamente)", callback_data="noop")],
+        [InlineKeyboardButton("➕ Añadir Subtítulos (Próximamente)", callback_data="noop")],
+        [InlineKeyboardButton("🔙 Volver", callback_data=f"task_process_{task_id}")],
+    ]
     return InlineKeyboardMarkup(keyboard)
     
 def build_download_quality_menu(task_id: str, formats: list) -> InlineKeyboardMarkup:
@@ -99,10 +109,7 @@ def build_song_results_keyboard(search_results: list) -> InlineKeyboardMarkup:
     for res in search_results:
         duration = int(res.get('duration', 0))
         duration_str = f"{duration // 60}:{str(duration % 60).zfill(2)}" if duration > 0 else ""
-        
-        # CORRECCIÓN: Se elimina la truncación `[:60]` para evitar corrupción de UTF-8
         label = f"• {duration_str} • {escape_html(res['title'])} — {escape_html(res['artist'])}"
-        
         keyboard.append([InlineKeyboardButton(label, callback_data=f"song_select_{res['_id']}")])
     return InlineKeyboardMarkup(keyboard)
 

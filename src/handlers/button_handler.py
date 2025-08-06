@@ -65,10 +65,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             keyboard = build_quality_menu(task_id)
             await query.edit_message_text("⚙️ Seleccione el perfil de calidad/conversión:", reply_markup=keyboard)
         elif action_type == "tracks":
-            # Esta lógica podría simplificarse o mejorarse, pero la mantenemos por ahora
-            task = db_instance.get_task(task_id)
-            if not task: await query.edit_message_text("❌ Tarea no encontrada."); return
-            await query.edit_message_text("🛠️ Funcionalidad de pistas en desarrollo.", reply_markup=None)
+            keyboard = build_tracks_menu(task_id)
+            await query.edit_message_text("🎵/📜 Gestor de Pistas (En desarrollo):", reply_markup=keyboard)
         elif action_type == "audioconvert":
             keyboard = build_audio_convert_menu(task_id)
             await query.edit_message_text("🔊 Configure la conversión de audio:", reply_markup=keyboard)
