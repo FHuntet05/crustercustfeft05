@@ -70,25 +70,37 @@ class UserbotManager:
 
     async def download_file(self, chat_id: int, message_id: int, download_path: str, progress_callback=None):
         """
-        Descarga un archivo usando el contexto del mensaje.
-        Primero obtiene el objeto del mensaje y luego lo pasa a download_media.
+        Descarga un archivo, manejando mensajes directos y reenviados.
         """
         if not self.is_active():
             raise ConnectionError("El Userbot no está activo o conectado.")
         
         try:
-            # PASO 1: Obtener el objeto del mensaje completo
-            logger.info(f"[USERBOT] Obteniendo mensaje {message_id} del chat {chat_id}")
-            message = await self.client.get_messages(chat_id, message_id)
-            if not message:
+            logger.info(f"[USERBOT] Obteniendo mensaje contenedor {message_id} del chat {chat_id}")
+            wrapper_message = await self.client.get_messages(chat_id, message_id)
+            if not wrapper_message:
                 raise FileNotFoundError(f"El mensaje {message_id} no fue encontrado en el chat {chat_id}.")
-            
-            if not (message.video or message.audio or message.document):
-                raise ValueError("El mensaje recuperado no contiene un archivo descargable.")
 
-            # PASO 2: Pasar el objeto del mensaje a la función de descarga
+            message_to_download = None
+            # Escenario 1: El mensaje tiene el medio directamente
+            if wrapper_message.media:
+                logger.info("[USERBOT] El mensaje contenedor tiene medios directos.")
+                message_to_download = wrapper_message
+            # Escenario 2: El mensaje es un reenvío
+            elif wrapper_message.forward_from_message_id:
+                logger.info("[USERBOT] Mensaje contenedor es un reenvío. Obteniendo mensaje original.")
+                original_chat_id = wrapper_message.forward_from_chat.id
+                original_message_id = wrapper_message.forward_from_message_id
+                message_to_download = await self.client.get_messages(original_chat_id, original_message_id)
+            
+            # Validación final
+            if not message_to_download or not message_to_download.media:
+                raise ValueError("Ni el mensaje principal ni el original reenviado contienen un archivo descargable.")
+
+            # Proceder con la descarga
+            logger.info(f"[USERBOT] Procediendo a descargar desde el mensaje {message_to_download.id} del chat {message_to_download.chat.id}")
             await self.client.download_media(
-                message=message,
+                message=message_to_download,
                 file_name=download_path,
                 progress=progress_callback
             )
