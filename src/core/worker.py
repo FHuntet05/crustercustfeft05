@@ -56,13 +56,10 @@ async def progress_callback(current, total, user_id, operation):
     speed = current / elapsed if elapsed > 0 else 0
     eta = (total - current) / speed if speed > 0 else 0
     
-    # --- CAMBIO: Adaptado para que funcione sin reply_to_message ---
     user_mention = "Usuario"
     if ctx.message.from_user:
         user_mention = ctx.message.from_user.mention
-    elif ctx.message.chat:
-        user_mention = ctx.message.chat.title or "Chat"
-    
+
     text = format_status_message(
         operation=operation,
         filename=ctx.task.get('original_filename', 'archivo'),
@@ -81,7 +78,7 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
     duration_info = get_media_info(input_path)
     total_duration_sec = float(duration_info.get('format', {}).get('duration', 0))
     if total_duration_sec == 0:
-        logger.warning("No se pudo obtener la duración del video, el progreso de FFmpeg no funcionará.")
+        logger.warning("No se pudo obtener la duración, el progreso de FFmpeg no funcionará.")
 
     time_pattern = re.compile(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})")
     process = await asyncio.create_subprocess_shell(cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -113,7 +110,6 @@ async def process_task(bot, task: dict):
     files_to_clean = set()
     output_path = ""
     try:
-        # --- CAMBIO: Añadir await ---
         task = await db_instance.get_task(task_id)
         if not task: raise Exception("La tarea fue eliminada o no se encontró en la DB.")
         progress_tracker[user_id].task = task
@@ -164,15 +160,13 @@ async def process_task(bot, task: dict):
         elif file_type == 'audio':
             await bot.send_audio(user_id, audio=output_path, caption=caption, progress=progress_callback, progress_args=(user_id, "⬆️ Subiendo..."))
         else:
-            await bot.send_document(user_id, document=output_path, caption=caption, progress=progress_callback, progress_args=(user_id, "⬆️ Subiendo..."))
+            await bot.send_document(user_id, document=output_path, caption=caption, progress=progress_callback, progress_args=(user_id, "⬆- Subiendo..."))
         
-        # --- CAMBIO: Añadir await ---
         await db_instance.update_task(task_id, "status", "done")
         await status_message.delete()
 
     except Exception as e:
         logger.critical(f"Error al procesar la tarea {task_id}: {e}", exc_info=True)
-        # --- CAMBIO: Añadir await ---
         await db_instance.update_task(task_id, "status", "error")
         await db_instance.update_task(task_id, "last_error", str(e))
         await _edit_status_message(user_id, f"❌ <b>Error Grave</b>\n\n<code>{escape_html(str(e))}</code>")
@@ -191,7 +185,6 @@ async def worker_loop(bot_instance):
     logger.info("[WORKER] Bucle del worker iniciado.")
     while True:
         try:
-            # --- CAMBIO: Añadir await ---
             task = await db_instance.tasks.find_one_and_update(
                 {"status": "queued"},
                 {"$set": {"status": "processing", "processed_at": datetime.utcnow()}}
@@ -200,8 +193,7 @@ async def worker_loop(bot_instance):
             if task:
                 user_id = task['user_id']
                 if user_id in progress_tracker:
-                    logger.warning(f"El usuario {user_id} ya tiene una tarea en proceso. Re-encolando la tarea {task['_id']}.")
-                    # --- CAMBIO: Añadir await ---
+                    logger.warning(f"El usuario {user_id} ya tiene una tarea en proceso. Re-encolando.")
                     await db_instance.update_task(str(task['_id']), "status", "queued")
                     await asyncio.sleep(10)
                     continue
@@ -209,7 +201,7 @@ async def worker_loop(bot_instance):
                 logger.info(f"Iniciando procesamiento de la tarea {task['_id']} para el usuario {user_id}")
                 task_obj = asyncio.create_task(process_task(bot_instance, task))
                 task_obj.add_done_callback(
-                    lambda t: logger.error(f"La tarea {t.get_name()} falló con una excepción no recuperada: {t.exception()}", exc_info=t.exception()) if t.exception() else None
+                    lambda t: logger.error(f"La tarea falló con una excepción no recuperada: {t.exception()}", exc_info=t.exception()) if t.exception() else None
                 )
             else:
                 await asyncio.sleep(5)

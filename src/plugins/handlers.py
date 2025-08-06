@@ -1,10 +1,10 @@
 import logging
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery
-from pyrogram.enums import ParseMode # Importar ParseMode
+from pyrogram.enums import ParseMode
 
 from src.db.mongo_manager import db_instance
-from src.helpers.utils import sanitize_filename, escape_html # Aseguramos tener escape_html
+from src.helpers.utils import sanitize_filename, escape_html
 from src.helpers.keyboards import build_panel_keyboard, build_processing_menu
 
 logger = logging.getLogger(__name__)
@@ -19,8 +19,6 @@ async def start_command(client: Client, message: Message):
         "• <b>Envíe un archivo</b> o <b>pegue un enlace</b>.\n"
         "• Use /panel para ver su mesa de trabajo."
     )
-    # --- CORRECCIÓN ---
-    # Se cambia .reply_html() por .reply() con el argumento de parseo
     await message.reply(start_message, parse_mode=ParseMode.HTML)
 
 @Client.on_message(filters.private & (filters.document | filters.audio | filters.video))
@@ -42,15 +40,13 @@ async def any_file_handler(client: Client, message: Message):
     )
 
     if task_id:
-        # --- CORRECCIÓN ---
         await message.reply(
             f"✅ He recibido <code>{escape_html(sanitize_filename(getattr(file, 'file_name', 'archivo')))}</code> y lo he añadido a su mesa de trabajo.\n\n"
             "Use /panel para ver y procesar sus tareas.",
             parse_mode=ParseMode.HTML
         )
     else:
-        # --- CORRECCIÓN ---
-        await message.reply(f"❌ Hubo un error al registrar la tarea.", parse_mode=ParseMode.HTML)
+        await message.reply("❌ Hubo un error al registrar la tarea.")
         
 @Client.on_message(filters.command("panel") & filters.private)
 async def panel_command(client: Client, message: Message):
@@ -58,11 +54,9 @@ async def panel_command(client: Client, message: Message):
     pending_tasks = await db_instance.get_pending_tasks(user.id)
     
     if not pending_tasks:
-        # --- CORRECCIÓN ---
         return await message.reply("✅ ¡Su mesa de trabajo está vacía!", parse_mode=ParseMode.HTML)
         
     keyboard = build_panel_keyboard(pending_tasks)
-    # --- CORRECCIÓN ---
     await message.reply("📋 <b>Su mesa de trabajo actual:</b>", reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
 
@@ -74,7 +68,6 @@ async def on_task_process(client: Client, query: CallbackQuery):
         return await query.answer("❌ Error: La tarea ya no existe.", show_alert=True)
     
     keyboard = build_processing_menu(task_id, task['file_type'], task.get('processing_config', {}), task.get('original_filename', ''))
-    # edit_text SÍ necesita el argumento parse_mode
     await query.message.edit_text(
         f"🛠️ ¿Qué desea hacer con:\n<code>{escape_html(task.get('original_filename', '...'))}</code>?", 
         reply_markup=keyboard,

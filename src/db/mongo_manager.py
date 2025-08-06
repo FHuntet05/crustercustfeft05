@@ -17,30 +17,27 @@ class Database:
             try:
                 mongo_uri = os.getenv("MONGO_URI")
                 if not mongo_uri: raise ValueError("MONGO_URI no está definida.")
-                # --- CAMBIO CRÍTICO: Usamos motor.motor_asyncio ---
                 cls._instance.client = motor.motor_asyncio.AsyncIOMotorClient(mongo_uri)
-                cls._instance.db = cls._instance.client.get_database("JefesMediaSuiteDB") # Puedes cambiar "JefesMediaSuiteDB"
+                cls._instance.db = cls._instance.client.get_database("JefesMediaSuiteDB")
                 cls._instance.tasks = cls._instance.db.tasks
                 cls._instance.user_settings = cls._instance.db.user_settings
-                # No se necesita el ping aquí, se hará en el bot.py
                 logger.info("Cliente de base de datos Motor (asíncrono) inicializado.")
             except Exception as e:
                 logger.critical(f"FALLO CRÍTICO DB: {e}")
                 raise ConnectionError(f"No se pudo inicializar el cliente de la DB: {e}")
         return cls._instance
 
-    # --- TODOS LOS MÉTODOS AHORA SON ASÍNCRONOS ---
     async def add_task(self, user_id, file_type, file_name=None, file_size=None, url=None, file_id=None, message_id=None, processing_config=None):
         task_doc = {
             "user_id": int(user_id),
             "url": url,
-            "file_id": file_id, # Añadido para la nueva arquitectura
-            "message_id": message_id, # Añadido para la nueva arquitectura
+            "file_id": file_id,
+            "message_id": message_id,
             "original_filename": file_name,
             "final_filename": os.path.splitext(file_name)[0] if file_name else "descarga_url",
             "file_size": file_size,
             "file_type": file_type,
-            "status": "pending_processing", # Estado inicial
+            "status": "pending_processing",
             "created_at": datetime.utcnow(),
             "processed_at": None,
             "processing_config": processing_config or {},
@@ -62,7 +59,7 @@ class Database:
 
     async def get_pending_tasks(self, user_id):
         cursor = self.tasks.find({"user_id": int(user_id), "status": "pending_processing"}).sort("created_at", 1)
-        return await cursor.to_list(length=100) # Convertir cursor a lista
+        return await cursor.to_list(length=100)
 
     async def update_task_config(self, task_id, key, value):
         try: 
@@ -78,13 +75,9 @@ class Database:
             logger.error(f"Error al actualizar tarea {task_id}: {e}")
             return None
     
-    # Placeholder para la función get_user_settings, asegúrate de que sea async si la usas
     async def get_user_settings(self, user_id):
-        # Implementa la lógica para obtener o crear la configuración del usuario
-        # Por ahora, solo es un placeholder
         if not await self.user_settings.find_one({"_id": user_id}):
             await self.user_settings.insert_one({"_id": user_id, "created_at": datetime.utcnow()})
         return
 
-# Instancia única para ser importada
 db_instance = Database()
