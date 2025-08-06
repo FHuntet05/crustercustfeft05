@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
     Application,
+    ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     filters,
@@ -42,8 +43,19 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")
 
-async def main():
-    """Punto de entrada asíncrono. Configura y ejecuta el bot y el userbot."""
+# --- Hooks de Inicialización y Apagado ---
+async def post_init(application: Application):
+    """Se ejecuta después de que la aplicación se inicialice pero antes de que empiece el polling."""
+    logger.info("Hook post_init: Iniciando conexión del Userbot...")
+    await userbot_instance.start()
+
+async def post_shutdown(application: Application):
+    """Se ejecuta después de que el polling se detenga."""
+    logger.info("Hook post_shutdown: Deteniendo conexión del Userbot...")
+    await userbot_instance.stop()
+
+def main():
+    """Punto de entrada principal. Configura y ejecuta el bot."""
     if not TELEGRAM_TOKEN:
         logger.critical("¡ERROR CRÍTICO! La variable de entorno TELEGRAM_TOKEN no está definida.")
         return
@@ -59,11 +71,14 @@ async def main():
     persistence = PicklePersistence(filepath="bot_persistence")
     defaults = Defaults(parse_mode=ParseMode.HTML)
     
+    # --- Construcción de la Aplicación con Hooks ---
     application = (
-        Application.builder()
+        ApplicationBuilder()
         .token(TELEGRAM_TOKEN)
         .persistence(persistence)
         .defaults(defaults)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .build()
     )
 
@@ -92,35 +107,14 @@ async def main():
     
     application.add_error_handler(command_handler.error_handler)
 
+    # --- Inicio del Worker en un Hilo Separado ---
     worker_thread = threading.Thread(target=worker.worker_thread_runner, daemon=True)
     worker_thread.start()
     logger.info("Worker de procesamiento iniciado en segundo plano.")
 
-    try:
-        await application.initialize()
-        await userbot_instance.start()
-        
-        logger.info("El bot está ahora en línea y escuchando...")
-        await application.start()
-        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-        
-        while True:
-            await asyncio.sleep(3600)
-
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Detención del bot solicitada.")
-    finally:
-        logger.info("Iniciando secuencia de apagado...")
-        # CORRECCIÓN: Se eliminó la llamada al método inexistente 'is_running'
-        if application.updater:
-            await application.updater.stop()
-        await application.stop()
-        await userbot_instance.stop()
-        logger.info("El bot se ha detenido limpiamente.")
-
+    # --- Inicio del Bot (llamada bloqueante que gestiona todo) ---
+    logger.info("La aplicación del bot se está iniciando... El Userbot se conectará a continuación.")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except RuntimeError:
-        pass # Ignorar error de 'event loop is closed' en reinicios rápidos
+    main()
