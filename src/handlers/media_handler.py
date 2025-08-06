@@ -18,9 +18,9 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     user = update.effective_user
     if not user:
-        logger.warning("No se pudo obtener effective_user de la actualización.")
         return
 
+    # Comprobar si hay una configuración activa que espera un archivo (para carátulas, etc.)
     if config := context.user_data.get('active_config'):
         if config.get('menu_type') == 'audiotags' and config.get('stage') == 'cover':
             await processing_handler.handle_cover_art_input(update, context, config)
@@ -29,43 +29,39 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await processing_handler.handle_track_input(update, context, config)
             return
 
+    # Flujo normal: tratarlo como una nueva tarea para el panel
     greeting_prefix = get_greeting(user.id)
     message = update.effective_message
     
     file_obj, file_type = None, None
     
-    if message.video:
-        file_obj, file_type = message.video, 'video'
-    elif message.audio:
-        file_obj, file_type = message.audio, 'audio'
-    elif message.photo:
-        file_obj, file_type = message.photo[-1], 'document' 
-    elif message.document:
-        file_obj, file_type = message.document, 'document'
+    if message.video: file_obj, file_type = message.video, 'video'
+    elif message.audio: file_obj, file_type = message.audio, 'audio'
+    elif message.photo: file_obj, file_type = message.photo[-1], 'document'
+    elif message.document: file_obj, file_type = message.document, 'document'
     
     if not file_obj:
         logger.warning("any_file_handler recibió un mensaje sin archivo adjunto válido.")
         return
 
-    file_id = file_obj.file_id
-    file_name = sanitize_filename(getattr(file_obj, 'file_name', "Archivo Sin Nombre"))
-    file_size = file_obj.file_size
-
+    # Capturar el contexto completo del mensaje para el Userbot
     task_id = db_instance.add_task(
         user_id=user.id,
         file_type=file_type,
-        file_id=file_id,
-        file_name=file_name,
-        file_size=file_size
+        file_id=file_obj.file_id,
+        file_name=sanitize_filename(getattr(file_obj, 'file_name', "Archivo Sin Nombre")),
+        file_size=file_obj.file_size,
+        message_id=message.message_id,
+        chat_id=message.chat_id
     )
 
     if task_id:
         await message.reply_html(
-            f"✅ {greeting_prefix}He recibido <code>{escape_html(file_name)}</code> y lo he añadido a su mesa de trabajo.\n\n"
+            f"✅ {greeting_prefix}He recibido <code>{escape_html(getattr(file_obj, 'file_name', 'archivo'))}</code> y lo he añadido a su mesa de trabajo.\n\n"
             "Use /panel para ver y procesar sus tareas."
         )
     else:
-        await message.reply_html(f"❌ {greeting_prefix}Hubo un error al registrar el archivo en la base de datos.")
+        await message.reply_html(f"❌ {greeting_prefix}Hubo un error al registrar el archivo.")
 
 
 async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):

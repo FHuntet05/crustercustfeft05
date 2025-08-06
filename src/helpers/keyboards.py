@@ -1,6 +1,5 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from .utils import escape_html, format_bytes
-import os
 
 def build_panel_keyboard(tasks: list) -> InlineKeyboardMarkup:
     keyboard, task_ids = [], [str(t['_id']) for t in tasks]
@@ -24,7 +23,8 @@ def build_processing_menu(task_id: str, file_type: str, task_config: dict, filen
         mute_text = "🔇 Silenciar" if not task_config.get('mute_audio') else "🔊 Desilenciar"
         keyboard.extend([
             [InlineKeyboardButton(quality_text, callback_data=f"config_quality_{task_id}")],
-            [InlineKeyboardButton("✂️ Cortar", callback_data=f"config_trim_{task_id}"), InlineKeyboardButton("🎞️ a GIF", callback_data=f"config_gif_{task_id}")],
+            [InlineKeyboardButton("✂️ Cortar", callback_data=f"config_trim_{task_id}"), InlineKeyboardButton("🧩 Dividir", callback_data=f"config_split_{task_id}")],
+            [InlineKeyboardButton("🎞️ a GIF", callback_data=f"config_gif_{task_id}"), InlineKeyboardButton("💧 Marca de Agua", callback_data=f"config_watermark_{task_id}")],
             [InlineKeyboardButton("🎵/📜 Pistas (Muxer)", callback_data=f"config_tracks_{task_id}")],
             [InlineKeyboardButton(mute_text, callback_data=f"set_mute_{task_id}_toggle")],
         ])
@@ -39,7 +39,7 @@ def build_processing_menu(task_id: str, file_type: str, task_config: dict, filen
         ])
     keyboard.extend([
         [InlineKeyboardButton("✏️ Renombrar", callback_data=f"config_rename_{task_id}")],
-        [InlineKeyboardButton("🔙 Volver al Panel", callback_data="panel_show"), InlineKeyboardButton("✅ Enviar a Cola", callback_data=f"task_queue_{task_id}")]
+        [InlineKeyboardButton("🔙 Volver", callback_data="panel_show"), InlineKeyboardButton("✅ Enviar a Cola", callback_data=f"task_queue_{task_id}")]
     ])
     return InlineKeyboardMarkup(keyboard)
 
@@ -49,10 +49,8 @@ def build_quality_menu(task_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 def build_tracks_menu(task_id: str) -> InlineKeyboardMarkup:
-    """Función restaurada para evitar el ImportError. La funcionalidad está pendiente."""
     keyboard = [
-        [InlineKeyboardButton("➕ Añadir Pista de Audio (Próximamente)", callback_data="noop")],
-        [InlineKeyboardButton("➕ Añadir Subtítulos (Próximamente)", callback_data="noop")],
+        [InlineKeyboardButton("Funcionalidad en desarrollo", callback_data="noop")],
         [InlineKeyboardButton("🔙 Volver", callback_data=f"task_process_{task_id}")],
     ]
     return InlineKeyboardMarkup(keyboard)
