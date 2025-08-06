@@ -3,6 +3,7 @@ import logging
 import asyncio
 from pyrogram import Client
 from pyrogram.errors import AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated
+from pyrogram.errors.exceptions.user_and_chats import UserAlreadyParticipant, InviteRequestSent
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ class UserbotManager:
         try:
             await self.client.start()
             me = await self.client.get_me()
-            self.saved_messages_id = me.id  # <-- INGENIERÍA AUTÓNOMA
+            self.saved_messages_id = me.id
             logger.info(f"[USERBOT] Cliente conectado como: {me.username or me.first_name}")
             logger.info(f"[USERBOT] Proxy de 'Mensajes Guardados' autoconfigurado con ID: {self.saved_messages_id}")
             asyncio.create_task(self._preload_dialogs_background_task())
@@ -73,7 +74,8 @@ class UserbotManager:
 
     async def download_file(self, message_url: str, download_path: str, progress_callback=None):
         """
-        Descarga un archivo usando la estrategia de reenvío a un proxy autoconfigurado.
+        Descarga un archivo usando la estrategia de reenvío a un proxy,
+        con unión proactiva al canal de origen.
         """
         if not self.is_active():
             raise ConnectionError("El Userbot no está activo o conectado.")
@@ -90,7 +92,22 @@ class UserbotManager:
             if "t.me/c/" in message_url:
                  from_chat_id = int(f"-100{chat_id_str}")
 
-            # 2. Reenviar el mensaje al chat proxy (Mensajes Guardados)
+            # 2. Unión proactiva al chat de origen
+            try:
+                if isinstance(from_chat_id, str) and from_chat_id.startswith('@'):
+                    logger.info(f"[USERBOT] Intentando unirse proactivamente a {from_chat_id}...")
+                    await self.client.join_chat(from_chat_id)
+                    logger.info(f"[USERBOT] Unión a {from_chat_id} exitosa o ya era miembro.")
+            except UserAlreadyParticipant:
+                logger.info(f"[USERBOT] Ya era miembro de {from_chat_id}.")
+                pass
+            except InviteRequestSent:
+                 raise ConnectionError(f"El Userbot necesita ser aprobado para unirse a {from_chat_id}.")
+            except Exception as e:
+                logger.warning(f"[USERBOT] No se pudo unir a {from_chat_id}. Puede que sea un chat privado. Error: {e}")
+
+
+            # 3. Reenviar el mensaje al chat proxy (Mensajes Guardados)
             logger.info(f"[USERBOT] Reenviando mensaje {msg_id} desde {from_chat_id} al proxy autoconfigurado {self.saved_messages_id}")
             proxy_message = await self.client.forward_messages(
                 chat_id=self.saved_messages_id,
@@ -101,7 +118,7 @@ class UserbotManager:
             if not proxy_message:
                 raise Exception("El reenvío al chat proxy no devolvió un mensaje.")
 
-            # 3. Descargar desde el mensaje proxy
+            # 4. Descargar desde el mensaje proxy
             logger.info(f"[USERBOT] Descargando desde el mensaje proxy {proxy_message.id}")
             await self.client.download_media(
                 message=proxy_message,
@@ -114,7 +131,7 @@ class UserbotManager:
             logger.error(f"[USERBOT] Falló la descarga con proxy. Error: {e}")
             raise
         finally:
-            # 4. Limpiar el chat proxy
+            # 5. Limpiar el chat proxy
             if proxy_message:
                 try:
                     await self.client.delete_messages(
