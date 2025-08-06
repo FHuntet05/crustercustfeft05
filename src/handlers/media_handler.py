@@ -3,6 +3,7 @@ import os
 from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
+from telegram.error import TelegramError
 
 from src.db.mongo_manager import db_instance
 from src.helpers.utils import get_greeting, escape_html, sanitize_filename
@@ -11,6 +12,7 @@ from src.core import downloader
 from . import processing_handler
 
 logger = logging.getLogger(__name__)
+# Se lee el USERBOT_ID como un string, ya que es la forma segura de manejarlo desde .env
 USERBOT_ID = os.getenv("USERBOT_ID")
 
 async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -18,48 +20,80 @@ async def any_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user: return
 
     if not USERBOT_ID:
-        await update.message.reply_html("❌ <b>Error de Configuración del Sistema:</b> La variable USERBOT_ID no está definida.")
+        await update.message.reply_html("❌ <b>Error de Configuración del Sistema:</b> La variable <code>USERBOT_ID</code> no está definida en el entorno.")
+        logger.critical("La variable de entorno USERBOT_ID no está definida.")
         return
 
     greeting_prefix = get_greeting(user.id)
     message = update.effective_message
     
-    file_obj, file_type = None, None
-    if message.video: file_obj, file_type = message.video, 'video'
-    elif message.audio: file_obj, file_type = message.audio, 'audio'
-    elif message.document: file_obj, file_type = message.document, 'document'
+    # Este bloque determina el tipo de archivo y el objeto de archivo original
+    original_media_object, file_type = None, None
+    if message.video: original_media_object, file_type = message.video, 'video'
+    elif message.audio: original_media_object, file_type = message.audio, 'audio'
+    elif message.document: original_media_object, file_type = message.document, 'document'
     
-    if not file_obj:
-        logger.warning("any_file_handler recibió un mensaje sin archivo adjunto válido.")
+    if not original_media_object:
+        logger.warning("any_file_handler recibió un mensaje sin un archivo adjunto procesable.")
         return
 
     try:
         logger.info(f"Realizando pase de testigo del mensaje {message.message_id} al Userbot ID {USERBOT_ID}")
+        
+        # El reenvío es el núcleo del "Pase de Testigo"
         forwarded_message = await context.bot.forward_message(
             chat_id=USERBOT_ID,
             from_chat_id=message.chat_id,
             message_id=message.message_id
         )
         
+        # --- LÓGICA CRÍTICA CORREGIDA ---
+        # Después de reenviar, obtenemos la nueva referencia del archivo desde el mensaje reenviado.
+        # Esta es nuestra nueva "fuente de verdad" para el nombre y tamaño.
+        media_in_forwarded_msg = (
+            forwarded_message.video or 
+            forwarded_message.audio or 
+            forwarded_message.document
+        )
+
+        if not media_in_forwarded_msg:
+            raise TelegramError("El mensaje reenviado al Userbot no contiene un medio válido.")
+
+        # Usamos el nombre y tamaño del archivo de la copia del Userbot
+        final_file_name = sanitize_filename(getattr(media_in_forwarded_msg, 'file_name', "Archivo Sin Nombre"))
+        final_file_size = media_in_forwarded_msg.file_size
+        
         task_id = db_instance.add_task(
             user_id=user.id,
             file_type=file_type,
-            file_name=sanitize_filename(getattr(file_obj, 'file_name', "Archivo Sin Nombre")),
-            file_size=file_obj.file_size,
+            file_name=final_file_name, # <-- Nombre de archivo corregido y sanitizado
+            file_size=final_file_size, # <-- Tamaño de archivo corregido
+            # Guardamos las coordenadas del mensaje en el chat del Userbot
             forwarded_chat_id=forwarded_message.chat_id,
             forwarded_message_id=forwarded_message.message_id
         )
 
         if task_id:
             await message.reply_html(
-                f"✅ {greeting_prefix}He recibido <code>{escape_html(getattr(file_obj, 'file_name', 'archivo'))}</code> y lo he añadido a su mesa de trabajo.\n\n"
+                f"✅ {greeting_prefix}He recibido <code>{escape_html(final_file_name)}</code> y lo he añadido a su mesa de trabajo.\n\n"
                 "Use /panel para ver y procesar sus tareas."
             )
         else:
-            await message.reply_html(f"❌ {greeting_prefix}Hubo un error al registrar la tarea.")
+            await message.reply_html(f"❌ {greeting_prefix}Hubo un error al registrar la tarea en la base de datos.")
+            
+    except TelegramError as e:
+        logger.error(f"Fallo en el 'Pase de Testigo' debido a un error de Telegram: {e}")
+        error_text = str(e)
+        if "bot was blocked by the user" in error_text:
+            user_facing_error = "El Userbot me ha bloqueado. No puedo enviarle archivos."
+        elif "USER_DEACTIVATED" in error_text:
+            user_facing_error = "La cuenta del Userbot ha sido desactivada."
+        else:
+            user_facing_error = "Hubo un error crítico al transferir el archivo al procesador. Verifique que el Userbot esté activo y que no me haya bloqueado."
+        await message.reply_html(f"❌ {greeting_prefix}{user_facing_error}")
     except Exception as e:
-        logger.error(f"Fallo en el 'Pase de Testigo': {e}")
-        await message.reply_html(f"❌ {greeting_prefix}Hubo un error crítico al transferir el archivo al procesador.")
+        logger.error(f"Fallo inesperado en el 'Pase de Testigo': {e}", exc_info=True)
+        await message.reply_html(f"❌ {greeting_prefix}Hubo un error crítico desconocido al transferir el archivo.")
 
 
 async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):

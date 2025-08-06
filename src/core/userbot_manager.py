@@ -2,19 +2,19 @@ import os
 import logging
 import asyncio
 from pyrogram import Client
-from pyrogram.errors import AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated
+from pyrogram.errors import MessageIdInvalid, ChannelInvalid, PeerIdInvalid, UserIsBlocked, RpcError
 
-from src.db.mongo_manager import db_instance  # 🔧 Importación necesaria para actualización de la tarea
-from src.helpers.utils import sanitize_filename  # 🔧 Asegura nombres válidos
+from src.db.mongo_manager import db_instance
+from src.helpers.utils import sanitize_filename
 
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 
 class UserbotManager:
     _instance = None
 
-    def new(cls):
+    def __new__(cls):
         if cls._instance is None:
-            cls._instance = super(UserbotManager, cls).new(cls)
+            cls._instance = super(UserbotManager, cls).__new__(cls)
             cls._instance.api_id = os.getenv("API_ID")
             cls._instance.api_hash = os.getenv("API_HASH")
             cls._instance.session_string = os.getenv("USERBOT_SESSION_STRING")
@@ -31,9 +31,13 @@ class UserbotManager:
             await self.client.start()
             me = await self.client.get_me()
             logger.info(f"[USERBOT] Cliente conectado como: {me.username or me.first_name}")
-        except Exception as e:
-            logger.critical(f"[USERBOT] Error de autenticación: {e}")
+        except RpcError as e:
+            logger.critical(f"[USERBOT] Error de autenticación o conexión con Pyrogram: {e}")
             self.client = None
+        except Exception as e:
+            logger.critical(f"[USERBOT] Error inesperado al iniciar el Userbot: {e}")
+            self.client = None
+
 
     async def stop(self):
         if self.is_active():
@@ -45,16 +49,18 @@ class UserbotManager:
 
     async def download_file(self, chat_id: int, message_id: int, task_id: str, download_path: str, progress_callback=None):
         if not self.is_active():
-            raise ConnectionError("Userbot no está activo.")
+            raise ConnectionError("Userbot no está activo o no pudo conectarse.")
         
         message_to_delete = None
         try:
             logger.info(f"[USERBOT] Obteniendo mensaje de trabajo {message_id} desde chat {chat_id}")
+            # get_messages puede devolver una lista, tomamos el primer elemento
             message_to_download = await self.client.get_messages(chat_id, message_id)
-            message_to_delete = message_to_download
             
             if not message_to_download or not message_to_download.media:
-                raise Exception("El mensaje de trabajo reenviado no tiene medios.")
+                raise FileNotFoundError("El mensaje de trabajo reenviado no existe, fue eliminado o no contiene medios.")
+
+            message_to_delete = message_to_download
 
             logger.info(f"[USERBOT] Descargando desde el mensaje de trabajo {message_to_download.id}")
             downloaded_file_path = await self.client.download_media(
@@ -62,25 +68,29 @@ class UserbotManager:
                 file_name=download_path,
                 progress=progress_callback
             )
-            logger.info(f"[USERBOT] Descarga completada. Archivo: {downloaded_file_path}")
+            logger.info(f"[USERBOT] Descarga completada. Archivo guardado en: {downloaded_file_path}")
 
-            # 🔧 Extraer el nombre base del archivo y actualizar en la base de datos
-            if downloaded_file_path:
-                final_name = os.path.basename(downloaded_file_path)
-                final_name = sanitize_filename(final_name)
-                logger.info(f"[USERBOT] Actualizando nombre del archivo en DB: {final_name}")
-                db_instance.update_task(task_id, "original_filename", final_name)
+            # --- LÓGICA DE ACTUALIZACIÓN DE DB ELIMINADA ---
+            # Esta responsabilidad ahora recae en el media_handler, que tiene la información
+            # correcta desde el momento de la creación de la tarea.
 
+        except (MessageIdInvalid, ChannelInvalid, PeerIdInvalid):
+            logger.error(f"[USERBOT] ID de mensaje o chat inválido para la descarga. Tarea: {task_id}")
+            raise FileNotFoundError(f"No se pudo encontrar el mensaje a descargar. Es posible que haya sido eliminado del chat del Userbot.")
+        except UserIsBlocked:
+            logger.error(f"[USERBOT] El bot ha sido bloqueado por el usuario de destino de la descarga. Tarea: {task_id}")
+            raise ConnectionError("El Userbot fue bloqueado y no puede enviar/recibir mensajes.")
         except Exception as e:
             logger.error(f"[USERBOT] Falló la descarga desde el chat de trabajo. Error: {e}")
+            # Re-lanzamos la excepción para que el worker la capture y marque la tarea como fallida.
             raise
         finally:
             if message_to_delete:
                 try:
                     await self.client.delete_messages(chat_id=chat_id, message_ids=message_to_delete.id)
-                    logger.info("[USERBOT] Mensaje de trabajo eliminado.")
+                    logger.info("[USERBOT] Mensaje de trabajo eliminado del chat del Userbot.")
                 except Exception as e:
-                    logger.warning(f"[USERBOT] No se pudo eliminar el mensaje de trabajo. Error: {e}")
+                    logger.warning(f"[USERBOT] No se pudo eliminar el mensaje de trabajo. Puede requerir limpieza manual. Error: {e}")
 
 # Instancia única para ser importada globalmente
 userbot_instance = UserbotManager()

@@ -142,15 +142,28 @@ async def _download_file_helper(task: dict, download_path: str):
 
     dl_progress = lambda c, t: sync_progress_callback(c, t, user_id, "📥 Descargando...")
     
-    if userbot_instance.is_active() and task.get('bot_username') and task.get('message_id'):
-        await userbot_instance.download_file(task['bot_username'], task['message_id'], str(task['_id']), download_path, dl_progress)
+    # --- LÓGICA CRÍTICA CORREGIDA ---
+    # Se verifica la existencia de 'forwarded_chat_id' y 'forwarded_message_id' que ahora
+    # son guardados correctamente por el media_handler.
+    if userbot_instance.is_active() and task.get('forwarded_chat_id') and task.get('forwarded_message_id'):
+        logger.info(f"Iniciando descarga con Userbot para la tarea {task['_id']}")
+        await userbot_instance.download_file(
+            chat_id=task['forwarded_chat_id'],
+            message_id=task['forwarded_message_id'],
+            task_id=str(task['_id']),
+            download_path=download_path,
+            progress_callback=dl_progress
+        )
     elif task.get('file_id') and task.get('file_size', 0) <= BOT_API_DOWNLOAD_LIMIT:
+        logger.info(f"Iniciando descarga con Bot API para la tarea {task['_id']}")
         ctx = progress_tracker.get(user_id)
         if not ctx: raise Exception("Contexto de progreso no encontrado para la descarga con bot API.")
         file_from_api = await ctx.bot.get_file(task['file_id'])
         await file_from_api.download_to_drive(download_path)
     else:
-        raise Exception("Archivo requiere Userbot para descargar (sin referencia directa) o excede el límite de la API de Bots.")
+        error_msg = ("La descarga requiere Userbot (archivo grande o sin file_id), "
+                     "pero la tarea no tiene referencia de mensaje reenviado o el Userbot está inactivo.")
+        raise Exception(error_msg)
 
 async def process_task(bot, task: dict):
     task_id, user_id = str(task['_id']), task['user_id']
@@ -161,8 +174,8 @@ async def process_task(bot, task: dict):
     
     files_to_clean = set()
     try:
-        # La DB ya tiene el nombre de archivo correcto gracias al userbot_manager
-        # Recargamos la tarea para asegurarnos de tener la última versión
+        # La tarea ya tiene toda la información correcta desde su creación,
+        # así que no es estrictamente necesario recargarla, pero es buena práctica.
         task = db_instance.get_task(task_id)
         progress_tracker[user_id].task = task
 
@@ -173,10 +186,11 @@ async def process_task(bot, task: dict):
             format_id = task.get('processing_config', {}).get('download_format_id', 'best')
             if not downloader.download_from_url(url, download_path, format_id, lambda d: None):
                 raise Exception("La descarga desde la URL falló.")
-        elif (task.get('bot_username') and task.get('message_id')) or task.get('file_id'):
+        # La condición ahora es más genérica para cubrir cualquier caso con referencia de archivo
+        elif task.get('forwarded_message_id') or task.get('file_id'):
             await _download_file_helper(task, download_path)
         else:
-            raise Exception("La tarea no tiene URL ni referencia de mensaje para descargar.")
+            raise Exception("La tarea no tiene URL ni referencia de archivo para descargar.")
         
         await _edit_status_message(user_id, "⚙️ Preparando para procesar...")
         config = task.get('processing_config', {})
@@ -201,7 +215,8 @@ async def process_task(bot, task: dict):
     except Exception as e:
         logger.critical(f"Error al procesar la tarea {task_id}: {e}", exc_info=True)
         db_instance.update_task(task_id, "status", "error")
-        await _edit_status_message(user_id, f"❌ <b>Error Grave</b>\n\n<code>{str(e)}</code>")
+        db_instance.update_task(task_id, "last_error", str(e))
+        await _edit_status_message(user_id, f"❌ <b>Error Grave</b>\n\nHa ocurrido un fallo durante el procesamiento.\n\n<b>Motivo:</b>\n<code>{escape_html(str(e))}</code>")
     finally:
         if user_id in progress_tracker:
             del progress_tracker[user_id]
@@ -227,7 +242,8 @@ async def worker_loop(application: Application):
                     await asyncio.sleep(10)
                     continue
                 
-                await process_task(bot, task)
+                # Lanzamos la tarea de procesamiento en segundo plano para no bloquear el worker
+                asyncio.create_task(process_task(bot, task))
             else:
                 await asyncio.sleep(5)
         except Exception as e:
