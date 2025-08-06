@@ -9,12 +9,8 @@ from src.helpers.utils import get_greeting, escape_html
 
 logger = logging.getLogger(__name__)
 
-# --- Manejador para los botones de configuración ---
 @Client.on_callback_query(filters.regex(r"^config_"))
 async def show_config_menu(client: Client, query: CallbackQuery):
-    """
-    Función genérica para mostrar un menú de configuración y pedir entrada al usuario.
-    """
     await query.answer()
     
     parts = query.data.split("_")
@@ -47,9 +43,6 @@ async def show_config_menu(client: Client, query: CallbackQuery):
 
 
 async def handle_text_input_for_config(client: Client, message: Message):
-    """
-    Procesa la entrada de texto del usuario según el menú de configuración activo.
-    """
     user_id = message.from_user.id
     user_input = message.text.strip()
     
@@ -89,17 +82,14 @@ async def handle_text_input_for_config(client: Client, message: Message):
         await message.reply("❌ Ocurrió un error al guardar la configuración.")
         return
 
-    # --- MÉTODO CORREGIDO ---
     await message.reply(feedback_message, parse_mode=ParseMode.HTML)
     
     task = await db_instance.get_task(task_id)
     if task:
         keyboard = build_processing_menu(task_id, task['file_type'], task.get('processing_config', {}), task.get('original_filename', ''))
-        # --- MÉTODO CORREGIDO ---
         await message.reply("¿Algo más?", reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
 
-# --- Manejador para los botones que establecen valores directamente ---
 @Client.on_callback_query(filters.regex(r"^set_"))
 async def set_value_callback(client: Client, query: CallbackQuery):
     await query.answer()

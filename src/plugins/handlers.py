@@ -10,7 +10,6 @@ from . import processing_handler
 
 logger = logging.getLogger(__name__)
 
-# --- Handler para los comandos principales ---
 @Client.on_message(filters.command(["start", "panel"]) & filters.private)
 async def main_commands(client: Client, message: Message):
     command = message.command[0].lower()
@@ -35,7 +34,6 @@ async def main_commands(client: Client, message: Message):
         keyboard = build_panel_keyboard(pending_tasks)
         await message.reply("📋 <b>Su mesa de trabajo actual:</b>", reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
-# --- Handler para archivos y URLs ---
 @Client.on_message(filters.private & (filters.document | filters.audio | filters.video | filters.regex(r"https?://\S+")))
 async def media_handler(client: Client, message: Message):
     user = message.from_user
@@ -66,25 +64,13 @@ async def media_handler(client: Client, message: Message):
     else:
         await message.reply("❌ Hubo un error al registrar la tarea.")
 
-# --- Handler para texto (delegación) ---
-# --- CORRECCIÓN ---
-# Se elimina `& ~filters.command()` que era sintácticamente incorrecto.
-# Pyrogram procesa los handlers en orden, así que este solo se activará
-# si el mensaje de texto no fue capturado por el `main_commands` handler.
 @Client.on_message(filters.private & filters.text)
 async def text_handler(client: Client, message: Message):
-    """
-    Este handler se activa con cualquier mensaje de texto.
-    Delega la lógica al processing_handler si el usuario está en medio de una configuración.
-    """
     if hasattr(client, 'user_data') and message.from_user.id in client.user_data:
         await processing_handler.handle_text_input_for_config(client, message)
-    else:
-        # El handler de comandos ya se habrá ejecutado si es un comando.
-        # Si llega aquí, es texto normal que no esperamos.
+    elif not message.command:
         await message.reply("No entiendo ese comando. Envíe un archivo, un enlace o use /start o /panel.")
 
-# --- Handlers para los callbacks de botones ---
 @Client.on_callback_query(filters.regex(r"^task_process_"))
 async def on_task_process(client: Client, query: CallbackQuery):
     await query.answer()

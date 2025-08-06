@@ -4,6 +4,7 @@ import os
 import asyncio
 import re
 from datetime import datetime
+from pyrogram.enums import ParseMode  # --- IMPORTACIÓN CRÍTICA ---
 
 from src.db.mongo_manager import db_instance
 from src.helpers.utils import format_status_message, sanitize_filename, escape_html
@@ -41,7 +42,7 @@ async def _edit_status_message(user_id: int, text: str):
                 chat_id=ctx.message.chat.id, 
                 message_id=ctx.message.id, 
                 text=text, 
-                parse_mode='HTML'
+                parse_mode=ParseMode.HTML  # --- CORRECCIÓN ---
             )
             ctx.last_edit_time = current_time
         except Exception:
@@ -57,7 +58,7 @@ async def progress_callback(current, total, user_id, operation):
     eta = (total - current) / speed if speed > 0 else 0
     
     user_mention = "Usuario"
-    if ctx.message.from_user:
+    if hasattr(ctx.message, 'from_user') and ctx.message.from_user:
         user_mention = ctx.message.from_user.mention
 
     text = format_status_message(
@@ -102,7 +103,8 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
 
 async def process_task(bot, task: dict):
     task_id, user_id = str(task['_id']), task['user_id']
-    status_message = await bot.send_message(user_id, f"Iniciando: <code>{task.get('original_filename') or task.get('url', 'Tarea')}</code>", parse_mode='HTML')
+    # --- CORRECCIÓN ---
+    status_message = await bot.send_message(user_id, f"Iniciando: <code>{task.get('original_filename') or task.get('url', 'Tarea')}</code>", parse_mode=ParseMode.HTML)
     
     global progress_tracker
     progress_tracker[user_id] = ProgressContext(bot, status_message, task)
@@ -160,7 +162,7 @@ async def process_task(bot, task: dict):
         elif file_type == 'audio':
             await bot.send_audio(user_id, audio=output_path, caption=caption, progress=progress_callback, progress_args=(user_id, "⬆️ Subiendo..."))
         else:
-            await bot.send_document(user_id, document=output_path, caption=caption, progress=progress_callback, progress_args=(user_id, "⬆- Subiendo..."))
+            await bot.send_document(user_id, document=output_path, caption=caption, progress=progress_callback, progress_args=(user_id, "⬆️ Subiendo..."))
         
         await db_instance.update_task(task_id, "status", "done")
         await status_message.delete()
@@ -169,6 +171,7 @@ async def process_task(bot, task: dict):
         logger.critical(f"Error al procesar la tarea {task_id}: {e}", exc_info=True)
         await db_instance.update_task(task_id, "status", "error")
         await db_instance.update_task(task_id, "last_error", str(e))
+        # --- CORRECCIÓN ---
         await _edit_status_message(user_id, f"❌ <b>Error Grave</b>\n\n<code>{escape_html(str(e))}</code>")
     finally:
         if user_id in progress_tracker:
