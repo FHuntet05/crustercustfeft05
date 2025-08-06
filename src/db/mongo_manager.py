@@ -3,6 +3,7 @@
 import os
 import motor.motor_asyncio
 import logging
+from pymongo.errors import OperationFailure # <-- IMPORTANTE
 from datetime import datetime
 from dotenv import load_dotenv
 from bson.objectid import ObjectId
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 class Database:
     _instance = None
-    _initialized = False # <-- CAMBIO: Flag para evitar re-inicialización
+    _initialized = False
 
     def __new__(cls):
         if cls._instance is None:
@@ -32,30 +33,25 @@ class Database:
                 raise ConnectionError(f"No se pudo inicializar el cliente de la DB: {e}")
         return cls._instance
     
-    # <-- CAMBIO: Nueva función de inicialización asíncrona
     async def init_db(self):
         if self._initialized:
             return
+        logger.info("Asegurando índices de la base de datos...")
         try:
-            logger.info("Asegurando índices de la base de datos...")
-            # Crear un índice TTL (Time-To-Live) para que las sesiones expiren
-            # El nombre explícito ("search_sessions_ttl") lo hace idempotente.
-            await self.search_sessions.create_index(
-                "created_at",
-                expireAfterSeconds=3600,
-                name="search_sessions_ttl"
-            )
-            await self.search_results.create_index(
-                "created_at",
-                expireAfterSeconds=3600,
-                name="search_results_ttl"
-            )
+            # <-- CAMBIO: Se añade try-except para manejar conflictos de índices existentes
+            await self.search_sessions.create_index("created_at", expireAfterSeconds=3600, name="search_sessions_ttl")
+            await self.search_results.create_index("created_at", expireAfterSeconds=3600, name="search_results_ttl")
+            logger.info("Índices TTL de búsqueda verificados y listos.")
+        except OperationFailure as e:
+            if "Index already exists" in str(e) or "IndexOptionsConflict" in str(e):
+                logger.warning(f"No se crearon los índices porque ya existen o hay un conflicto. El bot continuará. Error: {e}")
+            else:
+                logger.error(f"Error inesperado al crear los índices de la DB: {e}")
+        finally:
             self._initialized = True
-            logger.info("Índices de la DB verificados y listos.")
-        except Exception as e:
-            logger.error(f"Error al crear/verificar los índices de la DB: {e}")
 
 
+    # ... (El resto de las funciones permanecen sin cambios) ...
     async def add_task(self, user_id, file_type, file_name=None, file_size=None, url=None, file_id=None, message_id=None, processing_config=None, url_info=None):
         task_doc = {
             "user_id": int(user_id), "url": url, "file_id": file_id, "message_id": message_id,
