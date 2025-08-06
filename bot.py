@@ -1,3 +1,5 @@
+# bot.py
+
 import logging
 import os
 import asyncio
@@ -54,8 +56,12 @@ class MediaSuiteBot(Client):
         try:
             await db_instance.client.admin.command('ping')
             logger.info("Conexión con MongoDB Atlas establecida.")
+            
+            # <-- CAMBIO: Llamamos a la inicialización de la DB aquí
+            await db_instance.init_db()
+
         except Exception as e:
-            logger.critical(f"¡ERROR CRÍTICO! No se pudo conectar a MongoDB al iniciar. Error: {e}")
+            logger.critical(f"¡ERROR CRÍTICO! No se pudo conectar o inicializar MongoDB. Error: {e}")
             exit(1)
 
         logger.info("Lanzando el worker de procesamiento de tareas...")

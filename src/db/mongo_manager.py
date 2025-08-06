@@ -3,7 +3,7 @@
 import os
 import motor.motor_asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from dotenv import load_dotenv
 from bson.objectid import ObjectId
 
@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 
 class Database:
     _instance = None
-    
+    _initialized = False # <-- CAMBIO: Flag para evitar re-inicialización
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(Database, cls).__new__(cls)
@@ -21,25 +22,39 @@ class Database:
                 if not mongo_uri: raise ValueError("MONGO_URI no está definida.")
                 cls._instance.client = motor.motor_asyncio.AsyncIOMotorClient(mongo_uri)
                 cls._instance.db = cls._instance.client.get_database("JefesMediaSuiteDB")
-                # Colecciones principales
                 cls._instance.tasks = cls._instance.db.tasks
                 cls._instance.user_settings = cls._instance.db.user_settings
-                # Colecciones para la búsqueda
                 cls._instance.search_sessions = cls._instance.db.search_sessions
                 cls._instance.search_results = cls._instance.db.search_results
-                
-                # Crear un índice TTL para que las sesiones de búsqueda expiren
-                # Esto es buena práctica para no acumular basura. Expira en 1 hora.
-                cls._instance.search_sessions.create_index("created_at", expireAfterSeconds=3600)
-                cls._instance.search_results.create_index("created_at", expireAfterSeconds=3600)
-
                 logger.info("Cliente de base de datos Motor (asíncrono) inicializado.")
             except Exception as e:
                 logger.critical(f"FALLO CRÍTICO DB: {e}")
                 raise ConnectionError(f"No se pudo inicializar el cliente de la DB: {e}")
         return cls._instance
+    
+    # <-- CAMBIO: Nueva función de inicialización asíncrona
+    async def init_db(self):
+        if self._initialized:
+            return
+        try:
+            logger.info("Asegurando índices de la base de datos...")
+            # Crear un índice TTL (Time-To-Live) para que las sesiones expiren
+            # El nombre explícito ("search_sessions_ttl") lo hace idempotente.
+            await self.search_sessions.create_index(
+                "created_at",
+                expireAfterSeconds=3600,
+                name="search_sessions_ttl"
+            )
+            await self.search_results.create_index(
+                "created_at",
+                expireAfterSeconds=3600,
+                name="search_results_ttl"
+            )
+            self._initialized = True
+            logger.info("Índices de la DB verificados y listos.")
+        except Exception as e:
+            logger.error(f"Error al crear/verificar los índices de la DB: {e}")
 
-    # ... (el resto de las funciones como add_task, get_task, etc., permanecen iguales) ...
 
     async def add_task(self, user_id, file_type, file_name=None, file_size=None, url=None, file_id=None, message_id=None, processing_config=None, url_info=None):
         task_doc = {
