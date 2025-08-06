@@ -96,4 +96,7 @@ class UserbotManager:
 
         except Exception as e:
             logger.error(f"[USERBOT] Falló la descarga del mensaje {message_id}. Error: {e}")
-            raise  # Re-lanzar la excepción para que el worker la maneje
+            raise
+
+# Instancia única para ser importada globalmente
+userbot_instance = UserbotManager()
