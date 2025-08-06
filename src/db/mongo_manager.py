@@ -3,7 +3,7 @@
 import os
 import motor.motor_asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from bson.objectid import ObjectId
 
@@ -24,30 +24,32 @@ class Database:
                 # Colecciones principales
                 cls._instance.tasks = cls._instance.db.tasks
                 cls._instance.user_settings = cls._instance.db.user_settings
-                # Nueva colección para resultados de búsqueda
+                # Colecciones para la búsqueda
+                cls._instance.search_sessions = cls._instance.db.search_sessions
                 cls._instance.search_results = cls._instance.db.search_results
+                
+                # Crear un índice TTL para que las sesiones de búsqueda expiren
+                # Esto es buena práctica para no acumular basura. Expira en 1 hora.
+                cls._instance.search_sessions.create_index("created_at", expireAfterSeconds=3600)
+                cls._instance.search_results.create_index("created_at", expireAfterSeconds=3600)
+
                 logger.info("Cliente de base de datos Motor (asíncrono) inicializado.")
             except Exception as e:
                 logger.critical(f"FALLO CRÍTICO DB: {e}")
                 raise ConnectionError(f"No se pudo inicializar el cliente de la DB: {e}")
         return cls._instance
 
+    # ... (el resto de las funciones como add_task, get_task, etc., permanecen iguales) ...
+
     async def add_task(self, user_id, file_type, file_name=None, file_size=None, url=None, file_id=None, message_id=None, processing_config=None, url_info=None):
         task_doc = {
-            "user_id": int(user_id),
-            "url": url,
-            "file_id": file_id,
-            "message_id": message_id,
+            "user_id": int(user_id), "url": url, "file_id": file_id, "message_id": message_id,
             "original_filename": file_name,
             "final_filename": os.path.splitext(file_name)[0] if file_name else "descarga_url",
-            "file_size": file_size,
-            "file_type": file_type,
-            "status": "pending_processing",
-            "created_at": datetime.utcnow(),
-            "processed_at": None,
+            "file_size": file_size, "file_type": file_type, "status": "pending_processing",
+            "created_at": datetime.utcnow(), "processed_at": None,
             "processing_config": processing_config or {},
-            "url_info": url_info or {}, # Guardar la info de la URL
-            "last_error": None,
+            "url_info": url_info or {}, "last_error": None,
         }
         try:
             result = await self.tasks.insert_one(task_doc)
@@ -58,28 +60,20 @@ class Database:
             return None
 
     async def get_task(self, task_id):
-        try: 
-            return await self.tasks.find_one({"_id": ObjectId(task_id)})
-        except: 
-            return None
+        try: return await self.tasks.find_one({"_id": ObjectId(task_id)})
+        except: return None
 
     async def get_pending_tasks(self, user_id):
         cursor = self.tasks.find({"user_id": int(user_id), "status": "pending_processing"}).sort("created_at", 1)
         return await cursor.to_list(length=100)
 
     async def update_task_config(self, task_id, key, value):
-        try: 
-            return await self.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": {f"processing_config.{key}": value}})
-        except Exception as e:
-            logger.error(f"Error al actualizar config {task_id}: {e}")
-            return None
+        try: return await self.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": {f"processing_config.{key}": value}})
+        except Exception as e: logger.error(f"Error al actualizar config {task_id}: {e}"); return None
 
     async def update_task(self, task_id, field, value):
-        try: 
-            return await self.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": {field: value}})
-        except Exception as e:
-            logger.error(f"Error al actualizar tarea {task_id}: {e}")
-            return None
+        try: return await self.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": {field: value}})
+        except Exception as e: logger.error(f"Error al actualizar tarea {task_id}: {e}"); return None
     
     async def get_user_settings(self, user_id):
         if not await self.user_settings.find_one({"_id": user_id}):

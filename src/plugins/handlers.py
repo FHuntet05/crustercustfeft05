@@ -71,8 +71,8 @@ async def media_handler(client: Client, message: Message):
         status_msg = await message.reply("🔎 Analizando enlace...", parse_mode=ParseMode.HTML)
         info = downloader.get_url_info(message.text)
 
-        if not info:
-            return await status_msg.edit("❌ No pude obtener información de ese enlace.")
+        if not info or not info.get('formats'):
+            return await status_msg.edit("❌ No pude obtener información o formatos válidos de ese enlace.")
 
         task_id = await db_instance.add_task(
             user_id=user.id,
@@ -102,33 +102,41 @@ async def text_handler(client: Client, message: Message):
         # Esto es una respuesta a una configuración (ej. renombrar)
         await processing_handler.handle_text_input_for_config(client, message)
     elif not message.command:
-        # Esto es texto libre, lo tratamos como una búsqueda de música
+        # Esto es texto libre, lo tratamos como una búsqueda de música paginada
         query = message.text.strip()
         status_msg = await message.reply(f"🔎 Buscando música: <code>{escape_html(query)}</code>...", parse_mode=ParseMode.HTML)
         
-        search_results = downloader.search_music(query, limit=5)
+        search_results = downloader.search_music(query, limit=20)
         if not search_results:
             return await status_msg.edit("❌ No encontré resultados para su búsqueda.")
+
+        # Crear una sesión de búsqueda para agrupar los resultados
+        session_res = await db_instance.search_sessions.insert_one({
+            "user_id": user_id,
+            "query": query,
+            "created_at": datetime.utcnow()
+        })
+        search_id = str(session_res.inserted_id)
 
         docs_to_insert = []
         for res in search_results:
             res['user_id'] = user_id
+            res['search_id'] = search_id
             res['created_at'] = datetime.utcnow()
             docs_to_insert.append(res)
         
-        result = await db_instance.search_results.insert_many(docs_to_insert)
+        if docs_to_insert:
+            await db_instance.search_results.insert_many(docs_to_insert)
         
-        # Añadir los ObjectIds a los resultados para construir el teclado
-        for i, res_id in enumerate(result.inserted_ids):
-            search_results[i]['_id'] = str(res_id)
+        # Recuperamos los documentos insertados para tener los _id
+        all_results_from_db = await db_instance.search_results.find({"search_id": search_id}).to_list(length=100)
             
-        keyboard = build_search_results_keyboard(search_results)
+        keyboard = build_search_results_keyboard(all_results_from_db, search_id, page=1)
         await status_msg.edit(
-            "✅ He encontrado esto. Seleccione una para descargar:",
+            f"✅ Resultados para: <b>{escape_html(query)}</b>",
             reply_markup=keyboard,
             parse_mode=ParseMode.HTML
         )
-
 
 @Client.on_callback_query(filters.regex(r"^task_process_"))
 async def on_task_process(client: Client, query: CallbackQuery):

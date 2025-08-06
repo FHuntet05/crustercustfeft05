@@ -1,7 +1,8 @@
 # src/helpers/keyboards.py
 
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from .utils import escape_html, format_bytes
+from .utils import escape_html, format_bytes, format_time
+import math
 
 # Nota: Los objetos de teclado se construyen directamente creando listas de listas de botones.
 
@@ -22,12 +23,13 @@ def build_panel_keyboard(tasks: list) -> InlineKeyboardMarkup:
         
     return InlineKeyboardMarkup(keyboard)
 
-def build_processing_menu(task_id: str, file_type: str, task_config: dict, filename: str = "") -> InlineKeyboardMarkup:
+def build_processing_menu(task_id: str, file_type: str, task_data: dict, filename: str = "") -> InlineKeyboardMarkup:
     """Construye el menú principal de procesamiento para una tarea."""
     keyboard = []
+    task_config = task_data.get('processing_config', {})
     
     # Menú específico para tareas de URL que aún no han sido descargadas
-    if task_config.get('url_info') and not task_config.get('download_format_id'):
+    if task_data.get('url_info') and not task_config.get('download_format_id'):
          keyboard.append([InlineKeyboardButton("💿 Elegir Calidad de Descarga", callback_data=f"config_dlquality_{task_id}")])
 
     if file_type == 'video':
@@ -72,40 +74,63 @@ def build_download_quality_menu(task_id: str, formats: list) -> InlineKeyboardMa
     """Construye el menú de calidades de descarga para una URL."""
     keyboard = []
     
-    video_formats = sorted([f for f in formats if f.get('vcodec') != 'none' and f.get('height')], key=lambda x: x.get('height', 0), reverse=True)
-    audio_formats = sorted([f for f in formats if f.get('vcodec') == 'none' and f.get('abr')], key=lambda x: x.get('abr', 0), reverse=True)
+    video_formats = sorted([f for f in formats if f.get('vcodec', 'none') != 'none' and f.get('height')], key=lambda x: x.get('height', 0), reverse=True)
+    audio_formats = sorted([f for f in formats if f.get('vcodec', 'none') == 'none' and f.get('abr')], key=lambda x: x.get('abr', 0), reverse=True)
     
     if video_formats:
         keyboard.append([InlineKeyboardButton("--- 🎬 Video ---", callback_data="noop")])
         for f in video_formats[:5]:
-            label = f"{f.get('resolution', f.get('height', '...'))} ({f.get('ext')}) ~{format_bytes(f.get('filesize') or f.get('filesize_approx'))}".strip()
+            resolution = f.get('resolution') or f.get('height')
+            filesize = f.get('filesize') or f.get('filesize_approx')
+            label = f"{resolution} ({f.get('ext')}) ~{format_bytes(filesize)}".strip()
             keyboard.append([InlineKeyboardButton(label, callback_data=f"set_dlformat_{task_id}_{f.get('format_id')}")])
             
     if audio_formats:
         keyboard.append([InlineKeyboardButton("--- 🎵 Audio ---", callback_data="noop")])
         for f in audio_formats[:3]:
-            label = f"Audio {f.get('acodec')} ~{int(f.get('abr',0))}k ~{format_bytes(f.get('filesize') or f.get('filesize_approx'))}".strip()
+            filesize = f.get('filesize') or f.get('filesize_approx')
+            label = f"Audio {f.get('acodec')} ~{int(f.get('abr',0))}k ~{format_bytes(filesize)}".strip()
             keyboard.append([InlineKeyboardButton(label, callback_data=f"set_dlformat_{task_id}_{f.get('format_id')}")])
             
     keyboard.append([InlineKeyboardButton("🔙 Volver al Panel", callback_data="panel_show")])
     return InlineKeyboardMarkup(keyboard)
 
-def build_search_results_keyboard(results: list) -> InlineKeyboardMarkup:
-    """Construye el teclado para los resultados de búsqueda de música."""
+def build_search_results_keyboard(all_results: list, search_id: str, page: int = 1, page_size: int = 5) -> InlineKeyboardMarkup:
+    """Construye el teclado paginado para los resultados de búsqueda de música."""
     keyboard = []
-    source_emojis = {"spotify": "🟢", "youtube": "🔴"}
-    for res in results:
-        res_id = str(res['_id'])
-        source_emoji = source_emojis.get(res.get('source', 'youtube'), '❓')
-        title = res.get('title', 'Título desconocido')
-        artist = res.get('artist', 'Artista desconocido')
-        
-        display_text = f"{source_emoji} {title} - {artist}"
-        short_text = (display_text[:60] + '...') if len(display_text) > 64 else display_text
+    
+    # Paginación
+    start_index = (page - 1) * page_size
+    end_index = start_index + page_size
+    paginated_results = all_results[start_index:end_index]
+    total_pages = math.ceil(len(all_results) / page_size)
 
+    # Construir botones de resultados
+    for res in paginated_results:
+        res_id = str(res['_id'])
+        duration = format_time(res.get('duration'))
+        title = res.get('title', '...')
+        artist = res.get('artist', '...')
+        
+        display_text = f"🎵 {title} - {artist} ({duration})"
+        short_text = (display_text[:60] + '...') if len(display_text) > 64 else display_text
         keyboard.append([InlineKeyboardButton(short_text, callback_data=f"song_select_{res_id}")])
     
-    keyboard.append([InlineKeyboardButton("❌ Cancelar Búsqueda", callback_data="cancel_search")])
+    # Construir botones de paginación
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Anterior", callback_data=f"search_page_{search_id}_{page - 1}"))
+    
+    if total_pages > 1:
+        nav_buttons.append(InlineKeyboardButton(f"Pág {page}/{total_pages}", callback_data="noop"))
+
+    if page < total_pages:
+        nav_buttons.append(InlineKeyboardButton("Siguiente ➡️", callback_data=f"search_page_{search_id}_{page + 1}"))
+    
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+
+    keyboard.append([InlineKeyboardButton("❌ Cancelar Búsqueda", callback_data=f"cancel_search_{search_id}")])
     return InlineKeyboardMarkup(keyboard)
 
 
