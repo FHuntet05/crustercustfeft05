@@ -70,7 +70,7 @@ class UserbotManager:
 
     async def download_file(self, chat_id: int, message_id: int, download_path: str, progress_callback=None):
         """
-        Descarga un archivo, manejando mensajes directos y reenviados.
+        Descarga un archivo, manejando mensajes directos y todos los tipos de reenvíos.
         """
         if not self.is_active():
             raise ConnectionError("El Userbot no está activo o conectado.")
@@ -82,20 +82,27 @@ class UserbotManager:
                 raise FileNotFoundError(f"El mensaje {message_id} no fue encontrado en el chat {chat_id}.")
 
             message_to_download = None
+
             # Escenario 1: El mensaje tiene el medio directamente
             if wrapper_message.media:
-                logger.info("[USERBOT] El mensaje contenedor tiene medios directos.")
+                logger.info("[USERBOT] Escenario 1: Medio directo detectado en el mensaje contenedor.")
                 message_to_download = wrapper_message
-            # Escenario 2: El mensaje es un reenvío
+            
+            # Escenario 2: El mensaje es un reenvío anónimo/privado
+            elif wrapper_message.forward_date and hasattr(wrapper_message, 'forward') and wrapper_message.forward.media:
+                logger.info("[USERBOT] Escenario 2: Reenvío privado/anónimo detectado. Usando el objeto de mensaje anidado.")
+                message_to_download = wrapper_message.forward
+
+            # Escenario 3: El mensaje es un reenvío público (con link al original)
             elif wrapper_message.forward_from_message_id:
-                logger.info("[USERBOT] Mensaje contenedor es un reenvío. Obteniendo mensaje original.")
+                logger.info("[USERBOT] Escenario 3: Reenvío público detectado. Obteniendo mensaje original.")
                 original_chat_id = wrapper_message.forward_from_chat.id
                 original_message_id = wrapper_message.forward_from_message_id
                 message_to_download = await self.client.get_messages(original_chat_id, original_message_id)
             
             # Validación final
             if not message_to_download or not message_to_download.media:
-                raise ValueError("Ni el mensaje principal ni el original reenviado contienen un archivo descargable.")
+                raise ValueError("No se encontró un archivo descargable en el mensaje directo, ni en un posible reenvío anónimo o público.")
 
             # Proceder con la descarga
             logger.info(f"[USERBOT] Procediendo a descargar desde el mensaje {message_to_download.id} del chat {message_to_download.chat.id}")
