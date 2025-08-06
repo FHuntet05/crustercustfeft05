@@ -78,6 +78,11 @@ class UserbotManager:
         try:
             logger.info(f"[USERBOT] Obteniendo mensaje contenedor {message_id} del chat {chat_id}")
             wrapper_message = await self.client.get_messages(chat_id, message_id)
+            
+            # --- SONDA DE DIAGNÓSTICO ---
+            logger.info(f"[USERBOT] ESTRUCTURA DEL MENSAJE: {wrapper_message}")
+            # ---------------------------
+
             if not wrapper_message:
                 raise FileNotFoundError(f"El mensaje {message_id} no fue encontrado en el chat {chat_id}.")
 
