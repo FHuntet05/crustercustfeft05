@@ -18,7 +18,6 @@ class UserbotManager:
             cls._instance.api_id = os.getenv("API_ID")
             cls._instance.api_hash = os.getenv("API_HASH")
             cls._instance.session_string = os.getenv("USERBOT_SESSION_STRING")
-            # --- NUEVA VARIABLE DE INSTANCIA ---
             cls._instance.forward_chat_id = os.getenv("FORWARD_CHAT_ID")
             cls._instance.client = None
         return cls._instance
@@ -27,9 +26,7 @@ class UserbotManager:
         if not all([self.api_id, self.api_hash, self.session_string]):
             logger.warning("[USERBOT] Faltan credenciales. Userbot no se iniciará.")
             return
-        # --- NUEVA VERIFICACIÓN ---
         if not self.forward_chat_id:
-            # No se detiene, pero se advierte que la funcionalidad clave no funcionará.
             logger.warning("[USERBOT] FORWARD_CHAT_ID no está definido. El Userbot no podrá descargar archivos reenviados.")
         
         logger.info("[USERBOT] Iniciando cliente Pyrogram...")
@@ -40,20 +37,22 @@ class UserbotManager:
             me = await self.client.get_me()
             logger.info(f"[USERBOT] Cliente conectado como: {me.username or me.first_name}")
 
-            # --- VERIFICACIÓN DE CANAL AÑADIDA ---
             if self.forward_chat_id:
-                logger.info(f"[USERBOT] Verificando acceso al canal de trabajo: {self.forward_chat_id}")
-                await self.client.get_chat(int(self.forward_chat_id))
-                logger.info("[USERBOT] Verificación del canal de trabajo exitosa.")
+                try:
+                    # --- LÓGICA DE VERIFICACIÓN BLINDADA ---
+                    chat_id_int = int(self.forward_chat_id)
+                    logger.info(f"[USERBOT] Verificando acceso al canal de trabajo: {chat_id_int}")
+                    await self.client.get_chat(chat_id_int)
+                    logger.info(f"[USERBOT] Verificación del canal de trabajo {chat_id_int} exitosa.")
+                except ValueError:
+                    logger.critical(f"[USERBOT] FALLO CRÍTICO DE CONFIGURACIÓN: El FORWARD_CHAT_ID '{self.forward_chat_id}' no es un número válido.")
+                    raise ConnectionError("FORWARD_CHAT_ID en el archivo .env no es un ID numérico válido.")
 
-        except ValueError as e:
-            # Captura el error "Peer id invalid" y lo traduce a un mensaje útil.
-            if "Peer id invalid" in str(e):
-                logger.critical(f"[USERBOT] FALLO CRÍTICO DE CONFIGURACIÓN: El Userbot no puede encontrar o acceder al canal con ID {self.forward_chat_id}.")
-                logger.critical("[USERBOT] POSIBLES CAUSAS: 1) El Userbot no es miembro del canal. 2) El FORWARD_CHAT_ID es incorrecto. 3) El Userbot acaba de unirse y necesita 'despertar' (enviar un mensaje en el canal).")
-                raise ConnectionError(f"El Userbot no pudo acceder al FORWARD_CHAT_ID. Por favor, revise la configuración.")
-            else:
-                raise e # Re-lanza otros ValueErrors
+        except (ValueError, PeerIdInvalid) as e:
+            logger.critical(f"[USERBOT] FALLO CRÍTICO DE CONFIGURACIÓN: El Userbot no puede encontrar o acceder al canal con ID {self.forward_chat_id}.")
+            logger.critical("[USERBOT] CAUSA MÁS PROBABLE: La 'USERBOT_SESSION_STRING' es incorrecta, está desactualizada o no pertenece a la cuenta que creó el canal.")
+            logger.critical("[USERBOT] ACCIÓN REQUERIDA: Regenere la session string con 'generate_session.py' usando la cuenta correcta y actualice el .env.")
+            raise ConnectionError(f"El Userbot no pudo acceder al FORWARD_CHAT_ID. Verifique la session string.")
         except RPCError as e:
             logger.critical(f"[USERBOT] Error de autenticación o conexión con Pyrogram: {e}")
             self.client = None
