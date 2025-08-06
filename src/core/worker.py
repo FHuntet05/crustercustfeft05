@@ -4,7 +4,7 @@ import os
 import asyncio
 import re
 from datetime import datetime
-from pyrogram.enums import ParseMode  # --- IMPORTACIÓN CRÍTICA ---
+from pyrogram.enums import ParseMode
 
 from src.db.mongo_manager import db_instance
 from src.helpers.utils import format_status_message, sanitize_filename, escape_html
@@ -42,7 +42,7 @@ async def _edit_status_message(user_id: int, text: str):
                 chat_id=ctx.message.chat.id, 
                 message_id=ctx.message.id, 
                 text=text, 
-                parse_mode=ParseMode.HTML  # --- CORRECCIÓN ---
+                parse_mode=ParseMode.HTML
             )
             ctx.last_edit_time = current_time
         except Exception:
@@ -82,28 +82,48 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
         logger.warning("No se pudo obtener la duración, el progreso de FFmpeg no funcionará.")
 
     time_pattern = re.compile(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})")
-    process = await asyncio.create_subprocess_shell(cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     
-    while True:
-        line = await process.stderr.readline()
-        if not line: break
-        
+    # --- LÓGICA DE PROCESO MEJORADA ---
+    process = await asyncio.create_subprocess_shell(
+        cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+
+    # Leer stderr en tiempo real para progreso
+    async def read_stream(stream, callback):
+        while True:
+            line = await stream.readline()
+            if line:
+                callback(line)
+            else:
+                break
+
+    def log_progress(line):
         line_str = line.decode('utf-8', 'ignore').strip()
         match = time_pattern.search(line_str)
         if match and total_duration_sec > 0:
             h, m, s, ms = map(int, match.groups())
             processed_sec = h * 3600 + m * 60 + s + ms / 100
-            await progress_callback(processed_sec, total_duration_sec, user_id, "⚙️ Codificando...")
-    
+            # Usar run_coroutine_threadsafe no es necesario aquí ya que estamos en el mismo loop
+            asyncio.create_task(progress_callback(processed_sec, total_duration_sec, user_id, "⚙️ Codificando..."))
+
+    # Crear una tarea para leer el stream de error sin bloquear
+    progress_reader_task = asyncio.create_task(read_stream(process.stderr, log_progress))
+
+    # Esperar a que el proceso termine
     stdout, stderr = await process.communicate()
+    await progress_reader_task # Asegurarse de que el lector ha terminado
+
     if process.returncode != 0:
-        error_message = stderr.decode('utf-8', 'ignore')
+        # Ahora stderr contiene el mensaje de error completo
+        error_message = stderr.decode('utf-8', 'ignore').strip()
         logger.error(f"FFmpeg falló. Código: {process.returncode}\nError: {error_message}")
-        raise Exception(f"El proceso de FFmpeg falló: {error_message[-500:]}")
+        raise Exception(f"El proceso de FFmpeg falló: {error_message[-500:]}") # Mostrar los últimos 500 caracteres del error
 
 async def process_task(bot, task: dict):
+    # ... (el resto de la función es idéntica a la anterior, no necesita cambios)
     task_id, user_id = str(task['_id']), task['user_id']
-    # --- CORRECCIÓN ---
     status_message = await bot.send_message(user_id, f"Iniciando: <code>{task.get('original_filename') or task.get('url', 'Tarea')}</code>", parse_mode=ParseMode.HTML)
     
     global progress_tracker
@@ -171,7 +191,6 @@ async def process_task(bot, task: dict):
         logger.critical(f"Error al procesar la tarea {task_id}: {e}", exc_info=True)
         await db_instance.update_task(task_id, "status", "error")
         await db_instance.update_task(task_id, "last_error", str(e))
-        # --- CORRECCIÓN ---
         await _edit_status_message(user_id, f"❌ <b>Error Grave</b>\n\n<code>{escape_html(str(e))}</code>")
     finally:
         if user_id in progress_tracker:
@@ -185,6 +204,7 @@ async def process_task(bot, task: dict):
                     logger.error(f"No se pudo limpiar el archivo {fpath}: {e}")
 
 async def worker_loop(bot_instance):
+    # ... (sin cambios) ...
     logger.info("[WORKER] Bucle del worker iniciado.")
     while True:
         try:
