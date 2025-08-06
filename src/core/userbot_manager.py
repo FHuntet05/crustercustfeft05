@@ -3,6 +3,7 @@ import logging
 import asyncio
 from pyrogram import Client
 from pyrogram.errors import AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated
+from src.db.mongo_manager import db_instance # Necesario para actualizar la tarea
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ class UserbotManager:
             asyncio.create_task(self._preload_dialogs_background_task())
 
         except (AuthKeyUnregistered, UserDeactivated, AuthKeyDuplicated) as e:
-            logger.critical(f"¡Error de autenticación! La SESSION_STRING es inválida. Error: {e}")
+            logger.critical(f"[USERBOT] ¡Error de autenticación! La SESSION_STRING es inválida. Error: {e}")
             self.client = None
         except Exception as e:
             logger.critical(f"[USERBOT] No se pudo iniciar el cliente Pyrogram. Error: {e}")
@@ -71,10 +72,9 @@ class UserbotManager:
         """Comprueba si el cliente está inicializado y conectado."""
         return self.client and self.client.is_connected
 
-    async def download_file(self, bot_username: str, message_id: int, download_path: str, progress_callback=None):
+    async def download_file(self, bot_username: str, message_id: int, task_id: str, download_path: str, progress_callback=None):
         """
-        Descarga un archivo usando la estrategia de reenvío a un proxy,
-        utilizando el username del bot como referencia inequívoca del chat.
+        Descarga un archivo usando proxy y actualiza la tarea con el nombre de archivo real.
         """
         if not self.is_active():
             raise ConnectionError("El Userbot no está activo o conectado.")
@@ -84,8 +84,7 @@ class UserbotManager:
             from_chat_id = bot_username
             msg_id = message_id
 
-            # Reenviar el mensaje al chat proxy (Mensajes Guardados)
-            logger.info(f"[USERBOT] Reenviando mensaje {msg_id} desde el chat con {from_chat_id} al proxy {self.saved_messages_id}")
+            logger.info(f"[USERBOT] Reenviando mensaje {msg_id} desde {from_chat_id} al proxy {self.saved_messages_id}")
             proxy_message = await self.client.forward_messages(
                 chat_id=self.saved_messages_id,
                 from_chat_id=from_chat_id,
@@ -95,7 +94,21 @@ class UserbotManager:
             if not proxy_message:
                 raise Exception("El reenvío al chat proxy no devolvió un mensaje.")
 
-            # Descargar desde el mensaje proxy
+            # --- INGENIERÍA DE EXTRACCIÓN DE METADATOS ---
+            real_filename = None
+            if proxy_message.video and proxy_message.video.file_name:
+                real_filename = proxy_message.video.file_name
+            elif proxy_message.document and proxy_message.document.file_name:
+                real_filename = proxy_message.document.file_name
+            elif proxy_message.audio and proxy_message.audio.file_name:
+                real_filename = proxy_message.audio.file_name
+
+            if real_filename:
+                logger.info(f"[USERBOT] Nombre de archivo real extraído: {real_filename}. Actualizando DB.")
+                db_instance.update_task(task_id, "original_filename", real_filename)
+                db_instance.update_task(task_id, "final_filename", os.path.splitext(real_filename)[0])
+            # ----------------------------------------------
+
             logger.info(f"[USERBOT] Descargando desde el mensaje proxy {proxy_message.id}")
             await self.client.download_media(
                 message=proxy_message,
@@ -108,7 +121,6 @@ class UserbotManager:
             logger.error(f"[USERBOT] Falló la descarga con proxy. Error: {e}")
             raise
         finally:
-            # Limpiar el chat proxy
             if proxy_message:
                 try:
                     await self.client.delete_messages(

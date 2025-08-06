@@ -27,6 +27,7 @@ class ProgressContext:
         self.start_time = time.time()
         self.last_edit_time = 0
         self.last_update_text = ""
+        self.loop = asyncio.get_running_loop()
 
 progress_tracker = {}
 
@@ -45,7 +46,18 @@ async def _edit_status_message(user_id: int, text: str):
         except (BadRequest, NetworkError) as e:
             if "Message is not modified" not in str(e): logger.warning(f"No se pudo editar msg: {e}")
 
-async def progress_callback(current, total, user_id, operation, engine="Userbot"):
+def sync_progress_callback(current, total, user_id, operation, engine="Userbot"):
+    """Callback síncrono que Pyrogram puede llamar."""
+    if user_id in progress_tracker:
+        ctx = progress_tracker[user_id]
+        # Programar la corutina en el bucle de eventos principal de forma segura
+        asyncio.run_coroutine_threadsafe(
+            async_progress_callback(current, total, user_id, operation, engine),
+            ctx.loop
+        )
+
+async def async_progress_callback(current, total, user_id, operation, engine="Userbot"):
+    """Corutina que realmente formatea y edita el mensaje."""
     if user_id not in progress_tracker: return
     ctx = progress_tracker[user_id]
     
@@ -86,9 +98,9 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
         if match and total_duration_sec > 0:
             h, m, s, ms = map(int, match.groups())
             processed_sec = h * 3600 + m * 60 + s + ms / 100
-            percentage = (processed_sec / total_duration_sec) * 100
             
-            await progress_callback(processed_sec, total_duration_sec, user_id, "⚙️ Codificando...", "FFmpeg")
+            # Usar directamente la corutina aquí, ya que estamos en un entorno async
+            await async_progress_callback(processed_sec, total_duration_sec, user_id, "⚙️ Codificando...", "FFmpeg")
     
     stdout, stderr = await process.communicate()
     if process.returncode != 0:
@@ -96,13 +108,12 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
         logger.error(f"FFmpeg falló. Código: {process.returncode}\nError: {error_message}")
         raise Exception(f"El proceso de FFmpeg falló: {error_message[-500:]}")
 
-
 async def _upload_file(user_id, output_path, file_type, caption, reply_markup):
     filename = os.path.basename(output_path)
     if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
         raise Exception("El archivo de salida no existe o está vacío. El proceso FFmpeg probablemente falló.")
 
-    progress = lambda c, t: progress_callback(c, t, user_id, "⬆️ Subiendo...")
+    progress = lambda c, t: sync_progress_callback(c, t, user_id, "⬆️ Subiendo...")
     
     if userbot_instance.is_active():
         if file_type == 'video':
@@ -119,13 +130,9 @@ async def _upload_file(user_id, output_path, file_type, caption, reply_markup):
         if not ctx: raise Exception("Contexto de progreso no encontrado para la subida con bot API.")
         
         with open(output_path, 'rb') as f:
-            if file_type == 'video':
-                await ctx.bot.send_video(user_id, video=f, filename=filename, caption=caption, reply_markup=reply_markup, write_timeout=600)
-            elif file_type == 'audio':
-                await ctx.bot.send_audio(user_id, audio=f, filename=filename, caption=caption, reply_markup=reply_markup, write_timeout=600)
-            else:
-                await ctx.bot.send_document(user_id, document=f, filename=filename, caption=caption, reply_markup=reply_markup, write_timeout=600)
-
+            if file_type == 'video': await ctx.bot.send_video(user_id, video=f, filename=filename, caption=caption, reply_markup=reply_markup, write_timeout=600)
+            elif file_type == 'audio': await ctx.bot.send_audio(user_id, audio=f, filename=filename, caption=caption, reply_markup=reply_markup, write_timeout=600)
+            else: await ctx.bot.send_document(user_id, document=f, filename=filename, caption=caption, reply_markup=reply_markup, write_timeout=600)
 
 async def _download_file_helper(task: dict, download_path: str):
     user_id = task['user_id']
@@ -133,10 +140,10 @@ async def _download_file_helper(task: dict, download_path: str):
         logger.info(f"El archivo {download_path} ya existe, omitiendo descarga.")
         return
 
-    dl_progress = lambda c, t: progress_callback(c, t, user_id, "📥 Descargando...")
+    dl_progress = lambda c, t: sync_progress_callback(c, t, user_id, "📥 Descargando...")
     
-    if userbot_instance.is_active() and task.get('chat_id') and task.get('message_id'):
-        await userbot_instance.download_file(task['chat_id'], task['message_id'], download_path, dl_progress)
+    if userbot_instance.is_active() and task.get('bot_username') and task.get('message_id'):
+        await userbot_instance.download_file(task['bot_username'], task['message_id'], str(task['_id']), download_path, dl_progress)
     elif task.get('file_id') and task.get('file_size', 0) <= BOT_API_DOWNLOAD_LIMIT:
         ctx = progress_tracker.get(user_id)
         if not ctx: raise Exception("Contexto de progreso no encontrado para la descarga con bot API.")
@@ -144,7 +151,6 @@ async def _download_file_helper(task: dict, download_path: str):
         await file_from_api.download_to_drive(download_path)
     else:
         raise Exception("Archivo requiere Userbot para descargar (sin referencia directa) o excede el límite de la API de Bots.")
-
 
 async def process_task(bot, task: dict):
     task_id, user_id = str(task['_id']), task['user_id']
@@ -155,6 +161,11 @@ async def process_task(bot, task: dict):
     
     files_to_clean = set()
     try:
+        # La DB ya tiene el nombre de archivo correcto gracias al userbot_manager
+        # Recargamos la tarea para asegurarnos de tener la última versión
+        task = db_instance.get_task(task_id)
+        progress_tracker[user_id].task = task
+
         download_path = os.path.join(DOWNLOAD_DIR, f"{task_id}_{sanitize_filename(task.get('original_filename', 'file'))}")
         files_to_clean.add(download_path)
 
@@ -162,7 +173,7 @@ async def process_task(bot, task: dict):
             format_id = task.get('processing_config', {}).get('download_format_id', 'best')
             if not downloader.download_from_url(url, download_path, format_id, lambda d: None):
                 raise Exception("La descarga desde la URL falló.")
-        elif task.get('chat_id') and task.get('message_id') or task.get('file_id'):
+        elif (task.get('bot_username') and task.get('message_id')) or task.get('file_id'):
             await _download_file_helper(task, download_path)
         else:
             raise Exception("La tarea no tiene URL ni referencia de mensaje para descargar.")
