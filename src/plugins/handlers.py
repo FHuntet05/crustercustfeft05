@@ -1,169 +1,124 @@
 # src/plugins/handlers.py
+
 import asyncio
-import logging
+import os
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery
-from pyrogram.enums import ParseMode
-from datetime import datetime
+from bson import ObjectId
 
-from src.db.mongo_manager import db_instance
-from src.core import downloader
-from src.helpers.utils import sanitize_filename, escape_html
-from src.helpers.keyboards import build_panel_keyboard, build_processing_menu, build_download_quality_menu, build_search_results_keyboard
-from . import processing_handler 
+from src.db.mongo_manager import db
+from src.core.downloader import downloader, Downloader
+from src.helpers.keyboards import create_search_results_keyboard, create_quality_selection_keyboard, create_processing_menu
+from src.helpers.utils import get_sanitized_filename, is_valid_timestamp
 
-logger = logging.getLogger(__name__)
-
-@Client.on_message(filters.command(["start", "panel"]) & filters.private)
-async def main_commands(client: Client, message: Message):
-    command = message.command[0].lower()
-    user = message.from_user
-
-    if command == "start":
-        await db_instance.get_user_settings(user.id)
-        start_message = (
-            f"A sus órdenes, bienvenido a la <b>Suite de Medios</b>.\n\n"
-            "Soy su Asistente personal. Estoy listo para procesar sus archivos.\n\n"
-            "<b>¿Cómo empezar?</b>\n"
-            "• <b>Envíe un archivo</b> (video, audio, etc).\n"
-            "• <b>Pegue un enlace</b> de YouTube, etc.\n"
-            "• <b>Escriba un texto</b> para buscar música.\n"
-            "• Use /panel para ver su mesa de trabajo."
-        )
-        await message.reply(start_message, parse_mode=ParseMode.HTML)
-
-    elif command == "panel":
-        pending_tasks = await db_instance.get_pending_tasks(user.id)
-        if not pending_tasks:
-            return await message.reply("✅ ¡Su mesa de trabajo está vacía!", parse_mode=ParseMode.HTML)
-        
-        keyboard = build_panel_keyboard(pending_tasks)
-        await message.reply("📋 <b>Su mesa de trabajo actual:</b>", reply_markup=keyboard, parse_mode=ParseMode.HTML)
-
-@Client.on_message(filters.private & (filters.document | filters.audio | filters.video | filters.regex(r"https?://\S+")))
-async def media_handler(client: Client, message: Message):
-    user = message.from_user
+@Client.on_message(filters.private & (filters.document | filters.video | filters.audio))
+async def file_handler(client: Client, message: Message):
+    user_id = message.from_user.id
     
-    if message.media:
-        file = getattr(message, message.media.value)
-        file_type = message.media.value.lower()
+    try:
+        file_id = getattr(message, message.media.value).file_id
+        file_name = getattr(message, message.media.value).file_name or "archivo_recibido"
         
-        if hasattr(file, 'file_size') and file.file_size > 4000 * 1024 * 1024:
-            return await message.reply_text("😕 Lo siento, no puedo procesar archivos de más de 4GB.")
+        task = {
+            "user_id": user_id,
+            "file_id": file_id,
+            "file_name": file_name,
+            "original_message_id": message.id,
+            "status": "awaiting_action",
+            "processing_steps": [],
+        }
         
-        task_id = await db_instance.add_task(
-            user_id=user.id, file_type=file_type,
-            file_name=sanitize_filename(getattr(file, 'file_name', "Archivo Sin Nombre")),
-            file_size=file.file_size, file_id=file.file_id, message_id=message.id
+        result = await db.tasks.insert_one(task)
+        task_id = result.inserted_id
+
+        await message.reply_text(
+            f"📄 **Archivo recibido:** `{file_name}`\n\n¿Qué quieres hacer con él?",
+            reply_markup=create_processing_menu(str(task_id))
         )
-        reply_text = f"✅ He recibido <code>{escape_html(sanitize_filename(getattr(file, 'file_name', 'archivo')))}</code>"
-        
-        if task_id:
-            await message.reply(
-                f"{reply_text} y lo he añadido a su mesa de trabajo.\n\n"
-                "Use /panel para ver y procesar sus tareas.",
-                parse_mode=ParseMode.HTML
-            )
-        else:
-            await message.reply("❌ Hubo un error al registrar la tarea.")
+    except Exception as e:
+        await message.reply(f"❌ Ocurrió un error al procesar tu archivo: {e}")
 
-    else: # Es una URL - CAMINO B (Interactivo)
-        status_msg = await message.reply("🔎 Analizando enlace...", parse_mode=ParseMode.HTML)
-        info = await asyncio.to_thread(downloader.get_url_info, message.text)
-
-        if not info or not info.get('formats'):
-            return await status_msg.edit("❌ No pude obtener información o formatos válidos de ese enlace.")
-
-        task_id = await db_instance.add_task(
-            user_id=user.id,
-            file_type='video' if info.get('is_video') else 'audio',
-            url=info['url'],
-            file_name=sanitize_filename(info['title']),
-            url_info=info
-        )
-
-        if not task_id:
-            return await status_msg.edit("❌ Error al crear la tarea en la base de datos.")
-
-        keyboard = build_download_quality_menu(str(task_id), info['formats'])
-        text = (
-            f"✅ Enlace analizado:\n\n"
-            f"<b>Título:</b> {escape_html(info['title'])}\n"
-            f"<b>Canal:</b> {escape_html(info['uploader'])}\n\n"
-            "Seleccione el formato que desea descargar:"
-        )
-        await status_msg.edit(text, reply_markup=keyboard, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-
-
-@Client.on_message(filters.private & filters.text)
+@Client.on_message(filters.private & filters.text & ~filters.command(["start", "panel", "cancelar", "historial"]))
 async def text_handler(client: Client, message: Message):
     user_id = message.from_user.id
-    if hasattr(client, 'user_data') and user_id in client.user_data:
-        # Esto es una respuesta a una configuración (ej. renombrar)
-        await processing_handler.handle_text_input_for_config(client, message)
-    elif not message.command:
-        # Esto es texto libre, lo tratamos como una búsqueda de música - CAMINO A (Automático)
-        query = message.text.strip()
-        status_msg = await message.reply(f"🔎 Buscando música: <code>{escape_html(query)}</code>...", parse_mode=ParseMode.HTML)
-        
-        search_results = await asyncio.to_thread(downloader.search_music, query, limit=20)
-        if not search_results:
-            return await status_msg.edit("❌ No encontré resultados para su búsqueda.")
+    text = message.text
 
-        session_res = await db_instance.search_sessions.insert_one({
-            "user_id": user_id,
-            "query": query,
-            "created_at": datetime.utcnow()
-        })
-        search_id = str(session_res.inserted_id)
+    pending_task = await db.tasks.find_one({"user_id": user_id, "status": "awaiting_input"})
+    if pending_task:
+        prompt_type = pending_task.get("input_prompt")
+        
+        if prompt_type in ["trim_start_time", "trim_end_time"]:
+            if not is_valid_timestamp(text):
+                await message.reply("❌ Formato de tiempo no válido. Inténtalo de nuevo (ej. `01:23`).")
+                return
 
-        docs_to_insert = []
-        for res in search_results:
-            res['user_id'] = user_id
-            res['search_id'] = search_id
-            res['created_at'] = datetime.utcnow()
-            docs_to_insert.append(res)
-        
-        if docs_to_insert:
-            await db_instance.search_results.insert_many(docs_to_insert)
-        
-        all_results_from_db = await db_instance.search_results.find({"search_id": search_id}).to_list(length=100)
+            if prompt_type == "trim_start_time":
+                await db.tasks.update_one(
+                    {"_id": pending_task["_id"]},
+                    {"$set": {"input_prompt": "trim_end_time", "processing_data.trim_start": text}}
+                )
+                await message.reply("✅ Tiempo de inicio guardado.\n\nAhora, envíame el **tiempo de fin** (ej. `01:45`).")
+                return
+
+            elif prompt_type == "trim_end_time":
+                start_time = pending_task.get("processing_data", {}).get("trim_start")
+                end_time = text
+                await db.tasks.update_one(
+                    {"_id": pending_task["_id"]},
+                    {
+                        "$set": {
+                            "status": "queued",
+                            "processing_steps": [{"type": "trim", "start": start_time, "end": end_time}]
+                        },
+                        "$unset": {"input_prompt": "", "processing_data": ""}
+                    }
+                )
+                await message.reply(f"✅ ¡Perfecto! La tarea para cortar desde `{start_time}` hasta `{end_time}` ha sido encolada.")
+                return
+        return
+
+    if text.startswith("http://") or text.startswith("https://"):
+        sent_message = await message.reply("🔎 Analizando enlace...")
+        try:
+            info = await asyncio.to_thread(downloader.get_url_info, text)
             
-        keyboard = build_search_results_keyboard(all_results_from_db, search_id, page=1)
-        await status_msg.edit(
-            f"✅ Resultados para: <b>{escape_html(query)}</b>",
-            reply_markup=keyboard,
-            parse_mode=ParseMode.HTML
-        )
+            task_data = {
+                "user_id": user_id,
+                "url": text,
+                "title": info.get('title', 'Sin título'),
+                "status": "awaiting_quality",
+                "formats": info.get('formats', []),
+            }
+            result = await db.tasks.insert_one(task_data)
+            task_id = result.inserted_id
 
-@Client.on_callback_query(filters.regex(r"^task_process_"))
-async def on_task_process(client: Client, query: CallbackQuery):
-    await query.answer()
-    task_id = query.data.split("_")[2]
-    task = await db_instance.get_task(task_id)
-    if not task:
-        return await query.message.edit_text("❌ Error: La tarea ya no existe.")
-    
-    keyboard = build_processing_menu(task_id, task['file_type'], task, task.get('original_filename', ''))
-    await query.message.edit_text(
-        f"🛠️ ¿Qué desea hacer con:\n<code>{escape_html(task.get('original_filename', '...'))}</code>?", 
-        reply_markup=keyboard,
-        parse_mode=ParseMode.HTML
-    )
+            await sent_message.edit_text(
+                "✅ Enlace analizado. Por favor, selecciona la calidad deseada:",
+                reply_markup=create_quality_selection_keyboard(info, str(task_id))
+            )
+        except Downloader.DownloaderError as e:
+            await sent_message.edit_text(
+                f"❌ **Error al obtener información del enlace.**\n\n"
+                f"**Motivo:** `{e}`\n\n"
+                "Por favor, verifica el enlace. Si es un video de YouTube y el problema persiste, es posible que las cookies hayan expirado."
+            )
+        except Exception as e:
+            await sent_message.edit_text(f"❌ Ocurrió un error inesperado al procesar el enlace: {e}")
+        return
 
-@Client.on_callback_query(filters.regex(r"^task_queuesingle_"))
-async def on_queue_single(client: Client, query: CallbackQuery):
-    await query.answer()
-    task_id = query.data.split("_")[2]
-    await db_instance.update_task(task_id, "status", "queued")
-    await query.message.edit_text("🔥 Tarea enviada a la forja. El procesamiento comenzará en breve.")
+    sent_message = await message.reply("🎶 Buscando música...")
+    try:
+        results = await asyncio.to_thread(downloader.search_music, text)
+        if not results:
+            await sent_message.edit_text("No se encontraron resultados para tu búsqueda.")
+            return
+        
+        await db.create_search_session(user_id, results)
+        keyboard, text_content = await create_search_results_keyboard(user_id, 0)
 
-@Client.on_callback_query(filters.regex(r"^panel_show"))
-async def on_panel_show(client: Client, query: CallbackQuery):
-    await query.answer()
-    pending_tasks = await db_instance.get_pending_tasks(query.from_user.id)
-    if not pending_tasks:
-        return await query.message.edit_text("✅ ¡Su mesa de trabajo está vacía!", parse_mode=ParseMode.HTML)
-    
-    keyboard = build_panel_keyboard(pending_tasks)
-    await query.message.edit_text("📋 <b>Su mesa de trabajo actual:</b>", reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        await sent_message.edit_text(text_content, reply_markup=keyboard)
+
+    except Downloader.DownloaderError as e:
+        await sent_message.edit_text(f"❌ Error durante la búsqueda: {e}")
+    except Exception as e:
+        await sent_message.edit_text(f"❌ Ocurrió un error inesperado durante la búsqueda: {e}")
