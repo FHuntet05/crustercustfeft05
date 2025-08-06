@@ -2,7 +2,9 @@ import os
 import logging
 import asyncio
 from pyrogram import Client
-from pyrogram.errors import MessageIdInvalid, ChannelInvalid, PeerIdInvalid, UserIsBlocked, RpcError
+# --- LÍNEA CRÍTICA CORREGIDA ---
+# Se cambió RpcError por RPCError, que es el nombre correcto de la clase.
+from pyrogram.errors import MessageIdInvalid, ChannelInvalid, PeerIdInvalid, UserIsBlocked, RPCError
 
 from src.db.mongo_manager import db_instance
 from src.helpers.utils import sanitize_filename
@@ -31,7 +33,7 @@ class UserbotManager:
             await self.client.start()
             me = await self.client.get_me()
             logger.info(f"[USERBOT] Cliente conectado como: {me.username or me.first_name}")
-        except RpcError as e:
+        except RPCError as e:
             logger.critical(f"[USERBOT] Error de autenticación o conexión con Pyrogram: {e}")
             self.client = None
         except Exception as e:
@@ -69,10 +71,6 @@ class UserbotManager:
                 progress=progress_callback
             )
             logger.info(f"[USERBOT] Descarga completada. Archivo guardado en: {downloaded_file_path}")
-
-            # --- LÓGICA DE ACTUALIZACIÓN DE DB ELIMINADA ---
-            # Esta responsabilidad ahora recae en el media_handler, que tiene la información
-            # correcta desde el momento de la creación de la tarea.
 
         except (MessageIdInvalid, ChannelInvalid, PeerIdInvalid):
             logger.error(f"[USERBOT] ID de mensaje o chat inválido para la descarga. Tarea: {task_id}")

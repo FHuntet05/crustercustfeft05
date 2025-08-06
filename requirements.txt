@@ -3,6 +3,7 @@ python-telegram-bot[ext]
 
 # Cliente de Telegram (Userbot)
 Pyrogram[asyncio]
+Tgcrypto
 
 # Interacción con MongoDB
 pymongo
