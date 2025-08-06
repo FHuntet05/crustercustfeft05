@@ -11,7 +11,7 @@ from src.db.mongo_manager import db_instance
 from src.helpers.utils import format_status_message, sanitize_filename
 from src.core import ffmpeg, downloader
 from src.core.userbot_manager import userbot_instance
-from src.ffmpeg import get_media_info
+from src.core.ffmpeg import get_media_info # <-- ESTA ES LA LÍNEA CORREGIDA
 
 logger = logging.getLogger(__name__)
 DOWNLOAD_DIR, OUTPUT_DIR = os.path.join(os.getcwd(), "downloads"), os.path.join(os.getcwd(), "outputs")
