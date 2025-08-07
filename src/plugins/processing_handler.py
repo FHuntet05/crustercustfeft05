@@ -2,7 +2,7 @@
 
 import logging
 import asyncio
-import re  # Añadido para validación de formato
+import re
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery
 from pyrogram.enums import ParseMode
@@ -145,6 +145,7 @@ async def set_value_callback(client: Client, query: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^song_select_"))
 async def on_song_select(client: Client, query: CallbackQuery):
+    # --- ARQUITECTURA DE RENDIMIENTO REESCRITA ---
     result_id = query.data.split("_")[2]
     user = query.from_user
 
@@ -153,40 +154,45 @@ async def on_song_select(client: Client, query: CallbackQuery):
         await query.answer("Esta búsqueda ha expirado.", show_alert=True)
         return await query.message.delete()
     
-    # Limpiar el resto de los resultados de esta búsqueda
+    # Limpiar el resto de los resultados de esta búsqueda para no dejar basura en la DB
     if search_id := search_result.get('search_id'):
         await db_instance.search_results.delete_many({"search_id": search_id})
         await db_instance.search_sessions.delete_one({"_id": ObjectId(search_id)})
-
-    # ---- NUEVO FLUJO INSTANTÁNEO ----
-    # 1. Obtener la URL (o el término para buscarla) del resultado.
-    search_term_or_url = search_result.get('url') or f"ytsearch1:{search_result.get('search_term')}"
-    title = search_result.get('title', 'Canción Desconocida')
     
-    # 2. Crear una tarea "ligera" que el worker se encargará de procesar.
+    await query.message.edit_text(f"🔥 Procesando: <b>{escape_html(search_result.get('title'))}</b>...", parse_mode=ParseMode.HTML)
+    await query.answer()
+
+    # 1. Hidratación inmediata de la tarea: obtener toda la info AHORA.
+    search_term_or_url = search_result.get('url') or f"ytsearch1:{search_result.get('search_term')}"
+    
+    info = await asyncio.to_thread(downloader.get_url_info, search_term_or_url)
+    if not info or not info.get('formats'):
+        return await query.message.edit_text("❌ No se pudo obtener información del video. Puede que haya sido eliminado.")
+
+    # 2. Crear una tarea COMPLETA y lista para el worker.
+    best_audio_format = downloader.get_best_audio_format(info['formats'])
+    lyrics = await asyncio.to_thread(downloader.get_lyrics, info['url'])
+
     processing_config = {
-        "task_type": "audio_search" # Nueva bandera para el worker
+        "download_format_id": best_audio_format,
+        "lyrics": lyrics,
+        "thumbnail_url": info.get('thumbnail')
     }
     
     task_id = await db_instance.add_task(
         user_id=user.id,
-        file_type='audio', # Asumimos audio por defecto
-        url=search_term_or_url, # El worker resolverá esto a una URL concreta si es necesario
-        file_name=sanitize_filename(title), 
+        file_type='audio', # Forzar el tipo de archivo desde el inicio.
+        url=info['url'],
+        file_name=sanitize_filename(info['title']), 
         processing_config=processing_config,
-        status="queued" # Encolar directamente
+        status="queued" # Encolar directamente para que el worker la tome de inmediato.
     )
 
     if not task_id:
-        return await query.message.edit_text("❌ Error al crear la tarea en la DB.")
+        return await query.message.edit_text("❌ Error al crear la tarea en la base de datos.")
     
-    # 3. Responder inmediatamente al usuario.
-    await query.message.edit_text(
-        f"🔥 <b>{escape_html(title)}</b>\n\nTu canción ha sido enviada a la forja.", 
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True
-    )
-    await query.answer()
+    # 3. Respuesta al usuario optimizada. El mensaje ya fue editado. El worker se encargará del resto.
+    logger.info(f"Tarea de audio {task_id} creada e hidratada. El worker se encargará.")
 
 @Client.on_callback_query(filters.regex(r"^search_page_"))
 async def on_search_page(client: Client, query: CallbackQuery):
@@ -238,14 +244,12 @@ async def handle_text_input_for_config(client: Client, message: Message):
             feedback_message = f"✅ Nombre actualizado a <code>{escape_html(user_input)}</code>."
         
         elif menu_type == "trim":
-            # --- NUEVA LÓGICA DE CORTE (TRIM) ---
             time_regex = re.compile(r"^\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*$")
             if not time_regex.match(user_input):
                 feedback_message = "❌ <b>Formato inválido.</b>\nPor favor, use <code>MM:SS-MM:SS</code> o <code>HH:MM:SS-HH:MM:SS</code>."
             else:
                 await db_instance.update_task_config(task_id, "trim_times", user_input)
                 feedback_message = f"✅ Tiempos de corte guardados: <code>{escape_html(user_input)}</code>."
-            # --- FIN DE LA LÓGICA ---
 
         elif menu_type == "split":
             await db_instance.update_task_config(task_id, "split_criteria", user_input)

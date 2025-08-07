@@ -12,7 +12,7 @@ from src.db.mongo_manager import db_instance
 from src.helpers.utils import (format_status_message, sanitize_filename, 
                                escape_html, _edit_status_message, ADMIN_USER_ID)
 from src.core import ffmpeg, downloader
-from src.core.downloader import AuthenticationError # Importar la nueva excepción
+from src.core.downloader import AuthenticationError
 from src.core.ffmpeg import get_media_info
 
 logger = logging.getLogger(__name__)
@@ -104,6 +104,7 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
 
 async def process_task(bot, task: dict):
     task_id, user_id = str(task['_id']), task['user_id']
+    # El mensaje de estado ahora es creado por el worker para asegurar que el progreso se muestre siempre.
     status_message = await bot.send_message(user_id, f"Iniciando: <code>{escape_html(task.get('original_filename') or task.get('url', 'Tarea'))}</code>", parse_mode=ParseMode.HTML)
     
     global progress_tracker
@@ -117,48 +118,9 @@ async def process_task(bot, task: dict):
         progress_tracker[user_id].task = task
         config = task.get('processing_config', {})
 
-        if config.get("task_type") == "audio_search":
-            search_term = task['url'].replace('ytsearch1:', '')
-            
-            search_queries = [
-                f"ytsearch1:{search_term}",
-                f"ytsearch1:{search_term.replace('Audio', 'Lyrics')}",
-                f"ytsearch1:{search_term.replace('Official Audio', '').strip()}"
-            ]
-            info = None
-            
-            # --- MEJORA DE ROBUSTEZ: Manejar AuthenticationError directamente aquí ---
-            try:
-                for i, query in enumerate(search_queries):
-                    await _edit_status_message(user_id, f"🔎 Buscando fuente de audio (Intento {i+1}/3)...", progress_tracker)
-                    info = await asyncio.to_thread(downloader.get_url_info, query)
-                    if info and info.get('formats'):
-                        logger.info(f"Fuente encontrada en intento {i+1} con query: {query}")
-                        break
-            except AuthenticationError:
-                # Si get_url_info lanza AuthenticationError, lo capturamos y lo volvemos a lanzar
-                # para que el bloque principal de la función lo maneje.
-                raise # Esto detiene el bucle y pasa al `except AuthenticationError` de abajo.
-            # --- FIN DE LA MEJORA ---
-
-            if not info or not info.get('formats'):
-                raise Exception("No se pudo obtener información para descargar la canción tras varios intentos.")
-
-            task['url'] = info['url']
-            task['original_filename'] = sanitize_filename(info['title'])
-            await db_instance.update_task(task_id, "url", info['url'])
-            await db_instance.update_task(task_id, "original_filename", info['title'])
-            
-            best_audio_format = downloader.get_best_audio_format(info['formats'])
-            lyrics = await asyncio.to_thread(downloader.get_lyrics, info['url'])
-            
-            await db_instance.update_task_config(task_id, "download_format_id", best_audio_format)
-            await db_instance.update_task_config(task_id, "lyrics", lyrics)
-            await db_instance.update_task_config(task_id, "thumbnail_url", info.get('thumbnail'))
-            
-            task = await db_instance.get_task(task_id)
-            progress_tracker[user_id].task = task
-            config = task.get('processing_config', {})
+        # --- ARQUITECTURA DE RENDIMIENTO: ELIMINACIÓN DEL BLOQUE 'audio_search' ---
+        # La lógica de búsqueda ahora se maneja en el `processing_handler` antes de crear la tarea.
+        # El worker recibe una tarea "lista para procesar".
 
         base_filename = os.path.join(DOWNLOAD_DIR, task_id)
         actual_download_path = ""
@@ -184,14 +146,21 @@ async def process_task(bot, task: dict):
         files_to_clean.add(actual_download_path)
         logger.info(f"Descarga completada en: {actual_download_path}")
         
-        media_info = get_media_info(actual_download_path)
-        streams = media_info.get('streams', [])
-        file_type = 'document'
-        if any(s.get('codec_type') == 'video' for s in streams): file_type = 'video'
-        elif any(s.get('codec_type') == 'audio' for s in streams): file_type = 'audio'
+        # --- LÓGICA DE TIPO DE ARCHIVO CORREGIDA ---
+        # Respetar la intención original del usuario. Si la tarea se creó como 'audio', se procesa como audio.
+        file_type = task.get('file_type', 'document')
         
+        # Si no es un tipo de archivo forzado, inspeccionar el contenido real
+        if file_type not in ['audio', 'video']:
+            media_info = get_media_info(actual_download_path)
+            streams = media_info.get('streams', [])
+            if any(s.get('codec_type') == 'video' for s in streams): file_type = 'video'
+            elif any(s.get('codec_type') == 'audio' for s in streams): file_type = 'audio'
+        
+        # Actualizar en la DB por si es necesario para el comando ffmpeg
         await db_instance.update_task(task_id, 'file_type', file_type)
-        task['file_type'] = file_type
+        task['file_type'] = file_type 
+        
         await _edit_status_message(user_id, f"⚙️ Archivo ({file_type}) listo para procesar.", progress_tracker)
         
         final_filename_base = sanitize_filename(config.get('final_filename', task.get('original_filename', task_id)))
@@ -269,8 +238,8 @@ async def worker_loop(bot_instance):
                 logger.info(f"Iniciando procesamiento de la tarea {task['_id']} para el usuario {task['user_id']}")
                 asyncio.create_task(process_task(bot_instance, task))
             else:
-                await asyncio.sleep(5)
+                await asyncio.sleep(2) # Reducido el tiempo de espera para mayor reactividad
         except Exception as e:
             logger.critical(f"[WORKER] Bucle del worker falló críticamente: {e}", exc_info=True)
-            await asyncio.sleep(30)
+            await asyncio.sleep(15) # Reducido el tiempo de espera en caso de error
 # --- END OF FILE src/core/worker.py ---

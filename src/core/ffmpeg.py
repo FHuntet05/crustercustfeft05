@@ -1,4 +1,5 @@
-# src/core/ffmpeg.py
+# --- START OF FILE src/core/ffmpeg.py ---
+
 import asyncio
 import logging
 import subprocess
@@ -53,11 +54,9 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
         command_parts.append(f"-i {shlex.quote(thumbnail_path)}")
 
     codec_opts = []
-    # Mapeo de streams: -map 0 para el archivo principal, -map 1 para la miniatura
     map_opts = ["-map 0"]
     if thumbnail_path:
         map_opts.append("-map 1")
-        # Corrección crítica: Re-codificar siempre la miniatura a un formato compatible
         codec_opts.append("-c:v:1 mjpeg -disposition:v:1 attached_pic")
 
 
@@ -65,10 +64,14 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
         fmt = config.get('audio_format', 'mp3')
         bitrate = config.get('audio_bitrate', '192k')
         codec_map = {'mp3': 'libmp3lame', 'flac': 'flac', 'opus': 'libopus'}
+        
+        # --- OPTIMIZACIÓN DE RENDIMIENTO: Añadir -vn ---
+        # Ignora cualquier stream de video, acelerando la extracción de audio.
+        codec_opts.append("-vn")
+        
         codec_opts.append(f"-c:a {codec_map.get(fmt, 'libmp3lame')}")
         if fmt != 'flac': codec_opts.append(f"-b:a {bitrate}")
         
-        # Mapear solo el stream de audio del archivo principal
         map_opts[0] = "-map 0:a:0"
 
     elif file_type == 'video':
@@ -78,12 +81,11 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
             codec_opts.extend(["-c:v:0 libx264", "-preset veryfast", f"-crf {crf}", "-pix_fmt yuv420p"])
             codec_opts.extend(["-c:a copy"])
         else:
-            # Si la calidad es original, copiar todos los streams del archivo principal
             codec_opts.extend(["-c:v:0 copy", "-c:a copy", "-c:s copy"])
         
         output_ext = os.path.splitext(output_path)[1].lower()
         if output_ext == '.mp4':
-            codec_opts.append("-c:s mov_text") # Forzar formato de subtítulos para MP4
+            codec_opts.append("-c:s mov_text")
 
     else: # Documentos
         return []
@@ -117,3 +119,4 @@ def build_split_command(config, input_path, output_path):
         return (f"ffmpeg -y -i {shlex.quote(input_path)} -c copy -map 0 "
                 f"-segment_time {criteria.lower().replace('s', '')} -f segment -reset_timestamps 1 {shlex.quote(base_name)}_part%03d{ext}")
     return ""
+# --- END OF FILE src/core/ffmpeg.py ---
