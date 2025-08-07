@@ -1,11 +1,10 @@
 # src/db/mongo_manager.py
 
 import logging
-import os  # <--- CORRECCIÓN: importación añadida
-from datetime import datetime # <--- CORRECCIÓN: importación añadida
+import os
+from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo.errors import CollectionInvalid, OperationFailure
-from bson import ObjectId
+from pymongo.errors import CollectionInvalid
 
 # Configuración del logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -20,44 +19,46 @@ class MongoManager:
 
     async def initialize_db(self):
         """
-        Inicializa la base de datos y crea colecciones e índices si no existen.
-        Esta operación es idempotente.
+        Inicializa la base de datos y crea colecciones e índices de forma verdaderamente idempotente.
         """
         logger.info("Inicializando la base de datos y los índices...")
         try:
-            # Crear colección de tareas si no existe
-            try:
+            # --- Colección de Tareas ---
+            # Crear colección si no existe
+            collection_names = await self.db.list_collection_names()
+            if "tasks" not in collection_names:
                 await self.db.create_collection("tasks")
                 logger.info("Colección 'tasks' creada.")
-            except CollectionInvalid:
+            else:
                 logger.info("Colección 'tasks' ya existe.")
 
-            # Crear índices para la colección de tareas
+            # Asegurar índice para la colección de tareas
+            # PyMongo/Motor manejan la idempotencia de create_index si el nombre y las opciones son iguales.
             await self.tasks.create_index([("user_id", 1), ("status", 1)], name="user_status_index", background=True)
-            logger.info("Índice 'user_status_index' asegurado.")
+            logger.info("Índice 'user_status_index' para tasks asegurado.")
 
-            # Crear colección de sesiones de búsqueda con TTL (expiración automática)
-            try:
+            # --- CORRECCIÓN: Lógica robusta para el índice TTL ---
+            if "search_sessions" not in collection_names:
                 await self.db.create_collection("search_sessions")
                 logger.info("Colección 'search_sessions' creada.")
-                # Crear índice TTL que borra documentos después de 1 hora (3600 segundos)
-                await self.search_sessions.create_index("created_at", expireAfterSeconds=3600, name="session_ttl_index")
-                logger.info("Índice TTL 'session_ttl_index' para sesiones de búsqueda asegurado.")
-            except CollectionInvalid:
-                logger.info("Colección 'search_sessions' ya existe, asegurando índice TTL.")
-                # Asegurarse de que el índice TTL existe si la colección ya estaba
-                try:
-                    await self.search_sessions.create_index("created_at", expireAfterSeconds=3600, name="session_ttl_index")
-                    logger.info("Índice TTL 'session_ttl_index' asegurado.")
-                except OperationFailure as e:
-                    if "index with same options but different name" in str(e) or "Index with name" in str(e):
-                         logger.warning(f"Índice TTL ya existe con otro nombre o configuración: {e}")
-                    else:
-                        raise e
+            else:
+                logger.info("Colección 'search_sessions' ya existe.")
 
-            logger.info("Inicialización de la base de datos completada.")
+            # Verificar si ya existe un índice TTL en la colección
+            existing_indexes = await self.search_sessions.index_information()
+            ttl_index_exists = any('expireAfterSeconds' in options for options in existing_indexes.values())
+
+            if not ttl_index_exists:
+                logger.info("No se encontró un índice TTL en 'search_sessions'. Creando uno nuevo...")
+                await self.search_sessions.create_index("created_at", expireAfterSeconds=3600, name="session_ttl_index")
+                logger.info("Índice TTL 'session_ttl_index' creado con éxito.")
+            else:
+                logger.info("Índice TTL ya existe en 'search_sessions'. No se tomarán acciones.")
+
+            logger.info("Inicialización de la base de datos completada con éxito.")
+
         except Exception as e:
-            logger.error(f"Error durante la inicialización de la base de datos: {e}", exc_info=True)
+            logger.error(f"Error crítico durante la inicialización de la base de datos: {e}", exc_info=True)
             raise
 
     # --- Métodos para Tareas ---
@@ -73,9 +74,6 @@ class MongoManager:
         await self.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": update_data})
 
     async def get_queued_tasks_by_user(self):
-        """
-        Obtiene todas las tareas en cola y las agrupa por usuario.
-        """
         pipeline = [
             {"$match": {"status": "queued"}},
             {"$sort": {"created_at": 1}},
@@ -91,24 +89,20 @@ class MongoManager:
     # --- Métodos para Sesiones de Búsqueda ---
     
     async def create_search_session(self, query_id, results):
-        """Guarda los resultados de una búsqueda en una sesión temporal."""
         session_data = {
             "_id": query_id,
             "results": results,
-            "created_at": datetime.utcnow() # <-- Esta línea necesitaba 'datetime'
+            "created_at": datetime.utcnow()
         }
         await self.search_sessions.insert_one(session_data)
     
     async def get_search_session(self, query_id):
-        """Recupera los resultados de una búsqueda de la sesión."""
         return await self.search_sessions.find_one({"_id": query_id})
 
 
-# --- CORRECCIÓN CLAVE ---
-# El código ahora depende de que las variables de entorno se carguen ANTES
-# de que se cree esta instancia. No hay valores por defecto aquí.
+# --- Instancia de la Base de Datos ---
 MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "JefesMediaSuiteDB") # Un default aquí es aceptable
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "JefesMediaSuiteDB")
 
 if not MONGO_URI:
     logger.critical("La variable de entorno MONGO_URI no está definida. El bot no puede iniciarse.")
