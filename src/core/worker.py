@@ -11,7 +11,7 @@ from pyrogram.enums import ParseMode
 from pyrogram.types import InputMediaVideo
 from bson.objectid import ObjectId
 import shutil
-import zipfile # NUEVA IMPORTACIÓN
+import zipfile
 
 from src.db.mongo_manager import db_instance
 from src.helpers.utils import (format_status_message, sanitize_filename, 
@@ -140,13 +140,30 @@ async def process_task(bot, task: dict):
         
         initial_text = f"Iniciando: <code>{escape_html(task.get('original_filename') or task.get('url', 'Tarea'))}</code>"
         
-        try:
-            status_message = await bot.send_message(user_id, initial_text, parse_mode=ParseMode.HTML)
-        except Exception:
-            raise Exception("No se pudo enviar el mensaje de estado inicial.")
+        # --- NUEVO: Lógica para adoptar o crear un mensaje de estado ---
+        if ref := task.get('status_message_ref'):
+            try:
+                # Intenta "adoptar" y editar el mensaje que el usuario ya está viendo.
+                status_message = await bot.get_messages(ref['chat_id'], ref['message_id'])
+                await status_message.edit_text(initial_text, parse_mode=ParseMode.HTML)
+            except Exception as e:
+                logger.warning(f"No se pudo adoptar el mensaje de estado {ref['message_id']} para la tarea {task_id}: {e}. Se creará uno nuevo.")
+                status_message = None # Forzar la creación de un nuevo mensaje.
+
+        if not status_message:
+            # Comportamiento de fallback: si no hay referencia o falló la adopción, enviar un nuevo mensaje.
+            # Esto es clave para las tareas silenciosas (búsqueda de música) que no deben tener UI.
+            if task.get('file_type') != 'audio' or 'download_format_id' not in config:
+                 try:
+                     status_message = await bot.send_message(user_id, initial_text, parse_mode=ParseMode.HTML)
+                 except Exception:
+                    # Si no se puede ni enviar un mensaje nuevo, es un error fatal para esta tarea.
+                    raise Exception("No se pudo enviar el mensaje de estado inicial.")
 
         global progress_tracker
-        progress_tracker[user_id] = ProgressContext(bot, status_message, task, asyncio.get_running_loop())
+        # Solo rastrear el progreso si hay un mensaje que actualizar.
+        if status_message:
+            progress_tracker[user_id] = ProgressContext(bot, status_message, task, asyncio.get_running_loop())
         
         # --- META-TAREAS (UNIÓN Y COMPRESIÓN) ---
         if task.get('file_type') == 'join_operation':
@@ -166,7 +183,9 @@ async def process_task(bot, task: dict):
                 dl_path = os.path.join(join_dir, filename)
                 
                 prog_args = (user_id, f"📥 Descargando ({i+1}/{len(source_task_ids)})...", filename)
-                await bot.download_media(message=source_task['file_id'], file_name=dl_path, progress=_progress_callback_pyrogram, progress_args=prog_args)
+                # Solo mostrar progreso si hay UI
+                progress_fn = _progress_callback_pyrogram if status_message else None
+                await bot.download_media(message=source_task['file_id'], file_name=dl_path, progress=progress_fn, progress_args=prog_args)
                 downloaded_files.append(dl_path)
 
             file_list_path = os.path.join(join_dir, "file_list.txt")
@@ -176,11 +195,13 @@ async def process_task(bot, task: dict):
             output_path = os.path.join(OUTPUT_DIR, f"Union_{task_id}.mp4")
             files_to_clean.add(output_path)
 
-            await _edit_status_message(user_id, "⚙️ Uniendo videos...", progress_tracker)
+            if status_message: await _edit_status_message(user_id, "⚙️ Uniendo videos...", progress_tracker)
             join_cmd = ffmpeg.build_join_command(file_list_path, output_path)
             await _run_ffmpeg_process(join_cmd)
 
-            await bot.send_video(user_id, video=output_path, caption=f"✅ Video unido a partir de {len(downloaded_files)} fuentes.", progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
+            prog_args_upload = (user_id, "⬆️ Subiendo...")
+            progress_fn_upload = _progress_callback_pyrogram if status_message else None
+            await bot.send_video(user_id, video=output_path, caption=f"✅ Video unido a partir de {len(downloaded_files)} fuentes.", progress=progress_fn_upload, progress_args=prog_args_upload)
             
             await db_instance.update_task(task_id, "status", "done")
             if status_message: await status_message.delete()
@@ -203,18 +224,21 @@ async def process_task(bot, task: dict):
                 dl_path = os.path.join(zip_dir, filename)
                 
                 prog_args = (user_id, f"📥 Descargando ({i+1}/{len(source_task_ids)})...", filename)
-                await bot.download_media(message=source_task['file_id'], file_name=dl_path, progress=_progress_callback_pyrogram, progress_args=prog_args)
+                progress_fn = _progress_callback_pyrogram if status_message else None
+                await bot.download_media(message=source_task['file_id'], file_name=dl_path, progress=progress_fn, progress_args=prog_args)
                 downloaded_files.append(dl_path)
 
             output_zip_path = os.path.join(OUTPUT_DIR, task.get('original_filename'))
             files_to_clean.add(output_zip_path)
             
-            await _edit_status_message(user_id, "⚙️ Comprimiendo archivos...", progress_tracker)
+            if status_message: await _edit_status_message(user_id, "⚙️ Comprimiendo archivos...", progress_tracker)
             with zipfile.ZipFile(output_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 for file in downloaded_files:
                     zipf.write(file, arcname=os.path.basename(file))
             
-            await bot.send_document(user_id, document=output_zip_path, caption=f"✅ Archivo ZIP creado con {len(downloaded_files)} archivos.", progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo ZIP..."))
+            prog_args_upload = (user_id, "⬆️ Subiendo ZIP...")
+            progress_fn_upload = _progress_callback_pyrogram if status_message else None
+            await bot.send_document(user_id, document=output_zip_path, caption=f"✅ Archivo ZIP creado con {len(downloaded_files)} archivos.", progress=progress_fn_upload, progress_args=prog_args_upload)
 
             await db_instance.update_task(task_id, "status", "done")
             if status_message: await status_message.delete()
@@ -225,13 +249,19 @@ async def process_task(bot, task: dict):
         if url := task.get('url'):
             format_id = config.get('download_format_id')
             if not format_id: raise Exception("La tarea de URL no tiene 'download_format_id'. Flujo interrumpido.")
-            actual_download_path = await asyncio.to_thread(downloader.download_from_url, url, os.path.join(DOWNLOAD_DIR, task_id), format_id, progress_tracker=progress_tracker, user_id=user_id)
+            
+            # Pasar progress_tracker solo si hay un mensaje de estado que actualizar
+            tracker_to_use = progress_tracker if status_message else None
+            actual_download_path = await asyncio.to_thread(downloader.download_from_url, url, os.path.join(DOWNLOAD_DIR, task_id), format_id, progress_tracker=tracker_to_use, user_id=user_id)
             if not actual_download_path: raise Exception("La descarga desde la URL falló.")
         elif file_id := task.get('file_id'):
             dl_dir = os.path.join(DOWNLOAD_DIR, task_id)
             os.makedirs(dl_dir, exist_ok=True)
             actual_download_path = os.path.join(dl_dir, task.get('original_filename', task_id))
-            await bot.download_media(message=file_id, file_name=actual_download_path, progress=_progress_callback_pyrogram, progress_args=(user_id, "📥 Descargando..."))
+            
+            prog_args = (user_id, "📥 Descargando...")
+            progress_fn = _progress_callback_pyrogram if status_message else None
+            await bot.download_media(message=file_id, file_name=actual_download_path, progress=progress_fn, progress_args=prog_args)
         else:
             raise Exception("La tarea no tiene URL ni file_id.")
         
@@ -239,8 +269,6 @@ async def process_task(bot, task: dict):
         initial_size = os.path.getsize(actual_download_path) if os.path.exists(actual_download_path) else 0
         logger.info(f"Descarga completada en: {actual_download_path}")
         
-        # (Lógica existente de extracción de miniatura, etc.)
-
         base_name_from_config = config.get('final_filename', task.get('original_filename', task_id))
         final_filename_base = os.path.splitext(sanitize_filename(base_name_from_config))[0]
         
@@ -253,19 +281,57 @@ async def process_task(bot, task: dict):
         
         watermark_path, thumb_to_use, subs_to_use, new_audio_path = None, None, None, None
 
-        # (Lógica existente para descargar assets como marcas de agua, miniaturas, etc.)
-
-        await _edit_status_message(user_id, f"⚙️ Archivo listo para procesar.", progress_tracker)
+        if status_message: await _edit_status_message(user_id, f"⚙️ Archivo listo para procesar.", progress_tracker)
         commands = ffmpeg.build_ffmpeg_command(task, actual_download_path, output_path, thumb_to_use, watermark_path, subs_to_use, new_audio_path)
         
-        # (Lógica de ejecución de comandos y subida de resultados existente)
+        for i, cmd in enumerate(commands):
+            if i == len(commands) - 1:
+                # El último comando (o único) puede usar la barra de progreso.
+                if status_message:
+                    await _run_ffmpeg_with_progress(user_id, cmd, actual_download_path)
+                else:
+                    await _run_ffmpeg_process(cmd)
+            else:
+                # Los comandos intermedios (ej. paleta de GIF) se ejecutan sin progreso.
+                await _run_ffmpeg_process(cmd)
+
+        # Determinar el archivo final correcto después de la ejecución de comandos.
+        final_output_path = glob.glob(f"{os.path.splitext(output_path)[0]}.*")
+        if not final_output_path: raise Exception(f"FFmpeg finalizó pero no se encontró ningún archivo de salida en {output_path}")
+        final_output_path = final_output_path[0]
+        final_size = os.path.getsize(final_output_path) if os.path.exists(final_output_path) else 0
+
+        final_filename = os.path.basename(final_output_path)
+        caption = generate_summary_caption(task, initial_size, final_size, final_filename)
         
+        progress_fn_upload = _progress_callback_pyrogram if status_message else None
+        prog_args_upload = (user_id, "⬆️ Subiendo...", final_filename)
+
+        if final_output_path.endswith(('.mp4', '.mkv', '.webm')):
+            await bot.send_video(user_id, video=final_output_path, caption=caption, parse_mode=ParseMode.HTML, progress=progress_fn_upload, progress_args=prog_args_upload)
+        elif final_output_path.endswith(('.mp3', '.flac', '.m4a', '.opus')):
+            await bot.send_audio(user_id, audio=final_output_path, caption=caption, parse_mode=ParseMode.HTML, progress=progress_fn_upload, progress_args=prog_args_upload)
+        else:
+            await bot.send_document(user_id, document=final_output_path, caption=caption, parse_mode=ParseMode.HTML, progress=progress_fn_upload, progress_args=prog_args_upload)
+
         await db_instance.update_task(task_id, "status", "done")
         if status_message: await status_message.delete()
 
     except Exception as e:
         logger.critical(f"Error al procesar la tarea {task_id}: {e}", exc_info=True)
-        # (Lógica de manejo de errores existente)
+        error_message = f"❌ <b>Error Fatal en Tarea</b>\n<code>{escape_html(task.get('original_filename', 'N/A'))}</code>\n\n<b>Motivo:</b>\n<pre>{escape_html(str(e))}</pre>"
+        
+        await db_instance.update_task(task_id, "status", "error")
+        await db_instance.update_task(task_id, "last_error", str(e))
+        
+        # Intentar editar el mensaje de estado con el error o enviar uno nuevo.
+        if status_message:
+            try:
+                await status_message.edit_text(error_message, parse_mode=ParseMode.HTML)
+            except Exception:
+                await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
+        else:
+            await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
 
     finally:
         if user_id in progress_tracker: del progress_tracker[user_id]

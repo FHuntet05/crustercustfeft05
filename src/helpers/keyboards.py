@@ -93,21 +93,39 @@ def build_tracks_menu(task_id: str, config: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 def build_detailed_format_menu(task_id: str, formats: list) -> InlineKeyboardMarkup:
+    """
+    Construye el teclado para seleccionar el formato de descarga, mostrando todas
+    las calidades de video disponibles.
+    """
     keyboard, row = [], []
-    video_formats = sorted([f for f in formats if f.get('vcodec') not in ['none', None] and f.get('height')], key=lambda x: (x.get('height', 0), x.get('fps', 0) or 0), reverse=True)
+    
+    # --- LÓGICA CORREGIDA ---
+    # Filtrar formatos que tengan códec de video y resolución (altura).
+    # Esto incluye streams de "video-only" que yt-dlp puede fusionar.
+    video_formats = sorted(
+        [f for f in formats if f.get('vcodec') not in ['none', None] and f.get('height')],
+        key=lambda x: (x.get('height', 0), x.get('fps', 0) or 0),
+        reverse=True
+    )
     
     for f in video_formats:
         if not (format_id := f.get('format_id')): continue
+        
         height, fps, ext, filesize = f.get('height'), int(f.get('fps', 0)), f.get('ext'), f.get('filesize')
         fps_str = f"p{fps}" if fps > 0 else "p"
         label = f"🎬 {height}{fps_str} {ext.upper()}" + (f" ({format_bytes(filesize)})" if filesize else "")
+        
         row.append(InlineKeyboardButton(label, callback_data=f"set_dlformat_{task_id}_{format_id}"))
-        if len(row) == 2: keyboard.append(row); row = []
-    if row: keyboard.append(row)
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
             
     keyboard.extend([
-        [InlineKeyboardButton("🎵 MP3", callback_data=f"set_dlformat_{task_id}_mp3"), InlineKeyboardButton("🔊 Mejor Audio", callback_data=f"set_dlformat_{task_id}_bestaudio")],
-        [InlineKeyboardButton("🏆 Mejor Video", callback_data=f"set_dlformat_{task_id}_bestvideo"), InlineKeyboardButton("❌ Cancelar", callback_data=f"task_delete_{task_id}")]
+        [InlineKeyboardButton("🎵 MP3 (Mejor Calidad)", callback_data=f"set_dlformat_{task_id}_mp3")],
+        [InlineKeyboardButton("🔊 Solo Audio (Mejor Calidad)", callback_data=f"set_dlformat_{task_id}_bestaudio")],
+        [InlineKeyboardButton("🏆 Mejor Video (Auto)", callback_data=f"set_dlformat_{task_id}_bestvideo"), InlineKeyboardButton("❌ Cancelar", callback_data=f"task_delete_{task_id}")]
     ])
     return InlineKeyboardMarkup(keyboard)
 
@@ -232,7 +250,6 @@ def build_join_selection_keyboard(tasks: list, selected_ids: list) -> InlineKeyb
 
     return InlineKeyboardMarkup(keyboard)
 
-# --- NUEVA FUNCIÓN ---
 def build_zip_selection_keyboard(tasks: list, selected_ids: list) -> InlineKeyboardMarkup:
     """Construye el teclado interactivo para seleccionar tareas a comprimir."""
     keyboard = []
