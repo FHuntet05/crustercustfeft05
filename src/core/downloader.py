@@ -66,7 +66,6 @@ def get_common_ydl_opts():
     if ffmpeg_path:
         opts['ffmpeg_location'] = ffmpeg_path
     
-    # --- CAMBIO ESTRATÉGICO: REINSTAURACIÓN DE LA LÓGICA DE COOKIES ---
     cookies_file_path = "youtube_cookies.txt"
     if os.path.exists(cookies_file_path):
         opts['cookiefile'] = cookies_file_path
@@ -250,7 +249,10 @@ def get_url_info(url: str) -> dict or None:
                 'thumbnail': entry.get('thumbnail'), 'is_video': is_video, 'formats': formats,
                 'chapters': entry.get('chapters'), 
                 'view_count': entry.get('view_count'),
-                'upload_date': entry.get('upload_date')
+                'upload_date': entry.get('upload_date'),
+                # --- NUEVO: Obtener álbum y artista directamente ---
+                'album': entry.get('album'),
+                'artist': entry.get('artist'),
             }
     except AuthenticationError:
         logger.error(f"Error de autenticación al obtener info de {url}. Propagando excepción al worker.")

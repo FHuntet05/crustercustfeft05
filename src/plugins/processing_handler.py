@@ -14,7 +14,7 @@ from src.helpers.keyboards import (build_back_button, build_processing_menu,
                                    build_quality_menu, build_detailed_format_menu, 
                                    build_audio_convert_menu, build_audio_effects_menu,
                                    build_search_results_keyboard, build_panel_keyboard,
-                                   build_watermark_menu, build_position_menu)
+                                   build_watermark_menu, build_position_menu, build_audio_metadata_menu)
 from src.helpers.utils import get_greeting, escape_html, sanitize_filename
 
 logger = logging.getLogger(__name__)
@@ -87,6 +87,7 @@ async def show_config_menu(client: Client, query: CallbackQuery):
     if menu_type == "audioeffects":
         keyboard = build_audio_effects_menu(task_id, task.get('processing_config', {}))
         return await query.message.edit_text("🎧 Aplique efectos de audio:", reply_markup=keyboard)
+    if menu_type == "audiometadata": return await query.message.edit_text("🖼️ Elija qué metadatos editar:", reply_markup=build_audio_metadata_menu(task_id))
     if menu_type == "watermark": return await query.message.edit_text("💧 Elija un tipo de marca de agua:", reply_markup=build_watermark_menu(task_id))
 
     original_filename = task.get('original_filename', 'archivo')
@@ -100,11 +101,17 @@ async def show_config_menu(client: Client, query: CallbackQuery):
         "trim": f"✂️ <b>Cortar</b>\n\n{greeting_prefix}envíeme el tiempo de inicio y fin.\nFormatos: <code>HH:MM:SS-HH:MM:SS</code> o <code>MM:SS-MM:SS</code>.",
         "split": f"🧩 <b>Dividir Video</b>\n\n{greeting_prefix}envíeme el criterio de división por tiempo (ej. <code>300s</code>).",
         "gif": f"🎞️ <b>Crear GIF</b>\n\n{greeting_prefix}envíeme la duración y los FPS.\nFormato: <code>[duración en segundos] [fps]</code> (ej: <code>5 15</code>).",
-        "audiotags": f"🖼️ <b>Editar Tags</b>\n\n{greeting_prefix}envíeme los nuevos metadatos.\nFormato: <code>Nuevo Título - Nuevo Artista</code>.",
+        "audiotags": (
+            f"🖼️ <b>Editar Tags de Texto</b>\n\n{greeting_prefix}envíeme los nuevos metadatos. Puede usar el siguiente formato y omitir los campos que no desee cambiar:\n\n"
+            "<code>Título: [Nuevo Título]\n"
+            "Artista: [Nuevo Artista]\n"
+            "Álbum: [Nuevo Álbum]</code>"
+        ),
+        "audiothumb": f"🖼️ <b>Añadir Carátula</b>\n\n{greeting_prefix}envíeme la imagen que desea usar como carátula para este audio.",
     }
     
     text = menu_texts.get(menu_type, "Configuración no reconocida.")
-    back_button_cb = f"task_process_{task_id}"
+    back_button_cb = f"task_process_{task_id}" if menu_type not in ["audiotags", "audiothumb"] else f"config_audiometadata_{task_id}"
     keyboard = build_back_button(back_button_cb)
     await query.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
@@ -143,24 +150,42 @@ async def set_watermark_handler(client: Client, query: CallbackQuery):
         await query.message.edit_text("✅ Posición de la marca de agua guardada.", reply_markup=keyboard)
 
 @Client.on_message((filters.photo | filters.document) & filters.reply)
-async def handle_watermark_image(client: Client, message: Message):
+async def handle_media_input(client: Client, message: Message):
     user_id = message.from_user.id
     if not hasattr(client, 'user_data') or user_id not in client.user_data: return
     
     active_config = client.user_data[user_id].get("active_config")
-    if not active_config or active_config.get("menu_type") != "watermark_image": return
-    
-    task_id = active_config["task_id"]
-    media = message.photo or message.document
-    
-    if hasattr(media, 'mime_type') and not media.mime_type.startswith("image/"):
-        return await message.reply("❌ El archivo enviado no es una imagen. Por favor, inténtelo de nuevo.")
+    if not active_config: return
 
-    await db_instance.update_task_config(task_id, "watermark", {"type": "image", "file_id": media.file_id})
-    del client.user_data[user_id]["active_config"]
+    task_id = active_config["task_id"]
+    menu_type = active_config.get("menu_type")
     
-    keyboard = build_position_menu(task_id)
-    await message.reply("✅ Imagen recibida. Ahora, elija la posición:", reply_markup=keyboard)
+    # Manejador para la carátula de audio
+    if menu_type == "audiothumb":
+        media = message.photo or message.document
+        if hasattr(media, 'mime_type') and not media.mime_type.startswith("image/"):
+            return await message.reply("❌ El archivo enviado no es una imagen. Por favor, inténtelo de nuevo.")
+
+        await db_instance.update_task_config(task_id, "thumbnail_file_id", media.file_id)
+        del client.user_data[user_id]["active_config"]
+        
+        task = await db_instance.get_task(task_id)
+        keyboard = build_processing_menu(task_id, task['file_type'], task, task.get('original_filename'))
+        await message.reply("✅ Carátula guardada. ¿Algo más?", reply_markup=keyboard)
+        return
+
+    # Manejador para la imagen de marca de agua
+    if menu_type == "watermark_image":
+        media = message.photo or message.document
+        if hasattr(media, 'mime_type') and not media.mime_type.startswith("image/"):
+            return await message.reply("❌ El archivo enviado no es una imagen. Por favor, inténtelo de nuevo.")
+
+        await db_instance.update_task_config(task_id, "watermark", {"type": "image", "file_id": media.file_id})
+        del client.user_data[user_id]["active_config"]
+        
+        keyboard = build_position_menu(task_id)
+        await message.reply("✅ Imagen recibida. Ahora, elija la posición:", reply_markup=keyboard)
+        return
 
 @Client.on_callback_query(filters.regex(r"^set_"))
 async def set_value_callback(client: Client, query: CallbackQuery):
@@ -200,6 +225,14 @@ async def set_value_callback(client: Client, query: CallbackQuery):
         elif value == "bestvideo":
             final_format_id = "bestvideo+bestaudio/best"
         
+        # Pre-llenar tags si la info de la URL está disponible
+        if url_info.get('artist') or url_info.get('title') or url_info.get('album'):
+            await db_instance.update_task_config(task_id, 'audio_tags', {
+                'artist': url_info.get('artist'),
+                'title': url_info.get('title'),
+                'album': url_info.get('album')
+            })
+
         await db_instance.tasks.update_one(
             {"_id": ObjectId(task_id)},
             {"$set": {
@@ -260,7 +293,13 @@ async def on_song_select(client: Client, query: CallbackQuery):
     processing_config = {
         "download_format_id": best_audio_format,
         "suppress_progress": True,
-        "status_message_id": status_message.id
+        "status_message_id": status_message.id,
+        "audio_tags": {
+            "title": info.get('title') or search_result.get('title'),
+            "artist": info.get('artist') or search_result.get('artist'),
+            "album": info.get('album') or search_result.get('album')
+        },
+        "thumbnail_url": info.get('thumbnail')
     }
     
     task_id = await db_instance.add_task(
@@ -269,7 +308,8 @@ async def on_song_select(client: Client, query: CallbackQuery):
         url=info['url'],
         file_name=sanitize_filename(info['title']), 
         processing_config=processing_config,
-        status="queued"
+        status="queued",
+        url_info=info
     )
 
     if not task_id:
@@ -343,15 +383,30 @@ async def handle_text_input_for_config(client: Client, message: Message):
             feedback_message = f"✅ Criterio de división guardado: <code>{escape_html(user_input)}</code>."
         elif menu_type == "gif":
             parts = user_input.split()
-            if len(parts) != 2:
-                raise ValueError("Se requieren dos valores: duración y FPS.")
+            if len(parts) != 2: raise ValueError("Se requieren dos valores: duración y FPS.")
             duration, fps = float(parts[0]), int(parts[1])
             await db_instance.update_task_config(task_id, "gif_options", {"duration": duration, "fps": fps})
             feedback_message = f"✅ GIF se creará con {duration}s a {fps}fps."
         elif menu_type == "audiotags":
-            title, artist = [part.strip() for part in user_input.split('-', 1)]
-            await db_instance.update_task_config(task_id, "audio_tags", {"title": title, "artist": artist})
-            feedback_message = f"✅ Tags actualizados: Título: {title}, Artista: {artist}."
+            tags_to_update = {}
+            for line in user_input.split('\n'):
+                if ':' in line:
+                    key, value = [part.strip() for part in line.split(':', 1)]
+                    key_lower = key.lower()
+                    if key_lower in ['título', 'titulo', 'title']:
+                        tags_to_update['title'] = value
+                    elif key_lower in ['artista', 'artist']:
+                        tags_to_update['artist'] = value
+                    elif key_lower in ['álbum', 'album']:
+                        tags_to_update['album'] = value
+            
+            if not tags_to_update:
+                raise ValueError("No se proporcionaron tags en el formato correcto.")
+            
+            for key, value in tags_to_update.items():
+                await db_instance.update_task_config(task_id, f"audio_tags.{key}", value)
+            
+            feedback_message = f"✅ Tags de audio actualizados."
 
     except Exception as e:
         logger.error(f"Error al procesar entrada de texto para config: {e}")

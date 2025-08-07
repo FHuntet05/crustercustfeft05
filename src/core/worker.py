@@ -1,3 +1,5 @@
+# --- START OF FILE src/core/worker.py ---
+
 import logging
 import time
 import os
@@ -32,13 +34,14 @@ class ProgressContext:
 progress_tracker = {}
 
 async def _progress_callback_pyrogram(current, total, user_id, operation):
-    if user_id not in progress_tracker: return
+    # --- CORRECCIÓN VISUAL: Evitar mostrar datos incorrectos si total es 0 ---
+    if user_id not in progress_tracker or not total or total <= 0: return
     ctx = progress_tracker[user_id]
     
     elapsed = time.time() - ctx.start_time
     speed = current / elapsed if elapsed > 0 else 0
     eta = (total - current) / speed if speed > 0 else 0
-    percentage = (current / total) * 100 if total > 0 else 0
+    percentage = (current / total) * 100
     
     user_mention = "Usuario"
     if hasattr(ctx.message, 'from_user') and ctx.message.from_user:
@@ -73,22 +76,19 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
     all_stderr_lines = []
 
     while True:
-        # Leemos en bloques, no por línea, para evitar LimitOverrunError
         chunk = await process.stderr.read(1024)
         if not chunk:
             break
         
         stderr_buffer += chunk.decode('utf-8', 'ignore')
-        # FFmpeg usa \r para separar actualizaciones de progreso
         lines = stderr_buffer.split('\r')
-        
-        # La última parte puede estar incompleta, la guardamos para la siguiente iteración.
         stderr_buffer = lines.pop(-1)
         
         for line in lines:
             if not line: continue
             all_stderr_lines.append(line.strip())
 
+            # --- CORRECCIÓN VISUAL: Asegurarse de que el contexto y la duración existan ---
             if match := time_pattern.search(line):
                 if total_duration_sec > 0 and ctx:
                     h, m, s, ms = map(int, match.groups())
@@ -110,17 +110,14 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
                     )
                     await _edit_status_message(user_id, text, progress_tracker)
 
-    # Procesar cualquier dato remanente en el buffer al final
     if stderr_buffer.strip():
         all_stderr_lines.append(stderr_buffer.strip())
             
     await process.wait()
     if process.returncode != 0:
-        # Unir las últimas 20 líneas del log de error para un mensaje conciso
         error_log = "\n".join(all_stderr_lines[-20:])
         logger.error(f"FFmpeg falló. Código: {process.returncode}\nError: {error_log}")
         raise Exception(f"El proceso de FFmpeg falló. Log:\n...{error_log[-450:]}")
-
 
 async def process_task(bot, task: dict):
     task_id, user_id = str(task['_id']), task['user_id']
@@ -186,9 +183,19 @@ async def process_task(bot, task: dict):
             else:
                 files_to_clean.add(watermark_path)
         
+        # --- LÓGICA DE THUMBNAIL UNIFICADA PARA AUDIO Y VIDEO ---
         thumb_path = os.path.join(DOWNLOAD_DIR, f"{task_id}.jpg")
         thumb_to_use = None
-        if config.get('thumbnail_url') and await asyncio.to_thread(downloader.download_file, config['thumbnail_url'], thumb_path):
+        # Usar thumbnail de la config (manual o URL) o el de la info de URL
+        thumb_file_id = config.get('thumbnail_file_id')
+        thumb_url = config.get('thumbnail_url') or task.get('url_info', {}).get('thumbnail')
+
+        if thumb_file_id:
+            await bot.download_media(message=thumb_file_id, file_name=thumb_path)
+            if os.path.exists(thumb_path):
+                thumb_to_use = thumb_path
+                files_to_clean.add(thumb_path)
+        elif thumb_url and await asyncio.to_thread(downloader.download_file, thumb_url, thumb_path):
             thumb_to_use = thumb_path
             files_to_clean.add(thumb_path)
 
@@ -235,8 +242,19 @@ async def process_task(bot, task: dict):
             
             else:
                 processed_file = output_path
-                final_filename_with_ext = os.path.basename(processed_file) if file_type != 'audio' else f"{final_filename_base}.{config.get('audio_format', 'mp3')}"
+                # Asegurar que el nombre de archivo de audio use la extensión correcta de la config
+                if file_type == 'audio':
+                    base, _ = os.path.splitext(processed_file)
+                    new_ext = f".{config.get('audio_format', 'mp3')}"
+                    new_path = f"{base}{new_ext}"
+                    # Renombrar solo si el nombre generado por FFmpeg no coincide (poco probable, pero seguro)
+                    if processed_file != new_path and os.path.exists(processed_file):
+                        os.rename(processed_file, new_path)
+                        processed_file = new_path
+                
+                final_filename_with_ext = os.path.basename(processed_file)
                 caption = f"✅ <code>{escape_html(final_filename_with_ext)}</code>"
+
                 if file_type == 'video':
                     msg = await bot.send_video(user_id, video=processed_file, thumb=thumb_to_use, caption=caption, parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
                     sent_messages.append(msg)
@@ -290,3 +308,4 @@ async def worker_loop(bot_instance):
         except Exception as e:
             logger.critical(f"[WORKER] Bucle del worker falló críticamente: {e}", exc_info=True)
             await asyncio.sleep(30)
+# --- END OF FILE src/core/worker.py ---

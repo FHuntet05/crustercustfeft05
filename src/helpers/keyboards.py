@@ -47,7 +47,7 @@ def build_processing_menu(task_id: str, file_type: str, task_data: dict, filenam
             [InlineKeyboardButton(f"🔊 Convertir ({audio_format.upper()}, {bitrate})", callback_data=f"config_audioconvert_{task_id}")],
             [InlineKeyboardButton("🎧 Efectos", callback_data=f"config_audioeffects_{task_id}")],
             [InlineKeyboardButton("✂️ Cortar", callback_data=f"config_trim_{task_id}")],
-            [InlineKeyboardButton("🖼️ Editar Tags", callback_data=f"config_audiotags_{task_id}")],
+            [InlineKeyboardButton("🖼️ Editar Metadatos", callback_data=f"config_audiometadata_{task_id}")],
         ])
 
     keyboard.extend([
@@ -175,6 +175,16 @@ def build_audio_effects_menu(task_id: str, config: dict) -> InlineKeyboardMarkup
         [InlineKeyboardButton("🔙 Volver", callback_data=f"task_process_{task_id}")]
     ]
     return InlineKeyboardMarkup(keyboard)
+
+def build_audio_metadata_menu(task_id: str) -> InlineKeyboardMarkup:
+    """Construye el menú de opciones para editar metadatos de audio."""
+    keyboard = [
+        [InlineKeyboardButton("✏️ Editar Texto (Título, Artista...)", callback_data=f"config_audiotags_{task_id}")],
+        [InlineKeyboardButton("🖼️ Añadir/Cambiar Carátula", callback_data=f"config_audiothumb_{task_id}")],
+        [InlineKeyboardButton("🔙 Volver", callback_data=f"task_process_{task_id}")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 
 def build_watermark_menu(task_id: str) -> InlineKeyboardMarkup:
     """Construye el menú de opciones para la marca de agua."""

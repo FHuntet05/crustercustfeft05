@@ -34,7 +34,7 @@ def get_media_info(file_path: str) -> dict:
 
 def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnail_path: str = None, watermark_path: str = None) -> list:
     """
-    Construye el comando FFmpeg, ahora con soporte para marcas de agua dinámicas.
+    Construye el comando FFmpeg, ahora con soporte para marcas de agua dinámicas y metadatos de audio.
     """
     config = task.get('processing_config', {})
     file_type = task.get('file_type')
@@ -52,18 +52,20 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
     command_parts.append(f"-i {shlex.quote(input_path)}")
     input_count = 1
     
-    if watermark_path:
-        command_parts.append(f"-i {shlex.quote(watermark_path)}")
-        watermark_map_idx = input_count
-        input_count += 1
-
+    # El thumbnail ahora puede ser para audio (carátula) o video (miniatura)
     if thumbnail_path:
         command_parts.append(f"-i {shlex.quote(thumbnail_path)}")
         thumb_map_idx = input_count
         input_count += 1
 
+    if watermark_path:
+        command_parts.append(f"-i {shlex.quote(watermark_path)}")
+        watermark_map_idx = input_count
+        input_count += 1
+
     codec_opts = []
     map_opts = []
+    metadata_opts = []
     
     watermark_config = config.get('watermark')
     filter_complex_parts = []
@@ -112,29 +114,40 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
         if audio_filters:
             codec_opts.append(f"-af {shlex.quote(','.join(audio_filters))}")
         
-        codec_opts.append("-vn")
+        codec_opts.append("-vn") # Quitar cualquier stream de video original
         codec_opts.append(f"-c:a {codec_map.get(fmt, 'libmp3lame')}")
         if fmt != 'flac': codec_opts.append(f"-b:a {bitrate}")
         map_opts.append("-map 0:a:0")
+        
+        # --- NUEVA LÓGICA: Metadatos y Carátula para Audio ---
+        if 'audio_tags' in config:
+            tags = config['audio_tags']
+            if 'title' in tags: metadata_opts.append(f"-metadata title={shlex.quote(tags['title'])}")
+            if 'artist' in tags: metadata_opts.append(f"-metadata artist={shlex.quote(tags['artist'])}")
+            if 'album' in tags: metadata_opts.append(f"-metadata album={shlex.quote(tags['album'])}")
+        
+        if thumbnail_path:
+            map_opts.append(f"-map {thumb_map_idx}")
+            codec_opts.append("-c:v copy") # Copiar el stream de imagen tal cual
+            codec_opts.append("-disposition:v:0 attached_pic") # Designarla como carátula
     
     elif file_type == 'video':
-        # Para video, siempre copiar el audio, ya que los filtros de video no lo afectan.
         codec_opts.append("-c:a copy")
         map_opts.append("-map 0:a?")
+        # --- LÓGICA ANTERIOR DE THUMBNAIL PARA VIDEO ---
+        # (Esto estaba mal, se corrige para que la miniatura se adjunte al contenedor, no como stream de subtítulos)
+        if thumbnail_path:
+            map_opts.append(f"-map {thumb_map_idx}")
+            # Correcto: adjuntar como imagen (funciona en más reproductores)
+            codec_opts.append("-c:v:1 mjpeg -disposition:v:1 attached_pic")
 
     if config.get('mute_audio'):
         codec_opts = [opt for opt in codec_opts if '-c:a' not in opt and '-b:a' not in opt]
         map_opts = [opt for opt in map_opts if '-map 0:a' not in opt]
         codec_opts.append("-an")
 
-    if thumbnail_path:
-        # Añadir la miniatura como un stream separado
-        map_opts.append(f"-map {thumb_map_idx}")
-        codec_opts.append("-c:s mov_text") # Para compatibilidad de subtítulos
-        codec_opts.append("-disposition:s:0 0") # Asegurar que este stream sea el de la miniatura
-        codec_opts.append("-c:v:1 mjpeg -disposition:v:1 attached_pic") # Codificar la miniatura
-
     command_parts.extend(codec_opts)
+    command_parts.extend(metadata_opts) # Añadir los metadatos
     command_parts.extend(map_opts)
     command_parts.append(shlex.quote(output_path))
     
