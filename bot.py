@@ -5,8 +5,7 @@ import logging
 import os
 from dotenv import load_dotenv
 
-# --- CORRECCIÓN CLAVE: Cargar variables de entorno PRIMERO ---
-# Esto lee tu archivo .env y hace que las variables estén disponibles para el resto de la app
+# Cargar variables de entorno PRIMERO
 load_dotenv()
 
 from pyrogram import Client
@@ -15,14 +14,17 @@ from pyrogram import Client
 from src.db.mongo_manager import db
 from src.core.worker import Worker
 
-# Configuración del logging
+# Configuración de logging mejorada
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+# Silenciar los logs de INFO de Pyrogram para una consola más limpia
+logging.getLogger("pyrogram").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
-# --- Configuración del Cliente de Pyrogram ---
+# Configuración del Cliente de Pyrogram
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -44,7 +46,7 @@ app = Client(
     plugins=PLUGINS
 )
 
-# --- Punto de Entrada Principal ---
+# Punto de Entrada Principal
 async def main():
     """
     Función principal para inicializar y correr el bot.

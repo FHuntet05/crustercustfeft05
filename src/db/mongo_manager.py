@@ -1,111 +1,91 @@
 # src/db/mongo_manager.py
 
-import logging
 import os
+import motor.motor_asyncio
+import logging
+from pymongo.errors import OperationFailure
 from datetime import datetime
-from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo.errors import CollectionInvalid
+from dotenv import load_dotenv
+from bson.objectid import ObjectId
 
-# Configuración del logger
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+load_dotenv()
 logger = logging.getLogger(__name__)
 
-class MongoManager:
-    def __init__(self, uri, db_name):
-        self.client = AsyncIOMotorClient(uri)
-        self.db = self.client[db_name]
-        self.tasks = self.db.tasks
-        self.search_sessions = self.db.search_sessions
+class Database:
+    _instance = None
+    _initialized = False
 
-    async def initialize_db(self):
-        """
-        Inicializa la base de datos y crea colecciones e índices de forma verdaderamente idempotente.
-        """
-        logger.info("Inicializando la base de datos y los índices...")
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(Database, cls).__new__(cls)
+            try:
+                mongo_uri = os.getenv("MONGO_URI")
+                if not mongo_uri: raise ValueError("MONGO_URI no está definida.")
+                cls._instance.client = motor.motor_asyncio.AsyncIOMotorClient(mongo_uri)
+                cls._instance.db = cls._instance.client.get_database("JefesMediaSuiteDB")
+                cls._instance.tasks = cls._instance.db.tasks
+                cls._instance.user_settings = cls._instance.db.user_settings
+                cls._instance.search_sessions = cls._instance.db.search_sessions
+                cls._instance.search_results = cls._instance.db.search_results
+                logger.info("Cliente de base de datos Motor (asíncrono) inicializado.")
+            except Exception as e:
+                logger.critical(f"FALLO CRÍTICO DB: {e}")
+                raise ConnectionError(f"No se pudo inicializar el cliente de la DB: {e}")
+        return cls._instance
+    
+    async def init_db(self):
+        if self._initialized:
+            return
+        logger.info("Asegurando índices de la base de datos...")
         try:
-            # --- Colección de Tareas ---
-            # Crear colección si no existe
-            collection_names = await self.db.list_collection_names()
-            if "tasks" not in collection_names:
-                await self.db.create_collection("tasks")
-                logger.info("Colección 'tasks' creada.")
+            await self.search_sessions.create_index("created_at", expireAfterSeconds=3600, name="search_sessions_ttl")
+            await self.search_results.create_index("created_at", expireAfterSeconds=3600, name="search_results_ttl")
+            logger.info("Índices TTL de búsqueda verificados y listos.")
+        except OperationFailure as e:
+            if "Index already exists" in str(e) or "IndexOptionsConflict" in str(e):
+                logger.warning(f"No se crearon los índices porque ya existen o hay un conflicto. El bot continuará. Error: {e}")
             else:
-                logger.info("Colección 'tasks' ya existe.")
+                logger.error(f"Error inesperado al crear los índices de la DB: {e}")
+        finally:
+            self._initialized = True
 
-            # Asegurar índice para la colección de tareas
-            # PyMongo/Motor manejan la idempotencia de create_index si el nombre y las opciones son iguales.
-            await self.tasks.create_index([("user_id", 1), ("status", 1)], name="user_status_index", background=True)
-            logger.info("Índice 'user_status_index' para tasks asegurado.")
-
-            # --- CORRECCIÓN: Lógica robusta para el índice TTL ---
-            if "search_sessions" not in collection_names:
-                await self.db.create_collection("search_sessions")
-                logger.info("Colección 'search_sessions' creada.")
-            else:
-                logger.info("Colección 'search_sessions' ya existe.")
-
-            # Verificar si ya existe un índice TTL en la colección
-            existing_indexes = await self.search_sessions.index_information()
-            ttl_index_exists = any('expireAfterSeconds' in options for options in existing_indexes.values())
-
-            if not ttl_index_exists:
-                logger.info("No se encontró un índice TTL en 'search_sessions'. Creando uno nuevo...")
-                await self.search_sessions.create_index("created_at", expireAfterSeconds=3600, name="session_ttl_index")
-                logger.info("Índice TTL 'session_ttl_index' creado con éxito.")
-            else:
-                logger.info("Índice TTL ya existe en 'search_sessions'. No se tomarán acciones.")
-
-            logger.info("Inicialización de la base de datos completada con éxito.")
-
+    async def add_task(self, user_id, file_type, file_name=None, file_size=None, url=None, file_id=None, message_id=None, processing_config=None, url_info=None):
+        task_doc = {
+            "user_id": int(user_id), "url": url, "file_id": file_id, "message_id": message_id,
+            "original_filename": file_name,
+            "final_filename": os.path.splitext(file_name)[0] if file_name else "descarga_url",
+            "file_size": file_size, "file_type": file_type, "status": "pending_processing",
+            "created_at": datetime.utcnow(), "processed_at": None,
+            "processing_config": processing_config or {},
+            "url_info": url_info or {}, "last_error": None,
+        }
+        try:
+            result = await self.tasks.insert_one(task_doc)
+            logger.info(f"Nueva tarea {result.inserted_id} añadida para {user_id}")
+            return result.inserted_id
         except Exception as e:
-            logger.error(f"Error crítico durante la inicialización de la base de datos: {e}", exc_info=True)
-            raise
-
-    # --- Métodos para Tareas ---
-
-    async def create_task(self, task_data):
-        result = await self.tasks.insert_one(task_data)
-        return str(result.inserted_id)
+            logger.error(f"Error al añadir tarea a la DB: {e}")
+            return None
 
     async def get_task(self, task_id):
-        return await self.tasks.find_one({"_id": ObjectId(task_id)})
+        try: return await self.tasks.find_one({"_id": ObjectId(task_id)})
+        except: return None
 
-    async def update_task(self, task_id, update_data):
-        await self.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": update_data})
+    async def get_pending_tasks(self, user_id):
+        cursor = self.tasks.find({"user_id": int(user_id), "status": "pending_processing"}).sort("created_at", 1)
+        return await cursor.to_list(length=100)
 
-    async def get_queued_tasks_by_user(self):
-        pipeline = [
-            {"$match": {"status": "queued"}},
-            {"$sort": {"created_at": 1}},
-            {"$group": {
-                "_id": "$user_id",
-                "tasks": {"$push": "$$ROOT"}
-            }}
-        ]
-        cursor = self.tasks.aggregate(pipeline)
-        tasks_by_user = {doc["_id"]: doc["tasks"] async for doc in cursor}
-        return tasks_by_user
+    async def update_task_config(self, task_id, key, value):
+        try: return await self.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": {f"processing_config.{key}": value}})
+        except Exception as e: logger.error(f"Error al actualizar config {task_id}: {e}"); return None
 
-    # --- Métodos para Sesiones de Búsqueda ---
+    async def update_task(self, task_id, field, value):
+        try: return await self.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": {field: value}})
+        except Exception as e: logger.error(f"Error al actualizar tarea {task_id}: {e}"); return None
     
-    async def create_search_session(self, query_id, results):
-        session_data = {
-            "_id": query_id,
-            "results": results,
-            "created_at": datetime.utcnow()
-        }
-        await self.search_sessions.insert_one(session_data)
-    
-    async def get_search_session(self, query_id):
-        return await self.search_sessions.find_one({"_id": query_id})
+    async def get_user_settings(self, user_id):
+        if not await self.user_settings.find_one({"_id": user_id}):
+            await self.user_settings.insert_one({"_id": user_id, "created_at": datetime.utcnow()})
+        return
 
-
-# --- Instancia de la Base de Datos ---
-MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "JefesMediaSuiteDB")
-
-if not MONGO_URI:
-    logger.critical("La variable de entorno MONGO_URI no está definida. El bot no puede iniciarse.")
-    exit()
-
-db = MongoManager(uri=MONGO_URI, db_name=MONGO_DB_NAME)
+db_instance = Database()
