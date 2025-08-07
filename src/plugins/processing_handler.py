@@ -110,35 +110,40 @@ async def show_config_menu(client: Client, query: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^set_watermark_"))
 async def set_watermark_handler(client: Client, query: CallbackQuery):
-    """Maneja toda la lógica de los botones del menú de marca de agua."""
     await query.answer()
     parts = query.data.split("_")
     action = parts[2]
-    task_id = "_".join(parts[3:])
 
     if not hasattr(client, 'user_data'): client.user_data = {}
     
-    if action == "image":
-        client.user_data[query.from_user.id] = {"active_config": {"task_id": task_id, "menu_type": "watermark_image"}}
-        await query.message.edit_text("🖼️ Por favor, envíeme la imagen que desea usar como marca de agua (preferiblemente PNG).", reply_markup=build_back_button(f"config_watermark_{task_id}"))
-    elif action == "text":
-        client.user_data[query.from_user.id] = {"active_config": {"task_id": task_id, "menu_type": "watermark_text"}}
-        await query.message.edit_text("✏️ Por favor, envíeme el texto que desea usar como marca de agua.", reply_markup=build_back_button(f"config_watermark_{task_id}"))
-    elif action == "remove":
-        await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$unset": {"processing_config.watermark": ""}})
-        task = await db_instance.get_task(task_id)
-        keyboard = build_processing_menu(task_id, task['file_type'], task, task.get('original_filename'))
-        await query.message.edit_text("✅ Marca de agua eliminada de la configuración.", reply_markup=keyboard)
+    if action in ["image", "text", "remove"]:
+        task_id = "_".join(parts[3:])
+        if action == "image":
+            client.user_data[query.from_user.id] = {"active_config": {"task_id": task_id, "menu_type": "watermark_image"}}
+            await query.message.edit_text("🖼️ Por favor, envíeme la imagen que desea usar como marca de agua (preferiblemente PNG).", reply_markup=build_back_button(f"config_watermark_{task_id}"))
+        elif action == "text":
+            client.user_data[query.from_user.id] = {"active_config": {"task_id": task_id, "menu_type": "watermark_text"}}
+            await query.message.edit_text("✏️ Por favor, envíeme el texto que desea usar como marca de agua.", reply_markup=build_back_button(f"config_watermark_{task_id}"))
+        elif action == "remove":
+            await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$unset": {"processing_config.watermark": ""}})
+            task = await db_instance.get_task(task_id)
+            if not task: return await query.message.edit_text("❌ Error: La tarea ya no existe.")
+            keyboard = build_processing_menu(task_id, task['file_type'], task, task.get('original_filename'))
+            await query.message.edit_text("✅ Marca de agua eliminada de la configuración.", reply_markup=keyboard)
+
     elif action == "position":
-        position = parts[4]
+        task_id = parts[3]
+        position = "_".join(parts[4:])
         await db_instance.update_task_config(task_id, "watermark.position", position)
+        
         task = await db_instance.get_task(task_id)
+        if not task: return await query.message.edit_text("❌ Error: La tarea ya no existe.")
+        
         keyboard = build_processing_menu(task_id, task['file_type'], task, task.get('original_filename'))
         await query.message.edit_text("✅ Posición de la marca de agua guardada.", reply_markup=keyboard)
 
 @Client.on_message((filters.photo | filters.document) & filters.reply)
 async def handle_watermark_image(client: Client, message: Message):
-    """Captura la imagen de la marca de agua enviada por el usuario."""
     user_id = message.from_user.id
     if not hasattr(client, 'user_data') or user_id not in client.user_data: return
     
@@ -148,7 +153,6 @@ async def handle_watermark_image(client: Client, message: Message):
     task_id = active_config["task_id"]
     media = message.photo or message.document
     
-    # Validar que sea una imagen
     if hasattr(media, 'mime_type') and not media.mime_type.startswith("image/"):
         return await message.reply("❌ El archivo enviado no es una imagen. Por favor, inténtelo de nuevo.")
 
@@ -163,7 +167,6 @@ async def set_value_callback(client: Client, query: CallbackQuery):
     parts = query.data.split("_")
     config_type = parts[1]
     
-    # Redirigir si es un callback de marca de agua
     if config_type == "watermark":
         return await set_watermark_handler(client, query)
 
