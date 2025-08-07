@@ -56,7 +56,10 @@ async def _progress_callback_pyrogram(current, total, user_id, operation):
         user_id=user_id,
         user_mention=user_mention
     )
-    await _edit_status_message(user_id, text, progress_tracker)
+    
+    # --- SOLUCIÓN AL PROGRESO VISUAL ---
+    # Usar run_coroutine_threadsafe para llamar a la corutina desde el hilo de Pyrogram
+    asyncio.run_coroutine_threadsafe(_edit_status_message(user_id, text, progress_tracker), ctx.loop)
 
 async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
     duration_info = get_media_info(input_path)
@@ -115,9 +118,8 @@ async def process_task(bot, task: dict):
     task_id, user_id = str(task['_id']), task['user_id']
     status_message = None
     
-    # --- LÓGICA DE MENSAJE DE ESTADO CENTRALIZADA ---
     try:
-        task = await db_instance.get_task(task_id) # Recargar la tarea para obtener la config más reciente
+        task = await db_instance.get_task(task_id)
         if not task: raise Exception("Tarea no encontrada después de recargar.")
         
         config = task.get('processing_config', {})
@@ -128,7 +130,7 @@ async def process_task(bot, task: dict):
         if initial_message_id:
             try:
                 status_message = await bot.edit_message_text(user_id, initial_message_id, initial_text, parse_mode=ParseMode.HTML)
-            except Exception: # Si falla la edición (ej. mensaje borrado), crea uno nuevo
+            except Exception:
                 status_message = await bot.send_message(user_id, initial_text, parse_mode=ParseMode.HTML)
         else:
             status_message = await bot.send_message(user_id, initial_text, parse_mode=ParseMode.HTML)
@@ -138,7 +140,6 @@ async def process_task(bot, task: dict):
     
         files_to_clean = set()
         
-        # El resto del bloque try/except/finally se anida aquí
         actual_download_path = ""
         if url := task.get('url'):
             if not (format_id := config.get('download_format_id')): raise Exception("La tarea no tiene 'download_format_id'.")
@@ -208,7 +209,7 @@ async def process_task(bot, task: dict):
                 elif file_type == 'audio': await bot.send_audio(user_id, audio=output_path, thumb=thumb_to_use, caption=caption, parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
         
         await db_instance.update_task(task_id, "status", "done")
-        await status_message.delete()
+        if status_message: await status_message.delete()
 
     except Exception as e:
         logger.critical(f"Error al procesar la tarea {task_id}: {e}", exc_info=True)
@@ -221,10 +222,8 @@ async def process_task(bot, task: dict):
             if ADMIN_USER_ID: await bot.send_message(ADMIN_USER_ID, "⚠️ <b>¡Alerta de Mantenimiento, Jefe!</b>\n\nMis cookies de YouTube han expirado.", parse_mode=ParseMode.HTML)
             error_message_to_user = f"❌ <b>Error de Autenticación</b>\n\n<code>{escape_html(error_str)}</code>"
         
-        if status_message:
-            await _edit_status_message(user_id, error_message_to_user, progress_tracker)
-        else:
-            await bot.send_message(user_id, error_message_to_user, parse_mode=ParseMode.HTML)
+        if status_message: await _edit_status_message(user_id, error_message_to_user, progress_tracker)
+        else: await bot.send_message(user_id, error_message_to_user, parse_mode=ParseMode.HTML)
 
     finally:
         if user_id in progress_tracker: del progress_tracker[user_id]

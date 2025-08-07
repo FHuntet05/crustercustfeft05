@@ -83,7 +83,7 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
         filter_complex_parts.append(last_filter.replace('[filtered_v]', '[outv]'))
         map_opts.append("-map [outv]")
     else:
-        map_opts.append("-map 0:v:0?") # Mapear solo el primer stream de video
+        map_opts.append("-map 0:v:0?")
 
     if file_type == 'video':
         if transcode_config:
@@ -91,14 +91,16 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
         else:
             codec_opts.extend(["-c:v copy", "-c:a copy"])
         
-        map_opts.append("-map 0:a:0?") # Mapear solo el primer stream de audio
+        # --- SOLUCIÓN AL FALLO DE ENCODER DE SUBTÍTULOS ---
+        codec_opts.append("-c:s mov_text") # Especificar siempre el codec de subtítulos para MP4
+
+        map_opts.append("-map 0:a:0?")
         if thumbnail_path: map_opts.append(f"-map {thumb_map_idx}"); codec_opts.append("-c:v:1 mjpeg -disposition:v:1 attached_pic")
         if config.get('remove_subtitles'): map_opts.append("-map -0:s")
         else: map_opts.append("-map 0:s?")
-        if subs_path: map_opts.append(f"-map {subs_map_idx}"); codec_opts.append("-c:s mov_text")
+        if subs_path: map_opts.append(f"-map {subs_map_idx}")
         
-        # --- SOLUCIÓN AL FALLO DE ENCODER ---
-        map_opts.append("-map -0:t") # Ignorar explícitamente todos los adjuntos (fuentes ttf, etc.)
+        map_opts.append("-map -0:t")
     
     elif file_type == 'audio':
         fmt, bitrate = config.get('audio_format', 'mp3'), config.get('audio_bitrate', '192k')
