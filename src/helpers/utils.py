@@ -1,8 +1,11 @@
 # src/helpers/utils.py
 
 import os
+import time
+import asyncio
 from html import escape
 from datetime import timedelta
+from pyrogram.enums import ParseMode
 
 # Cargar el ID del admin desde las variables de entorno de forma segura
 try:
@@ -40,7 +43,7 @@ def escape_html(text: str) -> str:
 def _create_text_bar(percentage: float, length: int = 10, fill_char: str = '█', empty_char: str = '░') -> str:
     """Crea una barra de progreso de texto simple."""
     if not 0 <= percentage <= 100: 
-        percentage = max(0, min(100, percentage)) # Clamp percentage between 0 and 100
+        percentage = max(0, min(100, percentage))
     filled_len = int(length * percentage / 100)
     bar = fill_char * filled_len + empty_char * (length - filled_len)
     return bar
@@ -56,12 +59,63 @@ def sanitize_filename(filename: str) -> str:
     if not isinstance(filename, str):
         return "archivo_invalido"
     
-    invalid_chars = r'<>:"/\|?*' + '\x00-\x1f\x7f' # Añadir caracteres de control
+    invalid_chars = r'<>:"/\|?*' + '\x00-\x1f\x7f'
     sanitized = "".join(c if c not in invalid_chars else '_' for c in filename)
-    # Reemplazar múltiples espacios con uno solo
     sanitized = " ".join(sanitized.split())
-    # Limitar la longitud total del nombre de archivo
     return sanitized[:200]
+
+async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
+    if user_id not in progress_tracker: return
+    ctx = progress_tracker[user_id]
+    
+    if text == ctx.last_update_text: return
+    ctx.last_update_text = text
+    
+    current_time = time.time()
+    if current_time - ctx.last_edit_time > 1.5:
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=ctx.message.chat.id, 
+                message_id=ctx.message.id, 
+                text=text, 
+                parse_mode=ParseMode.HTML
+            )
+            ctx.last_edit_time = current_time
+        except Exception: pass
+
+def _progress_hook_yt_dlp(d, progress_tracker: dict):
+    user_id = d.get('user_id')
+    if not user_id or user_id not in progress_tracker: return
+
+    ctx = progress_tracker[user_id]
+    operation = "📥 Descargando (yt-dlp)..."
+
+    if d['status'] == 'downloading':
+        total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+        downloaded_bytes = d.get('downloaded_bytes', 0)
+        
+        if total_bytes > 0:
+            speed = d.get('speed', 0)
+            eta = d.get('eta', 0)
+            percentage = (downloaded_bytes / total_bytes) * 100
+            
+            user_mention = "Usuario"
+            if hasattr(ctx.message, 'from_user') and ctx.message.from_user:
+                user_mention = ctx.message.from_user.mention
+
+            text = format_status_message(
+                operation=operation, 
+                filename=ctx.task.get('original_filename', 'archivo'),
+                percentage=percentage, 
+                processed_bytes=downloaded_bytes, 
+                total_bytes=total_bytes,
+                speed=speed, 
+                eta=eta, 
+                engine="yt-dlp", 
+                user_id=user_id,
+                user_mention=user_mention
+            )
+            asyncio.run_coroutine_threadsafe(_edit_status_message(user_id, text, progress_tracker), ctx.loop)
 
 def format_status_message(
     operation: str, filename: str, percentage: float, 
@@ -72,7 +126,7 @@ def format_status_message(
     bar = _create_text_bar(percentage, 10)
     short_filename = (filename[:45] + '...') if len(filename) > 48 else filename
 
-    status_line = operation # La operación ya viene con emoji
+    status_line = operation
     speed_text = f"{format_bytes(speed)}/s" if speed > 1 else f"{speed:.2f}x" if "Codificando" in operation else f"{format_bytes(speed)}/s"
     processed_text = f"{format_bytes(processed_bytes)}" if "Codificando" not in operation else f"{format_time(processed_bytes)}"
     total_text = f"{format_bytes(total_bytes)}" if "Codificando" not in operation else f"{format_time(total_bytes)}"

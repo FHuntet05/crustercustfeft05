@@ -5,12 +5,11 @@ import time
 import os
 import asyncio
 import re
-import glob
 from datetime import datetime
 from pyrogram.enums import ParseMode
 
 from src.db.mongo_manager import db_instance
-from src.helpers.utils import format_status_message, sanitize_filename, escape_html
+from src.helpers.utils import format_status_message, sanitize_filename, escape_html, _edit_status_message
 from src.core import ffmpeg, downloader
 from src.core.ffmpeg import get_media_info
 
@@ -29,25 +28,6 @@ class ProgressContext:
         self.loop = loop
 
 progress_tracker = {}
-
-async def _edit_status_message(user_id: int, text: str):
-    if user_id not in progress_tracker: return
-    ctx = progress_tracker[user_id]
-    
-    if text == ctx.last_update_text: return
-    ctx.last_update_text = text
-    
-    current_time = time.time()
-    if current_time - ctx.last_edit_time > 1.5:
-        try:
-            await ctx.bot.edit_message_text(
-                chat_id=ctx.message.chat.id, 
-                message_id=ctx.message.id, 
-                text=text, 
-                parse_mode=ParseMode.HTML
-            )
-            ctx.last_edit_time = current_time
-        except Exception: pass
 
 async def _progress_callback_pyrogram(current, total, user_id, operation):
     if user_id not in progress_tracker: return
@@ -74,41 +54,7 @@ async def _progress_callback_pyrogram(current, total, user_id, operation):
         user_id=user_id,
         user_mention=user_mention
     )
-    await _edit_status_message(user_id, text)
-
-def _progress_hook_yt_dlp(d):
-    user_id = d.get('user_id')
-    if not user_id or user_id not in progress_tracker: return
-
-    ctx = progress_tracker[user_id]
-    operation = "📥 Descargando (yt-dlp)..."
-
-    if d['status'] == 'downloading':
-        total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-        downloaded_bytes = d.get('downloaded_bytes', 0)
-        
-        if total_bytes > 0:
-            speed = d.get('speed', 0)
-            eta = d.get('eta', 0)
-            percentage = (downloaded_bytes / total_bytes) * 100
-            
-            user_mention = "Usuario"
-            if hasattr(ctx.message, 'from_user') and ctx.message.from_user:
-                user_mention = ctx.message.from_user.mention
-
-            text = format_status_message(
-                operation=operation, 
-                filename=ctx.task.get('original_filename', 'archivo'),
-                percentage=percentage, 
-                processed_bytes=downloaded_bytes, 
-                total_bytes=total_bytes,
-                speed=speed, 
-                eta=eta, 
-                engine="yt-dlp", 
-                user_id=user_id,
-                user_mention=user_mention
-            )
-            asyncio.run_coroutine_threadsafe(_edit_status_message(user_id, text), ctx.loop)
+    await _edit_status_message(user_id, text, progress_tracker)
 
 async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
     duration_info = get_media_info(input_path)
@@ -146,7 +92,7 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
                     speed=speed_factor, eta=eta, engine="FFmpeg", user_id=user_id,
                     user_mention=user_mention
                 )
-                await _edit_status_message(user_id, text)
+                await _edit_status_message(user_id, text, progress_tracker)
             
     await process.wait()
     if process.returncode != 0:
@@ -168,7 +114,6 @@ async def process_task(bot, task: dict):
         if not task: raise Exception("Tarea no encontrada.")
         progress_tracker[user_id].task = task
 
-        # Usamos el task_id como nombre base para los archivos temporales
         base_filename = os.path.join(DOWNLOAD_DIR, task_id)
         actual_download_path = ""
 
@@ -178,17 +123,15 @@ async def process_task(bot, task: dict):
             format_id = config.get('download_format_id')
             if not format_id: raise Exception("La tarea no tiene 'download_format_id'.")
             
-            # La lógica del progress hook se encapsula en el downloader.
-            # Aquí solo pasamos el user_id.
             actual_download_path = await asyncio.to_thread(
-                downloader.download_from_url, url, base_filename, format_id, user_id=user_id
+                downloader.download_from_url, url, base_filename, format_id, 
+                progress_tracker=progress_tracker, user_id=user_id
             )
 
             if not actual_download_path:
                 raise Exception("La descarga desde la URL falló o no se generó ningún archivo.")
 
         elif file_id := task.get('file_id'):
-            # Para descargas de Telegram, el nombre es predecible
             actual_download_path = base_filename
             await bot.download_media(
                 message=file_id, 
@@ -211,7 +154,7 @@ async def process_task(bot, task: dict):
         
         await db_instance.update_task(task_id, 'file_type', file_type)
         task['file_type'] = file_type
-        await _edit_status_message(user_id, f"⚙️ Archivo ({file_type}) listo para procesar.")
+        await _edit_status_message(user_id, f"⚙️ Archivo ({file_type}) listo para procesar.", progress_tracker)
         
         # --- Flujo de Procesamiento y Subida ---
         config = task.get('processing_config', {})
@@ -259,7 +202,7 @@ async def process_task(bot, task: dict):
         logger.critical(f"Error al procesar la tarea {task_id}: {e}", exc_info=True)
         await db_instance.update_task(task_id, "status", "error")
         await db_instance.update_task(task_id, "last_error", str(e))
-        await _edit_status_message(user_id, f"❌ <b>Error Grave</b>\n\n<code>{escape_html(str(e))}</code>")
+        await _edit_status_message(user_id, f"❌ <b>Error Grave</b>\n\n<code>{escape_html(str(e))}</code>", progress_tracker)
     finally:
         if user_id in progress_tracker: del progress_tracker[user_id]
         for fpath in files_to_clean:

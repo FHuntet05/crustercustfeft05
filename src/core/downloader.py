@@ -8,8 +8,8 @@ import os
 import requests
 import glob
 
-# Se importa la función de progreso del worker para usarla aquí
-from src.core.worker import _progress_hook_yt_dlp
+# Se importa la función de progreso desde utils para evitar dependencia circular
+from src.helpers.utils import _progress_hook_yt_dlp
 
 logger = logging.getLogger(__name__)
 
@@ -137,18 +137,17 @@ def get_url_info(url: str) -> dict or None:
         logger.error(f"Excepción en get_url_info para {url}: {e}", exc_info=True)
         return None
 
-def download_from_url(url: str, output_path: str, format_id: str, user_id: int = None) -> str or None:
+def download_from_url(url: str, output_path: str, format_id: str, progress_tracker: dict = None, user_id: int = None) -> str or None:
     """
     Descarga contenido con un mecanismo de reintento inteligente.
-    Intenta con progreso, si falla por error de tamaño, reintenta sin progreso.
     """
     if not format_id:
         logger.error("Se intentó descargar desde URL sin un format_id válido.")
         return None
     
     progress_hook = None
-    if user_id:
-        progress_hook = lambda d: _progress_hook_yt_dlp({**d, 'user_id': user_id})
+    if user_id and progress_tracker:
+        progress_hook = lambda d: _progress_hook_yt_dlp({**d, 'user_id': user_id}, progress_tracker)
         
     ydl_opts = get_common_ydl_opts()
     ydl_opts.update({
@@ -164,10 +163,9 @@ def download_from_url(url: str, output_path: str, format_id: str, user_id: int =
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
     except yt_dlp.utils.DownloadError as e:
-        # Detectar el error específico de 'NoneType' y 'int'
         if "not supported between instances of 'NoneType' and 'int'" in str(e):
-            logger.warning("Fallo de descarga con progreso debido a tamaño desconocido. Reintentando sin progreso...")
-            ydl_opts['progress_hooks'] = []  # Desactivar el hook de progreso
+            logger.warning("Fallo de descarga con progreso. Reintentando sin progreso...")
+            ydl_opts['progress_hooks'] = []
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
@@ -175,15 +173,12 @@ def download_from_url(url: str, output_path: str, format_id: str, user_id: int =
                 logger.error(f"El reintento de descarga también falló: {retry_e}")
                 return None
         else:
-            # Otro tipo de DownloadError
             logger.error(f"yt-dlp falló al descargar {url} con formato {format_id}: {e}")
             return None
     except Exception as e:
-        # Otro error genérico
         logger.error(f"Error inesperado durante la descarga de yt-dlp: {e}")
         return None
 
-    # Verificar que el archivo final existe y no es un .part
     found_files = glob.glob(f"{output_path}.*")
     for f in found_files:
         if not f.endswith(".part"):
