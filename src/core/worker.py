@@ -168,7 +168,8 @@ async def process_task(bot, task: dict):
         if not task: raise Exception("Tarea no encontrada.")
         progress_tracker[user_id].task = task
 
-        base_download_path = os.path.join(DOWNLOAD_DIR, task_id)
+        # Usamos el task_id como nombre base para los archivos temporales
+        base_filename = os.path.join(DOWNLOAD_DIR, task_id)
         actual_download_path = ""
 
         # --- Flujo de Descarga ---
@@ -177,19 +178,26 @@ async def process_task(bot, task: dict):
             format_id = config.get('download_format_id')
             if not format_id: raise Exception("La tarea no tiene 'download_format_id'.")
             
-            progress_hook = lambda d: _progress_hook_yt_dlp(d.copy().update({'user_id': user_id}) or d)
+            # La copia del dict 'd' se hace aquí para asegurar que 'user_id' se añade correctamente.
+            progress_hook = lambda d: _progress_hook_yt_dlp({**d, 'user_id': user_id})
 
-            if not await asyncio.to_thread(downloader.download_from_url, url, base_download_path, format_id, progress_hook):
-                raise Exception("La descarga desde la URL falló.")
-            
-            found_files = glob.glob(f"{base_download_path}.*")
-            if not found_files: raise Exception(f"No se encontró el archivo descargado: {base_download_path}")
-            
-            actual_download_path = found_files[0]
+            # download_from_url ahora devuelve la ruta completa del archivo o None
+            actual_download_path = await asyncio.to_thread(
+                downloader.download_from_url, url, base_filename, format_id, progress_hook
+            )
+
+            if not actual_download_path:
+                raise Exception("La descarga desde la URL falló o no se generó ningún archivo.")
 
         elif file_id := task.get('file_id'):
-            actual_download_path = os.path.join(DOWNLOAD_DIR, task_id) # Usamos nombre de archivo simple
-            await bot.download_media(message=file_id, file_name=actual_download_path, progress=_progress_callback_pyrogram, progress_args=(user_id, "📥 Descargando..."))
+            # Para descargas de Telegram, el nombre es predecible
+            actual_download_path = base_filename
+            await bot.download_media(
+                message=file_id, 
+                file_name=actual_download_path, 
+                progress=_progress_callback_pyrogram, 
+                progress_args=(user_id, "📥 Descargando...")
+            )
         else:
             raise Exception("La tarea no tiene URL ni file_id.")
         

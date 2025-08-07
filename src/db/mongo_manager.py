@@ -59,7 +59,8 @@ class Database:
         finally:
             self._initialized = True
 
-    async def add_task(self, user_id, file_type, file_name=None, file_size=None, url=None, file_id=None, processing_config=None, url_info=None):
+    async def add_task(self, user_id, file_type, file_name=None, file_size=None, url=None, file_id=None, 
+                         processing_config=None, url_info=None, status="pending_processing"):
         """Añade una nueva tarea a la base de datos."""
         task_doc = {
             "user_id": int(user_id),
@@ -69,7 +70,7 @@ class Database:
             "final_filename": os.path.splitext(file_name)[0] if file_name else "descarga_url",
             "file_size": file_size,
             "file_type": file_type,
-            "status": "pending_processing", # Estado inicial para que el usuario configure
+            "status": status, # Estado puede ser 'pending_processing' o 'queued'
             "created_at": datetime.utcnow(),
             "processed_at": None,
             "processing_config": processing_config or {},
@@ -78,7 +79,7 @@ class Database:
         }
         try:
             result = await self.tasks.insert_one(task_doc)
-            logger.info(f"Nueva tarea {result.inserted_id} añadida para el usuario {user_id}")
+            logger.info(f"Nueva tarea {result.inserted_id} añadida para el usuario {user_id} con estado '{status}'")
             return result.inserted_id
         except Exception as e:
             logger.error(f"Error al añadir tarea a la DB: {e}")

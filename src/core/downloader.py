@@ -6,6 +6,7 @@ import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 import os
 import requests
+import glob
 
 logger = logging.getLogger(__name__)
 
@@ -134,17 +135,19 @@ def get_url_info(url: str) -> dict or None:
         logger.error(f"Excepción en get_url_info para {url}: {e}", exc_info=True)
         return None
 
-def download_from_url(url: str, output_path: str, format_id: str, progress_hook=None) -> bool:
-    """Descarga contenido desde una URL usando yt-dlp con un formato específico."""
+def download_from_url(url: str, output_path: str, format_id: str, progress_hook=None) -> str or None:
+    """
+    Descarga contenido desde una URL y devuelve la ruta del archivo creado o None si falla.
+    """
     if not format_id:
         logger.error("Se intentó descargar desde URL sin un format_id válido.")
-        return False
+        return None
         
     ydl_opts = get_common_ydl_opts()
     ydl_opts.update({
         'format': format_id, 'outtmpl': {'default': output_path},
         'progress_hooks': [progress_hook] if progress_hook else [],
-        'noplaylist': True, 'merge_output_format': 'mkv', # Usar MKV para mejor compatibilidad de streams
+        'noplaylist': True, 'merge_output_format': 'mkv',
         'http_chunk_size': 10485760, 'retries': 5, 'fragment_retries': 5,
     })
     if 'forcejson' in ydl_opts: del ydl_opts['forcejson']
@@ -152,10 +155,19 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_hook=
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-        return True
+        
+        # Después de la descarga, encontrar el archivo real, ya que yt-dlp añade la extensión.
+        found_files = glob.glob(f"{output_path}.*")
+        if found_files:
+            logger.info(f"Descarga de yt-dlp completada. Archivo: {found_files[0]}")
+            return found_files[0]
+        else:
+            logger.error(f"yt-dlp finalizó pero no se encontró el archivo en {output_path}.*")
+            return None
+
     except Exception as e:
         logger.error(f"yt-dlp falló al descargar {url} con formato {format_id}: {e}")
-        return False
+        return None
 
 def search_music(query: str, limit: int = 20) -> list:
     """Busca música usando la API de Spotify y/o YouTube."""
