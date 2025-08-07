@@ -34,7 +34,6 @@ class ProgressContext:
 progress_tracker = {}
 
 async def _progress_callback_pyrogram(current, total, user_id, operation):
-    # --- CORRECCIÓN VISUAL: Evitar mostrar datos incorrectos si total es 0 ---
     if user_id not in progress_tracker or not total or total <= 0: return
     ctx = progress_tracker[user_id]
     
@@ -77,8 +76,7 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
 
     while True:
         chunk = await process.stderr.read(1024)
-        if not chunk:
-            break
+        if not chunk: break
         
         stderr_buffer += chunk.decode('utf-8', 'ignore')
         lines = stderr_buffer.split('\r')
@@ -88,7 +86,6 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
             if not line: continue
             all_stderr_lines.append(line.strip())
 
-            # --- CORRECCIÓN VISUAL: Asegurarse de que el contexto y la duración existan ---
             if match := time_pattern.search(line):
                 if total_duration_sec > 0 and ctx:
                     h, m, s, ms = map(int, match.groups())
@@ -110,8 +107,7 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
                     )
                     await _edit_status_message(user_id, text, progress_tracker)
 
-    if stderr_buffer.strip():
-        all_stderr_lines.append(stderr_buffer.strip())
+    if stderr_buffer.strip(): all_stderr_lines.append(stderr_buffer.strip())
             
     await process.wait()
     if process.returncode != 0:
@@ -145,10 +141,7 @@ async def process_task(bot, task: dict):
                 downloader.download_from_url, url, base_filename, format_id, 
                 progress_tracker=progress_tracker, user_id=user_id
             )
-
-            if not actual_download_path:
-                raise Exception("La descarga desde la URL falló o no se generó ningún archivo.")
-
+            if not actual_download_path: raise Exception("La descarga desde la URL falló.")
         elif file_id := task.get('file_id'):
             actual_download_path = base_filename
             await bot.download_media(message=file_id, file_name=actual_download_path, progress=_progress_callback_pyrogram, progress_args=(user_id, "📥 Descargando..."))
@@ -161,45 +154,49 @@ async def process_task(bot, task: dict):
         file_type = task.get('file_type', 'document')
         await _edit_status_message(user_id, f"⚙️ Archivo ({file_type}) listo para procesar.", progress_tracker)
         
-        final_filename_base = sanitize_filename(config.get('final_filename', task.get('original_filename', task_id)))
-        final_ext = f".{config.get('audio_format', 'mp3')}" if file_type == 'audio' else ".mp4"
-        if 'gif_options' in config: final_ext = ""
+        # --- CORRECCIÓN DE EXTENSIÓN: Trabajar con el nombre base ---
+        base_name_from_config = config.get('final_filename', task.get('original_filename', task_id))
+        final_filename_base = os.path.splitext(sanitize_filename(base_name_from_config))[0]
 
-        final_filename = f"{final_filename_base}{final_ext}"
-        output_path = os.path.join(OUTPUT_DIR, final_filename)
         if 'gif_options' in config:
+            final_ext = ""
             output_path = os.path.join(OUTPUT_DIR, final_filename_base)
-
+        elif file_type == 'audio':
+            final_ext = f".{config.get('audio_format', 'mp3')}"
+            output_path = os.path.join(OUTPUT_DIR, f"{final_filename_base}{final_ext}")
+        else: # video
+            final_ext = ".mp4"
+            output_path = os.path.join(OUTPUT_DIR, f"{final_filename_base}{final_ext}")
+        
         files_to_clean.add(output_path)
         
-        watermark_path = None
-        watermark_config = config.get('watermark')
-        if watermark_config and watermark_config.get('type') == 'image' and watermark_config.get('file_id'):
+        watermark_path, thumb_to_use, subs_to_use = None, None, None
+
+        if config.get('watermark', {}).get('type') == 'image' and config['watermark'].get('file_id'):
             watermark_path = os.path.join(DOWNLOAD_DIR, f"{task_id}_watermark.png")
-            await bot.download_media(message=watermark_config['file_id'], file_name=watermark_path)
-            if not os.path.exists(watermark_path):
-                logger.warning("No se pudo descargar la imagen de la marca de agua.")
-                watermark_path = None
-            else:
-                files_to_clean.add(watermark_path)
+            await bot.download_media(message=config['watermark']['file_id'], file_name=watermark_path)
+            if os.path.exists(watermark_path): files_to_clean.add(watermark_path)
         
-        # --- LÓGICA DE THUMBNAIL UNIFICADA PARA AUDIO Y VIDEO ---
-        thumb_path = os.path.join(DOWNLOAD_DIR, f"{task_id}.jpg")
-        thumb_to_use = None
-        # Usar thumbnail de la config (manual o URL) o el de la info de URL
         thumb_file_id = config.get('thumbnail_file_id')
         thumb_url = config.get('thumbnail_url') or task.get('url_info', {}).get('thumbnail')
-
-        if thumb_file_id:
-            await bot.download_media(message=thumb_file_id, file_name=thumb_path)
+        if thumb_file_id or thumb_url:
+            thumb_path = os.path.join(DOWNLOAD_DIR, f"{task_id}.jpg")
+            if thumb_file_id:
+                await bot.download_media(message=thumb_file_id, file_name=thumb_path)
+            elif thumb_url:
+                await asyncio.to_thread(downloader.download_file, thumb_url, thumb_path)
             if os.path.exists(thumb_path):
                 thumb_to_use = thumb_path
                 files_to_clean.add(thumb_path)
-        elif thumb_url and await asyncio.to_thread(downloader.download_file, thumb_url, thumb_path):
-            thumb_to_use = thumb_path
-            files_to_clean.add(thumb_path)
+        
+        if subs_file_id := config.get('subs_file_id'):
+            subs_path = os.path.join(DOWNLOAD_DIR, f"{task_id}.srt")
+            await bot.download_media(message=subs_file_id, file_name=subs_path)
+            if os.path.exists(subs_path):
+                subs_to_use = subs_path
+                files_to_clean.add(subs_path)
 
-        commands = ffmpeg.build_ffmpeg_command(task, actual_download_path, output_path, thumb_to_use, watermark_path)
+        commands = ffmpeg.build_ffmpeg_command(task, actual_download_path, output_path, thumb_to_use, watermark_path, subs_to_use)
         sent_messages = []
         
         if commands:
@@ -212,28 +209,18 @@ async def process_task(bot, task: dict):
 
             if 'split_criteria' in config:
                 base_name, ext = os.path.splitext(output_path)
-                search_pattern = f"{base_name}_part*{ext}"
-                found_parts = sorted(glob.glob(search_pattern))
-
-                if not found_parts:
-                    raise Exception("La división falló, no se encontraron archivos de salida.")
+                found_parts = sorted(glob.glob(f"{base_name}_part*{ext}"))
+                if not found_parts: raise Exception("La división falló, no se encontraron partes.")
                 
                 files_to_clean.update(found_parts)
-                
                 await _edit_status_message(user_id, f"⬆️ Subiendo {len(found_parts)} partes...", progress_tracker)
                 
-                media_group = []
-                for i, part_path in enumerate(found_parts):
-                    caption = f"✅ Parte {i+1}/{len(found_parts)}\n<code>{escape_html(os.path.basename(part_path))}</code>" if i == 0 else ""
-                    media_group.append(InputMediaVideo(media=part_path, caption=caption, parse_mode=ParseMode.HTML))
-                
+                media_group = [InputMediaVideo(media=p, caption=f"✅ Parte {i+1}/{len(found_parts)}\n<code>{escape_html(os.path.basename(p))}</code>" if i==0 else "") for i, p in enumerate(found_parts)]
                 sent_messages = await bot.send_media_group(user_id, media=media_group)
             
             elif 'gif_options' in config:
-                base, _ = os.path.splitext(output_path)
-                gif_path = f"{base}.gif"
-                if not os.path.exists(gif_path):
-                    raise Exception("La creación del GIF falló, no se encontró el archivo de salida.")
+                gif_path = f"{os.path.splitext(output_path)[0]}.gif"
+                if not os.path.exists(gif_path): raise Exception("La creación del GIF falló.")
                 
                 files_to_clean.add(gif_path)
                 caption = f"✅ <code>{escape_html(os.path.basename(gif_path))}</code>"
@@ -241,25 +228,12 @@ async def process_task(bot, task: dict):
                 sent_messages.append(msg)
             
             else:
-                processed_file = output_path
-                # Asegurar que el nombre de archivo de audio use la extensión correcta de la config
-                if file_type == 'audio':
-                    base, _ = os.path.splitext(processed_file)
-                    new_ext = f".{config.get('audio_format', 'mp3')}"
-                    new_path = f"{base}{new_ext}"
-                    # Renombrar solo si el nombre generado por FFmpeg no coincide (poco probable, pero seguro)
-                    if processed_file != new_path and os.path.exists(processed_file):
-                        os.rename(processed_file, new_path)
-                        processed_file = new_path
-                
-                final_filename_with_ext = os.path.basename(processed_file)
-                caption = f"✅ <code>{escape_html(final_filename_with_ext)}</code>"
-
+                caption = f"✅ <code>{escape_html(os.path.basename(output_path))}</code>"
                 if file_type == 'video':
-                    msg = await bot.send_video(user_id, video=processed_file, thumb=thumb_to_use, caption=caption, parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
+                    msg = await bot.send_video(user_id, video=output_path, thumb=thumb_to_use, caption=caption, parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
                     sent_messages.append(msg)
                 elif file_type == 'audio':
-                    msg = await bot.send_audio(user_id, audio=processed_file, thumb=thumb_to_use, caption=caption, parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
+                    msg = await bot.send_audio(user_id, audio=output_path, thumb=thumb_to_use, caption=caption, parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
                     sent_messages.append(msg)
         
         if sent_messages and (lyrics := config.get('lyrics')):
@@ -274,8 +248,7 @@ async def process_task(bot, task: dict):
         await db_instance.update_task(task_id, "status", "error")
         await db_instance.update_task(task_id, "last_error", error_msg)
         await _edit_status_message(user_id, f"❌ <b>Error de Autenticación</b>\n\n<code>{escape_html(error_msg)}</code>", progress_tracker)
-        if ADMIN_USER_ID:
-            await bot.send_message(ADMIN_USER_ID, "⚠️ <b>¡Alerta de Mantenimiento, Jefe!</b>\n\nMis cookies de YouTube han expirado o han sido invalidadas.", parse_mode=ParseMode.HTML)
+        if ADMIN_USER_ID: await bot.send_message(ADMIN_USER_ID, "⚠️ <b>¡Alerta de Mantenimiento, Jefe!</b>\n\nMis cookies de YouTube han expirado.", parse_mode=ParseMode.HTML)
 
     except Exception as e:
         logger.critical(f"Error al procesar la tarea {task_id}: {e}", exc_info=True)

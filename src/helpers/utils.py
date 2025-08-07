@@ -6,6 +6,9 @@ import asyncio
 from html import escape
 from datetime import datetime, timedelta
 from pyrogram.enums import ParseMode
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Cargar el ID del admin desde las variables de entorno de forma segura
 try:
@@ -35,59 +38,40 @@ def format_bytes(size_in_bytes) -> str:
         return "Tamaño inválido"
 
 def format_view_count(count) -> str:
-    """Formatea un contador de vistas a un formato legible (K, M)."""
     if count is None: return "N/A"
     try:
         num = float(count)
-        if num < 1000:
-            return str(int(num))
-        elif num < 1_000_000:
-            return f"{num/1000:.1f} K"
-        else:
-            return f"{num/1_000_000:.1f} M"
-    except (ValueError, TypeError):
-        return "N/A"
+        if num < 1000: return str(int(num))
+        if num < 1_000_000: return f"{num/1000:.1f}K"
+        return f"{num/1_000_000:.1f}M"
+    except (ValueError, TypeError): return "N/A"
 
 def format_upload_date(date_str) -> str:
-    """Formatea una fecha YYYYMMDD a DD-MM-YYYY."""
     if date_str is None or len(date_str) != 8: return "N/A"
-    try:
-        return datetime.strptime(date_str, "%Y%m%d").strftime("%d-%m-%Y")
-    except ValueError:
-        return "N/A"
+    try: return datetime.strptime(date_str, "%Y%m%d").strftime("%d-%m-%Y")
+    except ValueError: return "N/A"
 
 def escape_html(text: str) -> str:
-    """Escapa caracteres HTML de un texto para evitar problemas de parseo en Telegram."""
-    if not isinstance(text, str): 
-        return ""
+    if not isinstance(text, str): return ""
     return escape(text, quote=False)
 
 def _create_text_bar(percentage: float, length: int = 10, fill_char: str = '█', empty_char: str = '░') -> str:
-    """Crea una barra de progreso de texto simple."""
-    if not 0 <= percentage <= 100: 
-        percentage = max(0, min(100, percentage))
+    if not 0 <= percentage <= 100: percentage = max(0, min(100, percentage))
     filled_len = int(length * percentage / 100)
-    bar = fill_char * filled_len + empty_char * (length - filled_len)
-    return bar
+    return fill_char * filled_len + empty_char * (length - filled_len)
 
 def format_time(seconds: float) -> str:
-    """Formatea segundos a un formato HH:MM:SS."""
     if seconds is None or not isinstance(seconds, (int, float)) or seconds < 0 or seconds == float('inf'):
         return "∞"
     return str(timedelta(seconds=int(seconds)))
 
 def sanitize_filename(filename: str) -> str:
-    """Elimina caracteres inválidos de un nombre de archivo para compatibilidad con sistemas de archivos."""
-    if not isinstance(filename, str):
-        return "archivo_invalido"
-    
+    if not isinstance(filename, str): return "archivo_invalido"
     invalid_chars = r'<>:"/\|?*' + '\x00-\x1f\x7f'
     sanitized = "".join(c if c not in invalid_chars else '_' for c in filename)
-    sanitized = " ".join(sanitized.split())
-    return sanitized[:200]
+    return " ".join(sanitized.split())[:200]
 
 async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
-    """Edita el mensaje de estado con un throttle para evitar spam de API."""
     if user_id not in progress_tracker: return
     ctx = progress_tracker[user_id]
     
@@ -97,72 +81,52 @@ async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
     current_time = time.time()
     if current_time - ctx.last_edit_time > 1.5:
         try:
-            await ctx.bot.edit_message_text(
-                chat_id=ctx.message.chat.id, 
-                message_id=ctx.message.id, 
-                text=text, 
-                parse_mode=ParseMode.HTML
-            )
+            await ctx.bot.edit_message_text(chat_id=ctx.message.chat.id, message_id=ctx.message.id, text=text, parse_mode=ParseMode.HTML)
             ctx.last_edit_time = current_time
-        except Exception: 
-            pass
+        except Exception: pass
 
 def _progress_hook_yt_dlp(d, progress_tracker: dict):
-    """Hook llamado por yt-dlp durante la descarga."""
     user_id = d.get('user_id')
     if not user_id or user_id not in progress_tracker: return
-
     ctx = progress_tracker[user_id]
     
     try:
         if d['status'] == 'downloading':
             total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-            downloaded_bytes = d.get('downloaded_bytes', 0)
-            
             if total_bytes > 0:
-                speed = d.get('speed', 0)
-                eta = d.get('eta', 0)
-                percentage = (downloaded_bytes / total_bytes) * 100
-                
-                user_mention = "Usuario"
-                if hasattr(ctx.message, 'from_user') and ctx.message.from_user:
-                    user_mention = ctx.message.from_user.mention
-
-                text = format_status_message(
-                    operation="📥 Descargando...",
-                    filename=ctx.task.get('original_filename', 'archivo'),
-                    percentage=percentage, 
-                    processed_bytes=downloaded_bytes, 
-                    total_bytes=total_bytes,
-                    speed=speed, 
-                    eta=eta, 
-                    engine="yt-dlp", 
-                    user_id=user_id,
-                    user_mention=user_mention
-                )
+                downloaded_bytes = d.get('downloaded_bytes', 0)
+                speed, eta, percentage = d.get('speed', 0), d.get('eta', 0), (downloaded_bytes / total_bytes) * 100
+                user_mention = ctx.message.from_user.mention if hasattr(ctx.message, 'from_user') and ctx.message.from_user else "Usuario"
+                text = format_status_message(operation="📥 Descargando...", filename=ctx.task.get('original_filename', 'archivo'), percentage=percentage, 
+                                           processed_bytes=downloaded_bytes, total_bytes=total_bytes, speed=speed, eta=eta, 
+                                           engine="yt-dlp", user_id=user_id, user_mention=user_mention)
                 asyncio.run_coroutine_threadsafe(_edit_status_message(user_id, text, progress_tracker), ctx.loop)
     except Exception as e:
         logger.warning(f"Error menor en el hook de progreso de yt-dlp (ignorado): {e}")
 
-def format_status_message(
-    operation: str, filename: str, percentage: float, 
-    processed_bytes: float, total_bytes: float, speed: float, 
-    eta: float, engine: str, user_id: int, user_mention: str
-) -> str:
+def format_status_message(operation: str, filename: str, percentage: float, 
+                          processed_bytes: float, total_bytes: float, speed: float, 
+                          eta: float, engine: str, user_id: int, user_mention: str) -> str:
     """
     Construye el mensaje de estado con un formato visual mejorado y detallado.
+    CORRECCIÓN: Usa format_time para procesamiento y format_bytes para transferencias.
     """
     bar = _create_text_bar(percentage, 10)
     short_filename = (filename[:45] + '…') if len(filename) > 48 else filename
-
-    is_processing = "Codificando" in operation
-    processed_text = format_time(processed_bytes) if is_processing else format_bytes(processed_bytes)
-    total_text = format_time(total_bytes) if is_processing else format_bytes(total_bytes)
-    speed_text = f"{speed:.2f}x" if is_processing else f"{format_bytes(speed)}/s"
-
     greeting = get_greeting(user_id).replace(', ', '')
     title = f"<b>{greeting} {operation}</b>"
+
+    is_processing = "Procesando" in operation
     
+    if is_processing:
+        processed_text = format_time(processed_bytes)
+        total_text = format_time(total_bytes)
+        speed_text = f"{speed:.2f}x"
+    else: # Descargando o Subiendo
+        processed_text = format_bytes(processed_bytes)
+        total_text = format_bytes(total_bytes)
+        speed_text = f"{format_bytes(speed)}/s"
+
     lines = [
         f"┏ <b>ꜰɪʟᴇ</b>: <code>{escape_html(short_filename)}</code>",
         f"┠ <b>ᴘʀᴏɢʀᴇss</b>: [{bar}] {percentage:.1f}%",
