@@ -3,7 +3,7 @@
 import logging
 import re
 from datetime import datetime
-import asyncio # NUEVA IMPORTACIÓN
+import asyncio
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery
@@ -48,8 +48,8 @@ async def start_command(client: Client, message: Message):
     greeting_prefix = get_greeting(user.id)
     await db_instance.get_user_settings(user.id)
     start_message = (
-        f"A sus órdenes, {greeting_prefix}, bienvenido a la <b>Suite de Medios v2.3</b>.\n\n"
-        "Ahora puedo unir videos y procesar tareas en lote.\n\n"
+        f"A sus órdenes, {greeting_prefix}, bienvenido a la <b>Suite de Medios v2.4</b>.\n\n"
+        "He corregido y mejorado los flujos de trabajo.\n\n"
         "<b>Comandos Principales:</b>\n"
         "• /panel - Muestra su mesa de trabajo.\n"
         "• /p <code>[ID]</code> - Abre el menú de una tarea.\n"
@@ -228,7 +228,6 @@ async def handle_url_input(client: Client, message: Message, url: str):
     status_message = await message.reply(f"🔎 Analizando enlace...", parse_mode=ParseMode.HTML)
     
     try:
-        # --- CORRECCIÓN ---
         info = await asyncio.to_thread(downloader.get_url_info, url)
         if not info or not info.get('formats'):
             return await status_message.edit_text("❌ No pude obtener información de ese enlace.")
@@ -259,7 +258,6 @@ async def handle_music_search(client: Client, message: Message, query: str):
     user = message.from_user
     status_message = await message.reply(f"🔎 Buscando <code>{escape_html(query)}</code>...", parse_mode=ParseMode.HTML)
     
-    # --- CORRECCIÓN ---
     search_results = await asyncio.to_thread(downloader.search_music, query, limit=20)
     
     if not search_results:
@@ -276,16 +274,16 @@ async def handle_music_search(client: Client, message: Message, query: str):
     await status_message.edit_text("✅ He encontrado esto. Seleccione una para descargar:", reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
 
-@Client.on_message(filters.text)
+@Client.on_message(filters.text & filters.private)
 async def text_handler(client: Client, message: Message):
     user = message.from_user
     text = message.text.strip()
     
     if text.startswith('/'): return
 
-    if hasattr(client, 'user_data') and user.id in client.user_data and ('active_config' in client.user_data[user.id] or 'join_mode' in client.user_data[user.id]):
-        # No hacer nada si está en un modo de configuración o unión, para evitar que el texto se interprete como una búsqueda.
-        # Los manejadores de reply se encargarán de ello.
+    if hasattr(client, 'user_data') and user.id in client.user_data and ('active_config' in client.user_data.get(user.id, {}) or 'join_mode' in client.user_data.get(user.id, {})):
+        if message.reply_to_message:
+             return await processing_handler.handle_text_input_for_config(client, message)
         return
         
     url_match = re.search(URL_REGEX, text)
@@ -406,31 +404,37 @@ async def select_song_from_search(client: Client, query: CallbackQuery):
             search_term = search_result.get('search_term', f"{search_result.get('title')} {search_result.get('artist')}")
             url_to_fetch = f"ytsearch:{search_term}"
 
-        # --- CORRECCIÓN ---
         info = await asyncio.to_thread(downloader.get_url_info, url_to_fetch)
         if not info or not info.get('formats'):
             return await status_message.edit_text("❌ No pude obtener información de ese enlace.")
 
+        # --- CORRECCIÓN DEL FLUJO ---
+        # 1. Forzar tipo audio y establecer config por defecto
+        file_type = 'audio'
+        best_audio_id = downloader.get_best_audio_format_id(info.get('formats', []))
+        processing_config = {
+            "download_format_id": best_audio_id,
+            "audio_format": "mp3"
+        }
+
+        # 2. Crear tarea y poner en cola directamente
         task_id = await db_instance.add_task(
-            user_id=user.id, file_type='video' if info['is_video'] else 'audio',
-            url=info['url'], file_name=sanitize_filename(info['title']), url_info=info,
-            status="pending_processing"
+            user_id=user.id,
+            file_type=file_type,
+            url=info['url'],
+            file_name=sanitize_filename(info['title']),
+            url_info=info,
+            processing_config=processing_config,
+            status="queued" # Poner en cola inmediatamente
         )
         if not task_id:
             return await status_message.edit_text("❌ Error al crear la tarea en la DB.")
         
-        caption_parts = [ f"<b>📝 Nombre:</b> {escape_html(info['title'])}", f"<b>🕓 Duración:</b> {format_time(info.get('duration'))}", f"<b>📢 Canal:</b> {escape_html(info.get('uploader'))}" ]
-        caption_parts.append("\nElija la calidad para la descarga:")
-        caption = "\n".join(caption_parts)
-        
-        keyboard = build_detailed_format_menu(str(task_id), info['formats'])
-        
-        await status_message.delete()
-        
-        if info.get('thumbnail'):
-            await client.send_photo(chat_id=user.id, photo=info['thumbnail'], caption=caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
-        else:
-            await client.send_message(chat_id=user.id, text=caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        # 3. Informar al usuario
+        await status_message.edit_text(
+            f"✅ Canción '<b>{escape_html(info['title'])}</b>' seleccionada y enviada a la forja.",
+            parse_mode=ParseMode.HTML
+        )
 
     except Exception as e:
         logger.error(f"Error en select_song_from_search: {e}", exc_info=True)
