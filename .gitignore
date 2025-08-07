@@ -36,4 +36,6 @@ bot_activity.log
 
 # Archivos de sistema operativo
 .DS_Store
-Thumbs.db
+Thumbs.dbyoutube_cookies.txt
+*.session
+*.session-journal
