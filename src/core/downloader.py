@@ -29,20 +29,25 @@ if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
         logger.warning(f"No se pudo inicializar Spotify API: {e}. La búsqueda de música estará limitada.")
 
 def get_common_ydl_opts():
-    """Opciones comunes para yt-dlp, incluyendo cookies si están disponibles."""
+    """Opciones comunes para yt-dlp, incluyendo cookies y User-Agent para evitar bloqueos."""
     opts = {
-        'quiet': True, 'no_warnings': True, 'forcejson': True,
-        'ignoreerrors': True, 'geo_bypass': True,
+        'quiet': True,
+        'no_warnings': True,
+        'forcejson': True,
+        'ignoreerrors': True,
+        'geo_bypass': True,
+        # --- MEJORA CRÍTICA: Añadir un User-Agent de un navegador real ---
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.5',
+        },
     }
     if YOUTUBE_COOKIES_FILE:
         opts['cookiefile'] = YOUTUBE_COOKIES_FILE
     return opts
 
 def get_best_audio_format(formats: list) -> str:
-    """
-    Selecciona el mejor formato de solo audio basado en el bitrate (abr).
-    Devuelve el format_id o 'bestaudio' como fallback.
-    """
+    """Selecciona el mejor formato de solo audio basado en el bitrate (abr)."""
     audio_formats = [f for f in formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none' and f.get('abr')]
     if not audio_formats:
         logger.warning("No se encontraron formatos de solo audio, se usará 'bestaudio/best'.")
@@ -100,9 +105,6 @@ def get_url_info(url: str) -> dict or None:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             
-            # --- CORRECCIÓN DE ROBUSTEZ ---
-            # Si yt-dlp falla (ej. bloqueo de YouTube), 'info' puede ser None.
-            # Se comprueba aquí para evitar el crash 'AttributeError'.
             if not info:
                 logger.error(f"yt-dlp no devolvió NINGUNA información para {url}, probablemente por un bloqueo o error de red.")
                 return None
@@ -131,7 +133,6 @@ def get_url_info(url: str) -> dict or None:
                 'thumbnail': entry.get('thumbnail'), 'is_video': is_video, 'formats': formats
             }
     except Exception as e:
-        # Capturamos el error aquí para que no se propague sin control.
         logger.error(f"Excepción en get_url_info para {url}: {e}", exc_info=True)
         return None
 
