@@ -1,80 +1,88 @@
 # bot.py
 
+import asyncio
 import logging
 import os
-import asyncio
 from dotenv import load_dotenv
 
-from pyrogram import Client, __version__
-from pyrogram.raw.all import layer
-
+# --- CORRECCIÓN CLAVE: Cargar variables de entorno PRIMERO ---
+# Esto lee tu archivo .env y hace que las variables estén disponibles para el resto de la app
 load_dotenv()
 
+from pyrogram import Client
+
+# Importar componentes de la aplicación después de cargar el .env
+from src.db.mongo_manager import db
+from src.core.worker import Worker
+
+# Configuración del logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("bot.log", mode='a', encoding='utf-8')
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logging.getLogger("pyrogram").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-from src.core import worker
-from src.db.mongo_manager import db_instance
+# --- Configuración del Cliente de Pyrogram ---
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-class MediaSuiteBot(Client):
-    def __init__(self):
-        self.api_id = os.getenv("API_ID")
-        self.api_hash = os.getenv("API_HASH")
-        self.bot_token = os.getenv("TELEGRAM_TOKEN")
-        self.admin_id = int(os.getenv("ADMIN_USER_ID", 0))
+# Validar que las credenciales esenciales están presentes
+if not all([API_ID, API_HASH, BOT_TOKEN]):
+    logger.critical("API_ID, API_HASH, o TELEGRAM_TOKEN no están definidos en el .env. Abortando.")
+    exit()
 
-        if not all([self.api_id, self.api_hash, self.bot_token]):
-            logger.critical("¡ERROR CRÍTICO! Faltan API_ID, API_HASH o TELEGRAM_TOKEN en el .env")
-            exit(1)
+# Definición de los plugins que el bot cargará
+PLUGINS = dict(root="src/plugins")
 
-        super().__init__(
-            name="MediaSuiteBot",
-            api_id=int(self.api_id),
-            api_hash=self.api_hash,
-            bot_token=self.bot_token,
-            workers=200,
-            plugins={"root": "src/plugins"},
-            sleep_threshold=15,
-        )
+# Creación de la instancia del cliente del Bot
+app = Client(
+    "JefesMediaSuiteBot",
+    api_id=int(API_ID),
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    plugins=PLUGINS
+)
 
-    async def start(self):
-        await super().start()
+# --- Punto de Entrada Principal ---
+async def main():
+    """
+    Función principal para inicializar y correr el bot.
+    """
+    try:
+        # 1. Conectar y inicializar la base de datos de forma segura
+        await db.initialize_db()
         
-        me = await self.get_me()
-        self.mention = me.mention
-        self.username = me.username
-        logger.info(f"Bot {me.first_name} iniciado. Versión de Pyrogram: {__version__} (Layer {layer})")
+        # 2. Iniciar el cliente de Pyrogram
+        await app.start()
+        logger.info("Bot iniciado y conectado a Telegram.")
         
-        try:
-            await db_instance.client.admin.command('ping')
-            logger.info("Conexión con MongoDB Atlas establecida.")
-            
-            await db_instance.init_db()
-
-        except Exception as e:
-            logger.critical(f"¡ERROR CRÍTICO! No se pudo conectar o inicializar MongoDB. Error: {e}")
-            exit(1)
-
-        logger.info("Lanzando el worker de procesamiento de tareas...")
-        asyncio.create_task(worker.worker_loop(self))
+        bot_info = await app.get_me()
+        logger.info(f"Nombre del bot: {bot_info.first_name}")
+        logger.info(f"Username: @{bot_info.username}")
         
-        if self.admin_id:
-            try:
-                await self.send_message(self.admin_id, f"✅ **Bot reiniciado con éxito**\n\nEstoy listo para procesar tareas.")
-            except Exception as e:
-                logger.warning(f"No se pudo enviar el mensaje de inicio al admin ({self.admin_id}). Error: {e}")
+        # 3. Iniciar el worker asíncrono que procesará las tareas
+        worker_instance = Worker(app)
+        worker_task = asyncio.create_task(worker_instance.start())
+        
+        # 4. Mantener todo corriendo
+        await asyncio.gather(worker_task)
+        
+    except Exception as e:
+        logger.critical(f"Error crítico durante el arranque o ejecución: {e}", exc_info=True)
+    finally:
+        if app.is_initialized:
+            await app.stop()
+            logger.info("Bot detenido.")
 
-    async def stop(self):
-        await super().stop()
-        logger.info("Bot detenido correctamente.")
 
 if __name__ == "__main__":
-    MediaSuiteBot().run()
+    # Crear el directorio de descargas si no existe
+    if not os.path.exists("downloads"):
+        os.makedirs("downloads")
+        logger.info("Directorio 'downloads' creado.")
+
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Detención manual del bot (Ctrl+C).")

@@ -1,6 +1,8 @@
 # src/db/mongo_manager.py
 
 import logging
+import os  # <--- CORRECCIÓN: importación añadida
+from datetime import datetime # <--- CORRECCIÓN: importación añadida
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import CollectionInvalid, OperationFailure
 from bson import ObjectId
@@ -48,7 +50,6 @@ class MongoManager:
                     await self.search_sessions.create_index("created_at", expireAfterSeconds=3600, name="session_ttl_index")
                     logger.info("Índice TTL 'session_ttl_index' asegurado.")
                 except OperationFailure as e:
-                    # Ignorar error si el índice ya existe con otras opciones
                     if "index with same options but different name" in str(e) or "Index with name" in str(e):
                          logger.warning(f"Índice TTL ya existe con otro nombre o configuración: {e}")
                     else:
@@ -94,7 +95,7 @@ class MongoManager:
         session_data = {
             "_id": query_id,
             "results": results,
-            "created_at": datetime.utcnow()
+            "created_at": datetime.utcnow() # <-- Esta línea necesitaba 'datetime'
         }
         await self.search_sessions.insert_one(session_data)
     
@@ -103,9 +104,14 @@ class MongoManager:
         return await self.search_sessions.find_one({"_id": query_id})
 
 
-# Instancia global de la base de datos
-# Asegúrate de tener estas variables en tu config o entorno
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
-MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "JefesMediaSuiteDB")
+# --- CORRECCIÓN CLAVE ---
+# El código ahora depende de que las variables de entorno se carguen ANTES
+# de que se cree esta instancia. No hay valores por defecto aquí.
+MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "JefesMediaSuiteDB") # Un default aquí es aceptable
+
+if not MONGO_URI:
+    logger.critical("La variable de entorno MONGO_URI no está definida. El bot no puede iniciarse.")
+    exit()
 
 db = MongoManager(uri=MONGO_URI, db_name=MONGO_DB_NAME)
