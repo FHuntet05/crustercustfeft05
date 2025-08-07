@@ -31,6 +31,7 @@ class ProgressContext:
 progress_tracker = {}
 
 async def _edit_status_message(user_id: int, text: str):
+    """Edita el mensaje de estado, controlando la frecuencia para evitar rate limits."""
     if user_id not in progress_tracker: return
     ctx = progress_tracker[user_id]
     
@@ -38,23 +39,17 @@ async def _edit_status_message(user_id: int, text: str):
     ctx.last_update_text = text
     
     current_time = time.time()
-    if current_time - ctx.last_edit_time > 1.5:
+    if current_time - ctx.last_edit_time > 1.5: # No editar más de una vez cada 1.5s
         try:
-            user_mention = "Usuario"
-            if hasattr(ctx.message, 'chat') and ctx.message.chat:
-                user_mention = ctx.message.chat.mention
-            
-            # Reemplazar el placeholder del mention si existe
-            final_text = text.replace("{mention}", user_mention)
-
             await ctx.bot.edit_message_text(
                 chat_id=ctx.message.chat.id, 
                 message_id=ctx.message.id, 
-                text=final_text, 
+                text=text, 
                 parse_mode=ParseMode.HTML
             )
             ctx.last_edit_time = current_time
         except Exception as e:
+            # Silenciamos errores comunes de edición (mensaje no modificado, etc.)
             # logger.warning(f"No se pudo editar el mensaje de estado: {e}")
             pass
 
@@ -78,7 +73,7 @@ async def _progress_callback_pyrogram(current, total, user_id, operation):
         eta=eta,
         engine="Pyrogram",
         user_id=user_id,
-        user_mention="{mention}"
+        user_mention=ctx.message.from_user.mention
     )
     await _edit_status_message(user_id, text)
 
@@ -96,20 +91,15 @@ def _progress_hook_yt_dlp(d, user_id, operation):
             if not ctx: return
 
             text = format_status_message(
-                operation=operation,
-                filename=ctx.task.get('original_filename', 'archivo'),
-                percentage=percentage,
-                processed_bytes=downloaded_bytes,
-                total_bytes=total_bytes,
-                speed=speed,
-                eta=eta,
-                engine="yt-dlp",
-                user_id=user_id,
-                user_mention="{mention}"
+                operation=operation, filename=ctx.task.get('original_filename', 'archivo'),
+                percentage=percentage, processed_bytes=downloaded_bytes, total_bytes=total_bytes,
+                speed=speed, eta=eta, engine="yt-dlp", user_id=user_id,
+                user_mention=ctx.message.from_user.mention
             )
             asyncio.run_coroutine_threadsafe(_edit_status_message(user_id, text), asyncio.get_event_loop())
 
 async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
+    """Ejecuta un comando FFmpeg y parsea su salida para mostrar el progreso."""
     duration_info = get_media_info(input_path)
     total_duration_sec = float(duration_info.get('format', {}).get('duration', 0))
     if total_duration_sec == 0: logger.warning("No se pudo obtener la duración, el progreso de FFmpeg no funcionará.")
@@ -138,8 +128,8 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
             text = format_status_message(
                 operation="⚙️ Codificando...", filename=ctx.task.get('original_filename', 'archivo'),
                 percentage=percentage, processed_bytes=processed_sec, total_bytes=total_duration_sec,
-                speed=0, eta=eta, engine="FFmpeg", user_id=user_id,
-                user_mention="{mention}"
+                speed=speed_factor, eta=eta, engine="FFmpeg", user_id=user_id,
+                user_mention=ctx.message.from_user.mention
             )
             await _edit_status_message(user_id, text)
             
@@ -151,7 +141,7 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
 
 async def process_task(bot, task: dict):
     task_id, user_id = str(task['_id']), task['user_id']
-    status_message = await bot.send_message(user_id, f"Iniciando: <code>{task.get('original_filename') or task.get('url', 'Tarea')}</code>", parse_mode=ParseMode.HTML)
+    status_message = await bot.send_message(user_id, f"Iniciando: <code>{escape_html(task.get('original_filename') or task.get('url', 'Tarea'))}</code>", parse_mode=ParseMode.HTML)
     
     global progress_tracker
     progress_tracker[user_id] = ProgressContext(bot, status_message, task)
@@ -159,25 +149,22 @@ async def process_task(bot, task: dict):
     files_to_clean = set()
     output_path = ""
     try:
-        task = await db_instance.get_task(task_id)
+        task = await db_instance.get_task(task_id) # Recargar la tarea para tener los últimos datos
         if not task: raise Exception("La tarea fue eliminada o no se encontró en la DB.")
         progress_tracker[user_id].task = task
 
-        download_path = os.path.join(DOWNLOAD_DIR, f"{task_id}_{sanitize_filename(task.get('original_filename', 'file'))}")
+        base_filename = f"{task_id}_{sanitize_filename(task.get('original_filename', 'file'))}"
+        download_path = os.path.join(DOWNLOAD_DIR, base_filename)
         files_to_clean.add(download_path)
         
-        thumbnail_path = download_path + ".jpg"
-        if os.path.exists(thumbnail_path): # Limpiar si existe de una ejecución anterior
-            os.remove(thumbnail_path)
-        files_to_clean.add(thumbnail_path)
-        
+        # --- Fase de Descarga ---
         if url := task.get('url'):
             config = task.get('processing_config', {})
             format_id = config.get('download_format_id', 'best')
             if not await asyncio.to_thread(downloader.download_from_url, url, download_path, format_id, lambda d: _progress_hook_yt_dlp(d, user_id, "📥 Descargando...")):
                 raise Exception("La descarga desde la URL falló.")
         elif file_id := task.get('file_id'):
-            progress_tracker[user_id].start_time = time.time() # Reiniciar timer para la descarga
+            progress_tracker[user_id].start_time = time.time() # Reiniciar timer
             await bot.download_media(message=file_id, file_name=download_path, progress=_progress_callback_pyrogram, progress_args=(user_id, "📥 Descargando..."))
         else:
             raise Exception("La tarea no tiene URL ni file_id para descargar.")
@@ -185,47 +172,55 @@ async def process_task(bot, task: dict):
         logger.info(f"Descarga de la tarea {task_id} completada en: {download_path}")
         await _edit_status_message(user_id, "⚙️ Preparando para procesar...")
         
+        # --- Fase de Procesamiento (FFmpeg) ---
         config = task.get('processing_config', {})
         file_type = task.get('file_type')
-        final_filename_base = sanitize_filename(config.get('final_filename', os.path.splitext(task.get('original_filename', 'procesado'))[0]))
         
-        final_ext = ".dat"
-        if 'gif_options' in config:
-            final_ext = ".gif"
-        elif file_type == 'audio':
-            final_ext = f".{config.get('audio_format', 'mp3')}"
-        elif file_type == 'video':
-            final_ext = ".mp4"
-        else:
-            _, original_ext = os.path.splitext(task.get('original_filename', '.dat'))
-            final_ext = original_ext if original_ext else '.dat'
-
+        # Determinar nombre y extensión finales
+        final_filename_base = sanitize_filename(config.get('final_filename', os.path.splitext(task.get('original_filename', 'procesado'))[0]))
+        final_ext = f".{config.get('audio_format', 'mp3')}" if file_type == 'audio' and 'audio_format' in config else ".mp4" if file_type == 'video' else os.path.splitext(task.get('original_filename', '.dat'))[1]
+        if 'gif_options' in config: final_ext = ".gif"
+        
         final_filename = f"{final_filename_base}{final_ext}"
         output_path = os.path.join(OUTPUT_DIR, final_filename)
         files_to_clean.add(output_path)
+        
+        # Preparar ruta para carátula si existe
+        thumbnail_to_embed = None
+        if config.get('thumbnail_url'):
+            thumb_path = os.path.join(DOWNLOAD_DIR, f"{task_id}_thumb.jpg")
+            files_to_clean.add(thumb_path)
+            if await asyncio.to_thread(downloader.download_file, config['thumbnail_url'], thumb_path):
+                thumbnail_to_embed = thumb_path
 
-        commands = ffmpeg.build_ffmpeg_command(task, download_path, output_path)
+        commands = ffmpeg.build_ffmpeg_command(task, download_path, output_path, thumbnail_to_embed)
         if commands and commands[0]:
-            progress_tracker[user_id].start_time = time.time() # Reiniciar timer para la codificación
+            progress_tracker[user_id].start_time = time.time() # Reiniciar timer
             await _edit_status_message(user_id, "⚙️ Iniciando codificación...")
             for cmd in commands: await _run_ffmpeg_with_progress(user_id, cmd, download_path)
-        else:
+            if os.path.exists(download_path): os.rename(output_path, download_path) # Usar output como input para siguiente comando
+        else: # Si no hay comandos, simplemente renombramos el archivo descargado
             if os.path.exists(output_path): os.remove(output_path)
             os.rename(download_path, output_path)
 
+        # --- Fase de Subida ---
         caption = f"✅ <code>{escape_html(final_filename)}</code>"
         sent_message = None
         
-        progress_tracker[user_id].start_time = time.time() # Reiniciar timer para la subida
-        thumb_to_use = thumbnail_path if os.path.exists(thumbnail_path) else None
+        progress_tracker[user_id].start_time = time.time() # Reiniciar timer
+        
+        # Buscar la carátula descargada por yt-dlp o la manual
+        thumb_to_use = next((f for f in [f"{download_path}.jpg", f"{download_path}.webp"] if os.path.exists(f)), thumbnail_to_embed)
+        if thumb_to_use: files_to_clean.add(thumb_to_use)
 
         if file_type == 'video':
-            sent_message = await bot.send_video(user_id, video=output_path, thumb=thumb_to_use, caption=caption, progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
+            sent_message = await bot.send_video(user_id, video=output_path, thumb=thumb_to_use, caption=caption, parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
         elif file_type == 'audio':
-            sent_message = await bot.send_audio(user_id, audio=output_path, thumb=thumb_to_use, caption=caption, progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
+            sent_message = await bot.send_audio(user_id, audio=output_path, thumb=thumb_to_use, caption=caption, parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
         else:
-            sent_message = await bot.send_document(user_id, document=output_path, thumb=thumb_to_use, caption=caption, progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
+            sent_message = await bot.send_document(user_id, document=output_path, thumb=thumb_to_use, caption=caption, parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
         
+        # Enviar letra si existe
         if sent_message and (lyrics := config.get('lyrics')):
             await bot.send_message(user_id, text=f"📜 <b>Letra</b>\n\n{escape_html(lyrics)}", reply_to_message_id=sent_message.id, parse_mode=ParseMode.HTML)
 
@@ -245,12 +240,15 @@ async def process_task(bot, task: dict):
                 except Exception as e: logger.error(f"No se pudo limpiar el archivo {fpath}: {e}")
 
 async def worker_loop(bot_instance):
+    """Bucle principal del worker que busca y procesa tareas encoladas."""
     logger.info("[WORKER] Bucle del worker iniciado.")
     while True:
         try:
+            # Buscar una tarea encolada de un usuario que no esté ya procesando algo
             task = await db_instance.tasks.find_one_and_update(
                 {"status": "queued", "user_id": {"$nin": list(progress_tracker.keys())}},
-                {"$set": {"status": "processing", "processed_at": datetime.utcnow()}}
+                {"$set": {"status": "processing", "processed_at": datetime.utcnow()}},
+                sort=[('created_at', 1)] # Procesar las más antiguas primero
             )
             if task:
                 logger.info(f"Iniciando procesamiento de la tarea {task['_id']} para el usuario {task['user_id']}")

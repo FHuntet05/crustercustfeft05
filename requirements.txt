@@ -1,19 +1,21 @@
 # Pyrogram y sus dependencias de rendimiento
-Pyrogram
+Pyrogram>=2.0.106
 Tgcrypto
-pyrogram[asyncio,fast_crypto]  # Para el cliente de Telegram y criptografía rápida
-python-dotenv                  # Para cargar variables de entorno desde un archivo .env
+
 # Interacción con MongoDB (asíncrona)
-motor
+motor>=3.1.1
 
 # Carga de variables de entorno
-python-dotenv
+python-dotenv>=1.0.0
 
-yt-dlp                         # Descargador principal de video/audio
-spotipy                        # Para la API de Spotify (búsqueda, carátulas)
-lyricsgenius                   # Para la API de Genius (letras)
-requests                       # Dependencia de spotipy/lyricsgenius, bueno tenerla explícita
+# Descargador principal de video/audio
+yt-dlp>=2023.7.6
 
-# Dependencia para información de medios
-hachoir
+# Para la API de Spotify (búsqueda)
+spotipy>=2.23.0
+
+# Dependencia para descargas genéricas (ej. carátulas)
+requests>=2.31.0
+
+# Para extraer metadatos de audio si es necesario
 Pillow

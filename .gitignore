@@ -8,6 +8,8 @@ ENV/
 .env
 credentials.json
 config.ini
+*.session
+*.session-journal
 
 # Archivos temporales de Python
 __pycache__/
@@ -19,11 +21,12 @@ __pycache__/
 # Descargas y salidas del bot
 /downloads/
 /outputs/
-/temp/
+temp_lyrics*
 
 # Archivos de log
 *.log
 logs/
+bot_activity.log
 
 # Archivos de sesión de editores
 .vscode/

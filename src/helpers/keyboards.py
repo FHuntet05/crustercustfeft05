@@ -38,7 +38,7 @@ def build_processing_menu(task_id: str, file_type: str, task_data: dict, filenam
         keyboard.extend([
             [InlineKeyboardButton(quality_text, callback_data=f"config_quality_{task_id}")],
             [InlineKeyboardButton("✂️ Cortar", callback_data=f"config_trim_{task_id}"), InlineKeyboardButton("🧩 Dividir", callback_data=f"config_split_{task_id}")],
-            [InlineKeyboardButton("🎞️ a GIF", callback_data=f"config_gif_{task_id}"), InlineKeyboardButton("💧 Marca de Agua", callback_data=f"config_watermark_{task_id}")],
+            [InlineKeyboardButton("🎞️ a GIF", callback_data=f"config_gif_{task_id}"), InlineKeyboardButton("💧 Marca de Agua", callback_data="feature_not_implemented")],
             [InlineKeyboardButton(mute_text, callback_data=f"set_mute_{task_id}_toggle")],
         ])
     elif file_type == 'audio':
@@ -74,11 +74,13 @@ def build_download_quality_menu(task_id: str, formats: list) -> InlineKeyboardMa
     """Construye el menú de calidades de descarga para una URL, separando video y audio."""
     keyboard = []
     
+    # Formatos de video con audio
     video_formats = sorted(
         [f for f in formats if f.get('vcodec', 'none') != 'none' and f.get('acodec', 'none') != 'none' and f.get('height')],
         key=lambda x: x.get('height', 0),
         reverse=True
     )
+    # Formatos de solo audio
     audio_formats = sorted(
         [f for f in formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none' and f.get('abr')],
         key=lambda x: x.get('abr', 0),
@@ -86,7 +88,7 @@ def build_download_quality_menu(task_id: str, formats: list) -> InlineKeyboardMa
     )
     
     if video_formats:
-        keyboard.append([InlineKeyboardButton("--- 🎬 Video ---", callback_data="noop")])
+        keyboard.append([InlineKeyboardButton("--- 🎬 Video + Audio ---", callback_data="noop")])
         for f in video_formats[:5]: # Limitar a 5 para no saturar
             resolution = f.get('resolution') or f.get('height')
             filesize = f.get('filesize') or f.get('filesize_approx')

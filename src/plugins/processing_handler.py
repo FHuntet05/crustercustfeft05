@@ -1,128 +1,286 @@
 # src/plugins/processing_handler.py
 
 import logging
+import asyncio
 from pyrogram import Client, filters
-from pyrogram.types import CallbackQuery
-from datetime import datetime
-from math import ceil
+from pyrogram.types import Message, CallbackQuery
+from pyrogram.enums import ParseMode
+from bson.objectid import ObjectId
 
-from src.db.mongo_manager import db
+from src.db.mongo_manager import db_instance
 from src.core import downloader
-from src.helpers import keyboards
+from src.helpers.keyboards import (build_back_button, build_processing_menu, 
+                                   build_quality_menu, build_download_quality_menu, 
+                                   build_audio_convert_menu, build_audio_effects_menu,
+                                   build_search_results_keyboard)
+from src.helpers.utils import get_greeting, escape_html, sanitize_filename
 
 logger = logging.getLogger(__name__)
 
+# --- MANEJADORES DE CALLBACKS DE BOTONES ---
 
-@Client.on_callback_query(filters.regex(r"^process_"))
-async def on_process_button(client: Client, query: CallbackQuery):
-    """Maneja los clics en los botones del menú de procesamiento."""
-    try:
-        await query.answer()
-        parts = query.data.split("_")
-        action = parts[1]
-        task_id = parts[2]
+@Client.on_callback_query(filters.regex(r"^panel_"))
+async def on_panel_action(client: Client, query: CallbackQuery):
+    """Maneja acciones del panel principal, como 'mostrar' o 'limpiar'."""
+    await query.answer()
+    user = query.from_user
+    action = query.data.split("_")[1]
+
+    if action == "delete_all":
+        count = (await db_instance.tasks.delete_many({"user_id": user.id, "status": "pending_processing"})).deleted_count
+        await query.message.edit_text(f"💥 Limpieza completada. Se descartaron {count} tareas.")
+    elif action == "show":
+        greeting_prefix = get_greeting(user.id)
+        pending_tasks = await db_instance.get_pending_tasks(user.id)
+        if not pending_tasks:
+            text = f"✅ ¡{greeting_prefix}Su mesa de trabajo está vacía!"
+            return await query.message.edit_text(text)
         
-        message_text = ""
-        update_operation = None
+        keyboard = build_panel_keyboard(pending_tasks)
+        response_text = f"📋 <b>{greeting_prefix}Su mesa de trabajo actual:</b>"
+        await query.message.edit_text(response_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
-        if action == "trim":
-            update_operation = "trim"
-            message_text = (
-                "✂️ **Cortar Archivo**\n\n"
-                "Por favor, envía el tiempo de inicio y fin en el formato `HH:MM:SS-HH:MM:SS`.\n\n"
-                "Ejemplo: `00:01:15-00:02:30`"
-            )
-        elif action == "split":
-            update_operation = "split"
-            message_text = (
-                "📏 **Dividir Video**\n\n"
-                "¿Cómo quieres dividirlo?\n"
-                " - Envía la **duración de cada segmento** en segundos (ej: `60`)\n"
-                " - O envía el **número de partes** (ej: `3 partes`)"
-            )
-        elif action == "gif":
-            update_operation = "gif"
-            message_text = (
-                "✨ **Crear GIF**\n\n"
-                "Por favor, envía el intervalo de tiempo para el GIF en formato `HH:MM:SS-HH:MM:SS`.\n\n"
-                "Ejemplo: `00:00:05-00:00:10`"
-            )
-        else:
-            await query.answer(f"La función '{action}' aún no está implementada.", show_alert=True)
-            return
-
-        if update_operation and message_text:
-            await db.update_task(task_id, {"status": "awaiting_input", "operation": update_operation})
-            await query.message.edit_text(message_text, reply_markup=None)
-
-    except Exception as e:
-        logger.error(f"Error en on_process_button: {e}", exc_info=True)
-        await query.answer("Ocurrió un error al procesar esta acción.", show_alert=True)
-
-
-@Client.on_callback_query(filters.regex(r"^search_select_"))
-async def on_music_search_select(client: Client, query: CallbackQuery):
-    """Inicia el flujo de descarga automática de música."""
-    await query.answer("Procesando tu selección...")
-    video_id = query.data.split("_")[-1]
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    media_info = await downloader.get_media_info(url)
-    if not media_info:
-        await query.edit_message_text("❌ No se pudo obtener información para esa selección.")
-        return
-
-    audio_formats = [f for f in media_info.get('formats', []) if f.get('vcodec') == 'none']
-    if not audio_formats:
-        await query.edit_message_text("❌ No se encontró un formato de solo audio.")
-        return
-    best_audio = sorted(audio_formats, key=lambda x: x.get('abr', 0), reverse=True)[0]
-
-    task_data = {
-        "user_id": query.from_user.id, "chat_id": query.message.chat.id,
-        "url": media_info["webpage_url"], "title": media_info.get("title", "N/A"),
-        "thumbnail_url": media_info.get("thumbnail"), "status": "queued",
-        "selected_format_id": best_audio["format_id"], "file_type": "audio",
-        "download_lyrics": True, "embed_thumbnail": True, "created_at": datetime.utcnow()
-    }
-    await db.create_task(task_data)
-    await query.edit_message_text(f"✅ **¡En la cola!**\n\n'{media_info['title']}' se está procesando.", reply_markup=None)
-
-@Client.on_callback_query(filters.regex(r"^format_"))
-async def on_format_select(client: Client, query: CallbackQuery):
-    """Maneja la selección de formato para descargas de enlaces."""
-    await query.answer("Formato recibido.")
+@Client.on_callback_query(filters.regex(r"^task_"))
+async def on_task_action(client: Client, query: CallbackQuery):
+    """Maneja acciones directas sobre una tarea, como 'procesar' o 'encolar'."""
+    await query.answer()
     parts = query.data.split("_")
-    format_id, task_id = parts[1], parts[2]
-    await db.update_task(task_id, {"selected_format_id": format_id, "status": "queued"})
-    task = await db.get_task(task_id)
-    if task:
-        await query.edit_message_text(f"✅ **¡En la cola!**\n\n'{task['title']}' se procesará en breve.", reply_markup=None)
+    action, task_id = parts[1], "_".join(parts[2:])
+    
+    task = await db_instance.get_task(task_id)
+    if not task:
+        return await query.message.edit_text("❌ Error: La tarea ya no existe.", reply_markup=None)
 
-@Client.on_callback_query(filters.regex(r"^sp_")) # Search Pagination
-async def on_search_pagination(client: Client, query: CallbackQuery):
+    if action == "process":
+        filename = task.get('original_filename', '...')
+        keyboard = build_processing_menu(task_id, task['file_type'], task, filename)
+        await query.message.edit_text(f"🛠️ ¿Qué desea hacer con:\n<code>{escape_html(filename)}</code>?", reply_markup=keyboard, parse_mode=ParseMode.HTML)
+    
+    elif action == "queuesingle":
+        await db_instance.update_task(task_id, "status", "queued")
+        await query.message.edit_text("🔥 Tarea enviada a la forja. El procesamiento comenzará en breve.")
+
+@Client.on_callback_query(filters.regex(r"^config_"))
+async def show_config_menu(client: Client, query: CallbackQuery):
+    """Muestra los menús de configuración específicos (renombrar, cortar, etc.)."""
+    await query.answer()
+    
+    parts = query.data.split("_")
+    menu_type, task_id = parts[1], "_".join(parts[2:])
+    
+    task = await db_instance.get_task(task_id)
+    if not task:
+        return await query.message.edit_text("❌ Error: Tarea no encontrada.")
+
+    # Menús que no requieren entrada de texto
+    if menu_type == "dlquality":
+        url_info = task.get('url_info')
+        if not url_info or not url_info.get('formats'):
+            return await query.message.edit_text("❌ No hay información de formatos para esta tarea.")
+        keyboard = build_download_quality_menu(task_id, url_info['formats'])
+        return await query.message.edit_text("💿 Seleccione la calidad a descargar:", reply_markup=keyboard)
+
+    if menu_type == "quality": return await query.message.edit_text("⚙️ Seleccione el perfil de calidad:", reply_markup=build_quality_menu(task_id))
+    if menu_type == "audioconvert": return await query.message.edit_text("🔊 Configure la conversión de audio:", reply_markup=build_audio_convert_menu(task_id))
+    if menu_type == "audioeffects":
+        keyboard = build_audio_effects_menu(task_id, task.get('processing_config', {}))
+        return await query.message.edit_text("🎧 Aplique efectos de audio:", reply_markup=keyboard)
+
+    # Menús que SÍ requieren entrada de texto del usuario
+    original_filename = task.get('original_filename', 'archivo')
+    greeting_prefix = get_greeting(query.from_user.id)
+    
+    if not hasattr(client, 'user_data'): client.user_data = {}
+    client.user_data[query.from_user.id] = {"active_config": {"task_id": task_id, "menu_type": menu_type}}
+
+    menu_texts = {
+        "rename": f"✏️ <b>Renombrar Archivo</b>\n\n{greeting_prefix}envíeme el nuevo nombre para <code>{escape_html(original_filename)}</code>.\n<i>No incluya la extensión.</i>",
+        "trim": f"✂️ <b>Cortar</b>\n\n{greeting_prefix}envíeme el tiempo de inicio y fin.\nFormatos: <code>HH:MM:SS-HH:MM:SS</code> o <code>MM:SS-MM:SS</code>.",
+        "split": f"🧩 <b>Dividir Video</b>\n\n{greeting_prefix}envíeme el criterio de división por tiempo (ej. <code>300s</code>).",
+        "gif": f"🎞️ <b>Crear GIF</b>\n\n{greeting_prefix}envíeme la duración y los FPS.\nFormato: <code>[duración] [fps]</code> (ej: <code>5 15</code>).",
+        "audiotags": f"🖼️ <b>Editar Tags</b>\n\n{greeting_prefix}envíeme los nuevos metadatos.\nFormato: <code>Nuevo Título - Nuevo Artista</code>.",
+    }
+    
+    text = menu_texts.get(menu_type, "Configuración no reconocida.")
+    back_button_cb = f"task_process_{task_id}"
+    keyboard = build_back_button(back_button_cb)
+    await query.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
+@Client.on_callback_query(filters.regex(r"^set_"))
+async def set_value_callback(client: Client, query: CallbackQuery):
+    """Guarda una configuración específica en la tarea (ej. calidad, formato)."""
+    await query.answer()
+    parts = query.data.split("_")
+    config_type, task_id, value = parts[1], parts[2], "_".join(parts[3:])
+
+    task = await db_instance.get_task(task_id)
+    if not task: return await query.message.edit_text("❌ Error: Tarea no encontrada.")
+
+    # Casos especiales que encolan la tarea directamente
+    if config_type == "dlformat":
+        # Si se elige un formato de solo audio, actualizamos el tipo de archivo de la tarea
+        url_info = task.get('url_info', {})
+        chosen_format = next((f for f in url_info.get('formats', []) if f.get('format_id') == value), None)
+        if chosen_format and chosen_format.get('vcodec', 'none') == 'none':
+            await db_instance.update_task(task_id, 'file_type', 'audio')
+            
+        await db_instance.update_task_config(task_id, "download_format_id", value)
+        await db_instance.update_task(task_id, "status", "queued")
+        return await query.message.edit_text(f"✅ Formato <code>{value}</code> seleccionado.\n\n🔥 Tarea enviada a la forja.", parse_mode=ParseMode.HTML)
+    
+    # Casos de configuración estándar
+    elif config_type == "quality": await db_instance.update_task_config(task_id, "quality", value)
+    elif config_type == "mute": current = task.get('processing_config', {}).get('mute_audio', False); await db_instance.update_task_config(task_id, "mute_audio", not current)
+    elif config_type == "audioprop": prop_key, prop_value = parts[3], parts[4]; await db_instance.update_task_config(task_id, f"audio_{prop_key}", prop_value)
+    elif config_type == "audioeffect": 
+        effect = parts[3]
+        current = task.get('processing_config', {}).get(effect, False)
+        await db_instance.update_task_config(task_id, effect, not current)
+        task = await db_instance.get_task(task_id) # Recargar para el menú
+        keyboard = build_audio_effects_menu(task_id, task.get('processing_config', {}))
+        return await query.message.edit_text("🎧 Efectos de audio actualizados:", reply_markup=keyboard)
+
+
+    # Volver al menú principal de procesamiento después de cambiar una opción
+    task = await db_instance.get_task(task_id) # Recargar
+    keyboard = build_processing_menu(task_id, task['file_type'], task, task.get('original_filename', ''))
+    await query.message.edit_text(
+        f"🛠️ Configuración actualizada.",
+        reply_markup=keyboard, parse_mode=ParseMode.HTML
+    )
+
+@Client.on_callback_query(filters.regex(r"^song_select_"))
+async def on_song_select(client: Client, query: CallbackQuery):
+    """
+    Manejador para la selección de una canción. Inicia el flujo de descarga AUTOMÁTICA.
+    """
+    result_id = query.data.split("_")[2]
+    user = query.from_user
+
+    await query.message.edit_text(f"✅ Canción seleccionada. Preparando descarga automática...", parse_mode=ParseMode.HTML)
+
+    search_result = await db_instance.search_results.find_one({"_id": ObjectId(result_id), "user_id": user.id})
+    if not search_result: return await query.message.edit_text("❌ Error: Este resultado de búsqueda ha expirado o no es válido.")
+    
+    # Limpiar todos los resultados de esta sesión de búsqueda para evitar contaminación
+    if search_id := search_result.get('search_id'):
+        await db_instance.search_results.delete_many({"search_id": search_id})
+        await db_instance.search_sessions.delete_one({"_id": ObjectId(search_id)})
+
+    search_term_or_url = search_result.get('url') or f"ytsearch1:{search_result.get('search_term')}"
+    
+    # Usamos to_thread para no bloquear el bucle de eventos con la llamada a yt-dlp
+    info = await asyncio.to_thread(downloader.get_url_info, search_term_or_url)
+    if not info or not info.get('formats'):
+        return await query.message.edit_text("❌ No pude obtener información para descargar esa selección.")
+    
+    # --- Flujo Automático de Audio ---
+    best_audio_format = downloader.get_best_audio_format(info['formats'])
+    lyrics = await asyncio.to_thread(downloader.get_lyrics, info['url'])
+
+    processing_config = {
+        "download_format_id": best_audio_format,
+        "lyrics": lyrics,
+        "thumbnail_url": info.get('thumbnail')
+    }
+    
+    task_id = await db_instance.add_task(
+        user_id=user.id, file_type='audio', url=info['url'], 
+        file_name=sanitize_filename(info['title']), 
+        url_info=info, processing_config=processing_config
+    )
+
+    if not task_id: return await query.message.edit_text("❌ Error al crear la tarea en la DB.")
+    
+    await db_instance.update_task(str(task_id), "status", "queued")
+    
+    await query.message.edit_text(
+        f"🔥 <b>{escape_html(info['title'])}</b>\n\n"
+        "Tu canción ha sido enviada a la forja. El procesamiento comenzará en breve.", 
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
+
+@Client.on_callback_query(filters.regex(r"^search_page_"))
+async def on_search_page(client: Client, query: CallbackQuery):
     """Manejador para la paginación de los resultados de búsqueda."""
-    try:
-        await query.answer()
-        parts = query.data.split("_")
-        page = int(parts[1])
-        query_id = parts[2]
+    await query.answer()
+    parts = query.data.split("_")
+    search_id, page = parts[2], int(parts[3])
 
-        session = await db.get_search_session(query_id)
-        if not session:
-            await query.edit_message_text("⚠️ Tu sesión de búsqueda ha expirado. Por favor, realiza la búsqueda de nuevo.")
-            return
-        
-        results = session['results']
-        items_per_page = 5
-        total_pages = ceil(len(results) / items_per_page)
-        
-        start = (page - 1) * items_per_page
-        end = start + items_per_page
-        
-        keyboard = keyboards.create_search_results_keyboard(results[start:end], page, total_pages, query_id)
-        
-        await query.edit_message_reply_markup(reply_markup=keyboard)
+    session = await db_instance.search_sessions.find_one({"_id": ObjectId(search_id)})
+    if not session: return await query.message.edit_text("❌ Esta sesión de búsqueda ha expirado.")
+
+    all_results = await db_instance.search_results.find({"search_id": search_id}).sort("created_at", 1).to_list(length=100)
+    if not all_results: return await query.message.edit_text("❌ No se encontraron resultados para esta sesión.")
+
+    keyboard = build_search_results_keyboard(all_results, search_id, page)
+    await query.message.edit_text(
+        f"✅ Resultados para: <b>{escape_html(session['query'])}</b>",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
+
+@Client.on_callback_query(filters.regex(r"^cancel_search_"))
+async def on_cancel_search(client: Client, query: CallbackQuery):
+    """Cancela una búsqueda y limpia los resultados de la DB."""
+    await query.answer()
+    search_id = query.data.split("_")[2]
+    await db_instance.search_results.delete_many({"search_id": search_id})
+    await db_instance.search_sessions.delete_one({"_id": ObjectId(search_id)})
+    await query.message.edit_text("✅ Búsqueda cancelada y resultados limpiados.")
+
+@Client.on_callback_query(filters.regex(r"^noop"))
+async def noop_callback(client: Client, query: CallbackQuery):
+    """Callback que no hace nada, útil para botones de solo texto."""
+    await query.answer()
+
+# --- MANEJADOR DE ENTRADA DE TEXTO PARA CONFIGURACIÓN ---
+
+async def handle_text_input_for_config(client: Client, message: Message):
+    """
+    Procesa la entrada de texto del usuario cuando el bot está esperando
+    una configuración (ej. un nuevo nombre, tiempos de corte, etc.).
+    """
+    user_id = message.from_user.id
+    user_input = message.text.strip()
+    
+    active_config_data = client.user_data.get(user_id, {}).get('active_config')
+    if not active_config_data: 
+        return
+
+    task_id, menu_type = active_config_data['task_id'], active_config_data['menu_type']
+    del client.user_data[user_id]['active_config'] # Limpiar el estado
+    
+    feedback_message = "✅ Configuración guardada."
+    try:
+        if menu_type == "rename":
+            await db_instance.update_task_config(task_id, "final_filename", user_input)
+            feedback_message = f"✅ Nombre actualizado a <code>{escape_html(user_input)}</code>."
+        elif menu_type == "trim":
+            await db_instance.update_task_config(task_id, "trim_times", user_input)
+            feedback_message = f"✅ Tiempos de corte guardados: <code>{escape_html(user_input)}</code>."
+        elif menu_type == "split":
+            await db_instance.update_task_config(task_id, "split_criteria", user_input)
+            feedback_message = f"✅ Criterio de división guardado: <code>{escape_html(user_input)}</code>."
+        elif menu_type == "gif":
+            duration, fps = user_input.split()
+            await db_instance.update_task_config(task_id, "gif_options", {"duration": duration, "fps": fps})
+            feedback_message = f"✅ GIF se creará con {duration}s a {fps}fps."
+        elif menu_type == "audiotags":
+            title, artist = [part.strip() for part in user_input.split('-', 1)]
+            await db_instance.update_task_config(task_id, "audio_tags", {"title": title, "artist": artist})
+            feedback_message = f"✅ Tags actualizados: Título: {title}, Artista: {artist}."
 
     except Exception as e:
-        logger.error(f"Error en la paginación de búsqueda: {e}", exc_info=True)
-        await query.message.edit_text("❌ Ocurrió un error al cambiar de página.")
+        logger.error(f"Error al procesar entrada de texto para config: {e}")
+        feedback_message = "❌ Formato incorrecto o error al guardar."
+
+    await message.reply_html(feedback_message, quote=True)
+    
+    # Mostrar de nuevo el menú de procesamiento
+    task = await db_instance.get_task(task_id)
+    if task:
+        keyboard = build_processing_menu(task_id, task['file_type'], task, task.get('original_filename', ''))
+        await message.reply("¿Algo más?", reply_markup=keyboard, parse_mode=ParseMode.HTML)

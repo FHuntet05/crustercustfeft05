@@ -1,7 +1,8 @@
+# src/helpers/utils.py
+
 import os
 from html import escape
 from datetime import timedelta
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 # Cargar el ID del admin desde las variables de entorno de forma segura
 try:
@@ -39,7 +40,7 @@ def escape_html(text: str) -> str:
 def _create_text_bar(percentage: float, length: int = 10, fill_char: str = '█', empty_char: str = '░') -> str:
     """Crea una barra de progreso de texto simple."""
     if not 0 <= percentage <= 100: 
-        percentage = 0
+        percentage = max(0, min(100, percentage)) # Clamp percentage between 0 and 100
     filled_len = int(length * percentage / 100)
     bar = fill_char * filled_len + empty_char * (length - filled_len)
     return bar
@@ -55,50 +56,36 @@ def sanitize_filename(filename: str) -> str:
     if not isinstance(filename, str):
         return "archivo_invalido"
     
-    invalid_chars = r'<>:"/\|?*'
+    invalid_chars = r'<>:"/\|?*' + '\x00-\x1f\x7f' # Añadir caracteres de control
     sanitized = "".join(c if c not in invalid_chars else '_' for c in filename)
+    # Reemplazar múltiples espacios con uno solo
     sanitized = " ".join(sanitized.split())
+    # Limitar la longitud total del nombre de archivo
     return sanitized[:200]
 
-def parse_reply_markup(text: str) -> dict or None:
-    """
-    Parsea un texto con formato 'texto1 - url1, texto2 - url2'
-    y lo convierte en un diccionario serializable para un InlineKeyboardMarkup.
-    Devuelve None si el formato es inválido.
-    """
-    if not text or not isinstance(text, str):
-        return None
-    
-    keyboard = []
-    button_pairs = text.split(',')
-    
-    for pair in button_pairs:
-        parts = pair.split('-', 1)
-        if len(parts) == 2:
-            text = parts[0].strip()
-            url = parts[1].strip()
-            if text and url:
-                keyboard.append([{"text": text, "url": url}])
-        else:
-            return None
-            
-    return {"inline_keyboard": keyboard} if keyboard else None
-
-def format_status_message(operation: str, filename: str, percentage: float, processed_bytes: float, total_bytes: float, speed: float, eta: float, engine: str, user_id: int, user_mention: str) -> str:
+def format_status_message(
+    operation: str, filename: str, percentage: float, 
+    processed_bytes: float, total_bytes: float, speed: float, 
+    eta: float, engine: str, user_id: int, user_mention: str
+) -> str:
     """Construye el mensaje de estado con el formato visual solicitado."""
     bar = _create_text_bar(percentage, 10)
     short_filename = (filename[:45] + '...') if len(filename) > 48 else filename
 
-    status_line = "📥 Descargando" if "descarg" in operation.lower() else "⬆️ Subiendo" if "subiendo" in operation.lower() else "⚙️ Codificando"
+    status_line = operation # La operación ya viene con emoji
+    speed_text = f"{format_bytes(speed)}/s" if speed > 1 else f"{speed:.2f}x" if "Codificando" in operation else f"{format_bytes(speed)}/s"
+    processed_text = f"{format_bytes(processed_bytes)}" if "Codificando" not in operation else f"{format_time(processed_bytes)}"
+    total_text = f"{format_bytes(total_bytes)}" if "Codificando" not in operation else f"{format_time(total_bytes)}"
 
     lines = [
         f"┏ ꜰɪʟᴇɴᴀᴍᴇ: <code>{escape_html(short_filename)}</code>",
         f"┠ [{bar}] {percentage:.2f}%",
-        f"┠ ᴘʀᴏᴄᴇssᴇᴅ: {format_bytes(processed_bytes)} / {format_bytes(total_bytes)}",
+        f"┠ ᴘʀᴏᴄᴇssᴇᴅ: {processed_text} / {total_text}",
         f"┠ sᴛᴀᴛᴜs: {status_line}",
         f"┠ ᴇɴɢɪɴᴇ: {engine}",
-        f"┠ sᴘᴇᴇᴅ: {format_bytes(speed)}/s",
+        f"┠ sᴘᴇᴇᴅ: {speed_text}",
         f"┠ ᴇᴛᴀ: {format_time(eta)}",
         f"┗ ᴜsᴇʀ: {user_mention} | ɪᴅ: <code>{user_id}</code>"
     ]
-    return f"<b>{operation}</b>\n\n" + "\n".join(lines)
+    greeting = get_greeting(user_id).replace(', ', '')
+    return f"<b>{greeting} {operation}</b>\n\n" + "\n".join(lines)

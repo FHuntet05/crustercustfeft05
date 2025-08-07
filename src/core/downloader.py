@@ -5,6 +5,7 @@ import yt_dlp
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 import os
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ def get_common_ydl_opts():
     """Opciones comunes para yt-dlp, incluyendo cookies si están disponibles."""
     opts = {
         'quiet': True, 'no_warnings': True, 'forcejson': True,
-        'ignoreerrors': True
+        'ignoreerrors': True, 'geo_bypass': True,
     }
     if YOUTUBE_COOKIES_FILE:
         opts['cookiefile'] = YOUTUBE_COOKIES_FILE
@@ -53,37 +54,47 @@ def get_best_audio_format(formats: list) -> str:
 
 def get_lyrics(url: str) -> str or None:
     """Intenta descargar la letra (subtítulos) de una URL."""
+    temp_lyrics_path = f"temp_lyrics_{os.urandom(4).hex()}"
     ydl_opts = get_common_ydl_opts()
     ydl_opts.update({
         'writesubtitles': True,
-        'subtitleslangs': ['es', 'en'],
+        'subtitleslangs': ['es', 'en', 'es-419'], # Prioridad de idiomas
         'skip_download': True,
-        'outtmpl': {'default': 'temp_lyrics'}
+        'outtmpl': {'default': temp_lyrics_path}
     })
-    
+    # yt-dlp necesita 'forcejson': False para descargar archivos
+    if 'forcejson' in ydl_opts: del ydl_opts['forcejson']
+
     lyrics_filename = ""
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            sub_file = ydl.prepare_filename(info).rsplit('.', 1)[0]
+            # El nombre base no siempre coincide con el outtmpl, buscamos archivos generados
+            generated_files = [f for f in os.listdir('.') if f.startswith(temp_lyrics_path)]
             
-            for ext in ['.es.vtt', '.en.vtt', '.vtt', '.srt']:
-                if os.path.exists(sub_file + ext):
-                    lyrics_filename = sub_file + ext
+            for ext in ['.es.vtt', '.en.vtt', '.es-419.vtt', '.vtt']:
+                for fname in generated_files:
+                    if fname.endswith(ext):
+                        lyrics_filename = fname
+                        break
+                if lyrics_filename:
                     break
             
             if lyrics_filename:
                 with open(lyrics_filename, 'r', encoding='utf-8') as f:
+                    # Limpieza simple de VTT
                     lines = [line.strip() for line in f if not line.strip().isdigit() and '-->' not in line and line.strip() and "WEBVTT" not in line]
-                    return "\n".join(lines)[:4000]
+                    return "\n".join(lines)[:4000] # Limitar a 4000 caracteres
     except Exception as e:
         logger.warning(f"No se pudo obtener la letra para {url}: {e}")
     finally:
-        if lyrics_filename and os.path.exists(lyrics_filename):
-            os.remove(lyrics_filename)
-        if os.path.exists('temp_lyrics.info.json'):
-            os.remove('temp_lyrics.info.json')
-
+        # Limpiar todos los archivos temporales generados
+        for fname in os.listdir('.'):
+            if fname.startswith(temp_lyrics_path):
+                try:
+                    os.remove(fname)
+                except OSError:
+                    pass
     return None
 
 def get_url_info(url: str) -> dict or None:
@@ -107,6 +118,7 @@ def get_url_info(url: str) -> dict or None:
                             'resolution': f.get('resolution') or (f"{f.get('height', 0)}p" if f.get('height') else None),
                             'fps': f.get('fps'), 'filesize': f.get('filesize') or f.get('filesize_approx'),
                             'abr': f.get('abr'), 'vbr': f.get('vbr'), 'acodec': f.get('acodec'), 'vcodec': f.get('vcodec'),
+                            'height': f.get('height')
                         })
             
             is_video = any(f.get('vcodec', 'none') != 'none' and f.get('acodec', 'none') != 'none' for f in formats)
@@ -117,7 +129,7 @@ def get_url_info(url: str) -> dict or None:
                 'thumbnail': entry.get('thumbnail'), 'is_video': is_video, 'formats': formats
             }
     except Exception as e:
-        logger.error(f"yt-dlp no pudo obtener info de {url}: {e}")
+        logger.error(f"yt-dlp no pudo obtener info de {url}: {e}", exc_info=True)
         return None
 
 def download_from_url(url: str, output_path: str, format_id: str = 'best', progress_hook=None) -> bool:
@@ -128,7 +140,7 @@ def download_from_url(url: str, output_path: str, format_id: str = 'best', progr
         'progress_hooks': [progress_hook] if progress_hook else [],
         'noplaylist': True, 'merge_output_format': 'mp4',
         'http_chunk_size': 10485760, 'retries': 5, 'fragment_retries': 5,
-        'writethumbnail': True
+        'writethumbnail': True # Pedimos a yt-dlp que descargue la carátula
     })
     if 'forcejson' in ydl_opts: del ydl_opts['forcejson']
 
@@ -156,6 +168,7 @@ def search_music(query: str, limit: int = 20) -> list:
         except Exception as e:
             logger.warning(f"Búsqueda en Spotify falló: {e}")
 
+    # Si Spotify no dio resultados, o no está configurado, usamos YouTube como fallback.
     if not results:
         logger.info(f"No se encontraron resultados en Spotify para '{query}'. Usando YouTube.")
         try:
@@ -164,6 +177,7 @@ def search_music(query: str, limit: int = 20) -> list:
                 for entry in info['entries']:
                     title = entry.get('title', 'Título Desconocido')
                     artist = entry.get('uploader', 'Artista Desconocido')
+                    # Intentar parsear "Artista - Título" desde el título del video
                     if ' - ' in title:
                         parts = title.split(' - ', 1)
                         if len(parts) == 2: artist, title = parts[0], parts[1]
@@ -175,3 +189,16 @@ def search_music(query: str, limit: int = 20) -> list:
             logger.error(f"La búsqueda de música en YouTube falló: {e}")
             
     return results
+
+def download_file(url: str, output_path: str) -> bool:
+    """Descarga un archivo genérico (como una imagen) desde una URL."""
+    try:
+        with requests.get(url, stream=True) as r:
+            r.raise_for_status()
+            with open(output_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        return True
+    except Exception as e:
+        logger.error(f"No se pudo descargar el archivo desde {url}: {e}")
+        return False
