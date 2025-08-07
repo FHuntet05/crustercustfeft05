@@ -1,4 +1,4 @@
-# src/helpers/utils.py
+# --- START OF FILE src/helpers/utils.py ---
 
 import os
 import time
@@ -65,6 +65,7 @@ def sanitize_filename(filename: str) -> str:
     return sanitized[:200]
 
 async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
+    """Edita el mensaje de estado con un throttle para evitar spam de API."""
     if user_id not in progress_tracker: return
     ctx = progress_tracker[user_id]
     
@@ -72,7 +73,7 @@ async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
     ctx.last_update_text = text
     
     current_time = time.time()
-    if current_time - ctx.last_edit_time > 1.5:
+    if current_time - ctx.last_edit_time > 1.5:  # --- OPTIMIZACIÓN DE VISUALIZACIÓN ---
         try:
             await ctx.bot.edit_message_text(
                 chat_id=ctx.message.chat.id, 
@@ -81,65 +82,78 @@ async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
                 parse_mode=ParseMode.HTML
             )
             ctx.last_edit_time = current_time
-        except Exception: pass
+        except Exception: 
+            # Si la edición falla (ej. mensaje eliminado), no hacer nada.
+            pass
 
 def _progress_hook_yt_dlp(d, progress_tracker: dict):
+    """Hook llamado por yt-dlp durante la descarga."""
     user_id = d.get('user_id')
     if not user_id or user_id not in progress_tracker: return
 
     ctx = progress_tracker[user_id]
-    operation = "📥 Descargando (yt-dlp)..."
-
-    if d['status'] == 'downloading':
-        total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-        downloaded_bytes = d.get('downloaded_bytes', 0)
-        
-        if total_bytes > 0:
-            speed = d.get('speed', 0)
-            eta = d.get('eta', 0)
-            percentage = (downloaded_bytes / total_bytes) * 100
+    
+    try:
+        if d['status'] == 'downloading':
+            total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+            downloaded_bytes = d.get('downloaded_bytes', 0)
             
-            user_mention = "Usuario"
-            if hasattr(ctx.message, 'from_user') and ctx.message.from_user:
-                user_mention = ctx.message.from_user.mention
+            if total_bytes > 0:
+                speed = d.get('speed', 0)
+                eta = d.get('eta', 0)
+                percentage = (downloaded_bytes / total_bytes) * 100
+                
+                user_mention = "Usuario"
+                if hasattr(ctx.message, 'from_user') and ctx.message.from_user:
+                    user_mention = ctx.message.from_user.mention
 
-            text = format_status_message(
-                operation=operation, 
-                filename=ctx.task.get('original_filename', 'archivo'),
-                percentage=percentage, 
-                processed_bytes=downloaded_bytes, 
-                total_bytes=total_bytes,
-                speed=speed, 
-                eta=eta, 
-                engine="yt-dlp", 
-                user_id=user_id,
-                user_mention=user_mention
-            )
-            asyncio.run_coroutine_threadsafe(_edit_status_message(user_id, text, progress_tracker), ctx.loop)
+                text = format_status_message(
+                    operation="📥 Descargando...",
+                    filename=ctx.task.get('original_filename', 'archivo'),
+                    percentage=percentage, 
+                    processed_bytes=downloaded_bytes, 
+                    total_bytes=total_bytes,
+                    speed=speed, 
+                    eta=eta, 
+                    engine="yt-dlp", 
+                    user_id=user_id,
+                    user_mention=user_mention
+                )
+                # Enviar la corutina al bucle de eventos principal de forma segura desde un hilo.
+                asyncio.run_coroutine_threadsafe(_edit_status_message(user_id, text, progress_tracker), ctx.loop)
+    except Exception as e:
+        # --- OPTIMIZACIÓN DE VISUALIZACIÓN: Evitar que el hook de progreso falle ---
+        # A veces yt-dlp puede enviar un diccionario incompleto, esto lo previene.
+        logger.warning(f"Error menor en el hook de progreso de yt-dlp (ignorado): {e}")
 
 def format_status_message(
     operation: str, filename: str, percentage: float, 
     processed_bytes: float, total_bytes: float, speed: float, 
     eta: float, engine: str, user_id: int, user_mention: str
 ) -> str:
-    """Construye el mensaje de estado con el formato visual solicitado."""
+    """
+    Construye el mensaje de estado con un formato visual mejorado y detallado.
+    """
+    # --- OPTIMIZACIÓN DE VISUALIZACIÓN: Formato de mensaje mejorado ---
     bar = _create_text_bar(percentage, 10)
-    short_filename = (filename[:45] + '...') if len(filename) > 48 else filename
+    short_filename = (filename[:45] + '…') if len(filename) > 48 else filename
 
-    status_line = operation
-    speed_text = f"{format_bytes(speed)}/s" if speed > 1 else f"{speed:.2f}x" if "Codificando" in operation else f"{format_bytes(speed)}/s"
-    processed_text = f"{format_bytes(processed_bytes)}" if "Codificando" not in operation else f"{format_time(processed_bytes)}"
-    total_text = f"{format_bytes(total_bytes)}" if "Codificando" not in operation else f"{format_time(total_bytes)}"
+    is_processing = "Codificando" in operation
+    processed_text = format_time(processed_bytes) if is_processing else format_bytes(processed_bytes)
+    total_text = format_time(total_bytes) if is_processing else format_bytes(total_bytes)
+    speed_text = f"{speed:.2f}x" if is_processing else f"{format_bytes(speed)}/s"
 
-    lines = [
-        f"┏ ꜰɪʟᴇɴᴀᴍᴇ: <code>{escape_html(short_filename)}</code>",
-        f"┠ [{bar}] {percentage:.2f}%",
-        f"┠ ᴘʀᴏᴄᴇssᴇᴅ: {processed_text} / {total_text}",
-        f"┠ sᴛᴀᴛᴜs: {status_line}",
-        f"┠ ᴇɴɢɪɴᴇ: {engine}",
-        f"┠ sᴘᴇᴇᴅ: {speed_text}",
-        f"┠ ᴇᴛᴀ: {format_time(eta)}",
-        f"┗ ᴜsᴇʀ: {user_mention} | ɪᴅ: <code>{user_id}</code>"
-    ]
     greeting = get_greeting(user_id).replace(', ', '')
-    return f"<b>{greeting} {operation}</b>\n\n" + "\n".join(lines)
+    title = f"<b>{greeting} {operation}</b>"
+    
+    lines = [
+        f"┏ <b>ꜰɪʟᴇ</b>: <code>{escape_html(short_filename)}</code>",
+        f"┠ <b>ᴘʀᴏɢʀᴇss</b>: [{bar}] {percentage:.1f}%",
+        f"┠ <b>sɪᴢᴇ</b>: {processed_text} / {total_text}",
+        f"┠ <b>sᴘᴇᴇᴅ</b>: {speed_text}",
+        f"┠ <b>ᴇᴛᴀ</b>: {format_time(eta)}",
+        f"┗ <b>ᴇɴɢɪɴᴇ</b>: {engine}",
+    ]
+    
+    return f"{title}\n" + "\n".join(lines)
+# --- END OF FILE src/helpers/utils.py ---

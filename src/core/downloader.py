@@ -127,15 +127,36 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_track
     return None
 
 def get_best_audio_format(formats: list) -> str or None:
-    """Selecciona el mejor formato de solo audio. Devuelve el format_id o 'ba' como fallback."""
-    audio_formats = [f for f in formats if f.get('vcodec') in ['none', None] and f.get('acodec') not in ['none', None] and f.get('abr')]
-    if not audio_formats:
-        logger.warning("No se encontraron formatos de solo audio, se usará el fallback 'ba' (bestaudio).")
+    """
+    Selecciona el mejor formato de audio disponible usando una estrategia de cascada inteligente.
+    """
+    # --- LÓGICA DE SELECCIÓN DE AUDIO REESCRITA Y ROBUSTA ---
+    if not formats:
+        logger.warning("No se proporcionaron formatos para seleccionar. Usando 'ba' como último recurso.")
         return 'ba'
+
+    # Intento 1: Buscar el mejor formato de "solo audio" (el más eficiente).
+    audio_only_formats = [f for f in formats if f.get('vcodec') in ['none', None] and f.get('acodec') not in ['none', None] and f.get('abr')]
+    if audio_only_formats:
+        best_format = sorted(audio_only_formats, key=lambda x: x.get('abr', 0), reverse=True)[0]
+        logger.info(f"Estrategia 1 (Éxito): Mejor formato de SOLO AUDIO seleccionado: ID {best_format.get('format_id')} con ABR {best_format.get('abr')}k")
+        return best_format.get('format_id')
     
-    best_format = sorted(audio_formats, key=lambda x: x.get('abr', 0), reverse=True)[0]
-    logger.info(f"Mejor formato de audio seleccionado: ID {best_format.get('format_id')} con ABR {best_format.get('abr')}k")
-    return best_format.get('format_id')
+    logger.warning("Estrategia 1 (Fallo): No se encontraron formatos de solo audio. Pasando a la estrategia 2.")
+
+    # Intento 2: Buscar el formato con el mejor audio, incluso si tiene video.
+    # Filtramos para asegurarnos de que tengan un 'format_id' y bitrate de audio 'abr'.
+    formats_with_audio = [f for f in formats if f.get('format_id') and f.get('abr')]
+    if formats_with_audio:
+        best_format = sorted(formats_with_audio, key=lambda x: x.get('abr', 0), reverse=True)[0]
+        logger.info(f"Estrategia 2 (Éxito): Mejor formato CON AUDIO seleccionado: ID {best_format.get('format_id')} con ABR {best_format.get('abr')}k")
+        return best_format.get('format_id')
+
+    logger.warning("Estrategia 2 (Fallo): No se encontraron formatos con 'abr'. Pasando a la estrategia 3.")
+    
+    # Intento 3: Fallback final al selector genérico 'ba' (bestaudio).
+    logger.info("Estrategia 3 (Fallback): Usando el selector genérico 'ba' (bestaudio).")
+    return 'ba'
 
 def get_lyrics(url: str) -> str or None:
     """Intenta descargar la letra (subtítulos) de una URL."""
@@ -146,7 +167,7 @@ def get_lyrics(url: str) -> str or None:
         'subtitleslangs': ['es', 'en', 'es-419'],
         'skip_download': True,
         'outtmpl': {'default': temp_lyrics_path},
-        'logger': YtdlpLogger(), # Asegurar que el logger también esté aquí
+        'logger': YtdlpLogger(),
     })
     if 'forcejson' in ydl_opts: del ydl_opts['forcejson']
 
@@ -168,7 +189,7 @@ def get_lyrics(url: str) -> str or None:
                     lines = [line.strip() for line in f if not line.strip().isdigit() and '-->' not in line and line.strip() and "WEBVTT" not in line]
                     return "\n".join(lines)[:4000]
     except AuthenticationError:
-        raise # Propagar error de autenticación
+        raise
     except Exception as e:
         logger.warning(f"No se pudo obtener la letra para {url}: {e}")
     finally:
@@ -183,7 +204,6 @@ def get_url_info(url: str) -> dict or None:
     ydl_opts = get_common_ydl_opts()
     ydl_opts.update({
         'skip_download': True,
-        # --- CAMBIO CRÍTICO: Asegurar que YtdlpLogger se use aquí ---
         'logger': YtdlpLogger(),
     })
 
