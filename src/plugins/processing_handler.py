@@ -147,43 +147,45 @@ async def on_song_select(client: Client, query: CallbackQuery):
     result_id = query.data.split("_")[2]
     user = query.from_user
 
-    await query.message.edit_text(f"✅ Canción seleccionada. Preparando descarga automática...", parse_mode=ParseMode.HTML)
-
     search_result = await db_instance.search_results.find_one_and_delete({"_id": ObjectId(result_id), "user_id": user.id})
-    if not search_result: return await query.message.edit_text("❌ Error: Este resultado de búsqueda ha expirado o no es válido.")
+    if not search_result:
+        await query.answer("Esta búsqueda ha expirado.", show_alert=True)
+        return await query.message.delete()
     
+    # Limpiar el resto de los resultados de esta búsqueda
     if search_id := search_result.get('search_id'):
         await db_instance.search_results.delete_many({"search_id": search_id})
         await db_instance.search_sessions.delete_one({"_id": ObjectId(search_id)})
 
+    # ---- NUEVO FLUJO INSTANTÁNEO ----
+    # 1. Obtener la URL (o el término para buscarla) del resultado.
     search_term_or_url = search_result.get('url') or f"ytsearch1:{search_result.get('search_term')}"
+    title = search_result.get('title', 'Canción Desconocida')
     
-    info = await asyncio.to_thread(downloader.get_url_info, search_term_or_url)
-    if not info or not info.get('formats'):
-        return await query.message.edit_text("❌ No pude obtener información para descargar esa selección.")
-    
-    best_audio_format = downloader.get_best_audio_format(info['formats'])
-    lyrics = await asyncio.to_thread(downloader.get_lyrics, info['url'])
-
+    # 2. Crear una tarea "ligera" que el worker se encargará de procesar.
     processing_config = {
-        "download_format_id": best_audio_format,
-        "lyrics": lyrics,
-        "thumbnail_url": info.get('thumbnail')
+        "task_type": "audio_search" # Nueva bandera para el worker
     }
     
     task_id = await db_instance.add_task(
-        user_id=user.id, file_type='audio', url=info['url'], 
-        file_name=sanitize_filename(info['title']), 
-        url_info=info, processing_config=processing_config,
+        user_id=user.id,
+        file_type='audio', # Asumimos audio por defecto
+        url=search_term_or_url, # El worker resolverá esto a una URL concreta si es necesario
+        file_name=sanitize_filename(title), 
+        processing_config=processing_config,
         status="queued" # Encolar directamente
     )
 
-    if not task_id: return await query.message.edit_text("❌ Error al crear la tarea en la DB.")
+    if not task_id:
+        return await query.message.edit_text("❌ Error al crear la tarea en la DB.")
     
+    # 3. Responder inmediatamente al usuario.
     await query.message.edit_text(
-        f"🔥 <b>{escape_html(info['title'])}</b>\n\nTu canción ha sido enviada a la forja.", 
-        parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        f"🔥 <b>{escape_html(title)}</b>\n\nTu canción ha sido enviada a la forja.", 
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
     )
+    await query.answer()
 
 @Client.on_callback_query(filters.regex(r"^search_page_"))
 async def on_search_page(client: Client, query: CallbackQuery):
