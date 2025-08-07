@@ -128,10 +128,32 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_track
 
 def get_best_audio_format(formats: list) -> str:
     """
-    Devuelve el selector de formato más robusto y rápido para yt-dlp,
-    delegando la lógica de selección para máxima velocidad.
+    Selecciona el mejor formato de SÓLO AUDIO para una descarga rápida y eficiente.
     """
-    # --- LÓGICA "HYPER-SPEED" ---
+    # --- CAMBIO CRÍTICO Y FINAL: Estrategia "Audio-First" ---
+    if not formats:
+        logger.warning("No se proporcionaron formatos. Usando el selector final 'bestaudio/best'.")
+        return 'bestaudio/best'
+
+    # Prioridad #1: Buscar el mejor stream de SÓLO audio.
+    audio_only_formats = [
+        f for f in formats 
+        if f.get('vcodec') in ['none', None] and f.get('acodec') not in ['none', None]
+    ]
+
+    if audio_only_formats:
+        # Ordenar por bitrate de audio (abr) si está disponible, sino dejar como está.
+        # Esto es más robusto si 'abr' no existe.
+        try:
+            best_format = sorted(audio_only_formats, key=lambda x: x.get('abr', 0), reverse=True)[0]
+            logger.info(f"Estrategia Audio-First (Éxito): Mejor formato de SOLO AUDIO seleccionado: ID {best_format.get('format_id')}")
+            return best_format.get('format_id')
+        except (IndexError, TypeError):
+             # Si falla el ordenamiento o la lista está vacía después de todo
+             pass
+    
+    # Fallback de Emergencia: Si no hay streams de solo audio (muy raro).
+    logger.warning("No se encontraron streams de solo audio. Recurriendo al selector 'bestaudio/best'.")
     return 'bestaudio/best'
 
 def get_lyrics(url: str) -> str or None:
