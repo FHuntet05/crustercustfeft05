@@ -212,4 +212,16 @@ def search_music(query: str, limit: int = 20) -> list:
                         parts = title.split(' - ', 1)
                         if len(parts) == 2: artist, title = parts[0], parts[1]
                     results.append({'source': 'youtube', 'title': title.strip(), 'artist': artist.strip(), 'album': 'YouTube', 'duration': entry.get('duration'), 'url': entry.get('webpage_url')})
-  
+        except Exception as e: logger.error(f"La búsqueda en YouTube falló: {e}")
+    return results
+
+def download_file(url: str, output_path: str) -> bool:
+    try:
+        with requests.get(url, stream=True) as r:
+            r.raise_for_status()
+            with open(output_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
+        return True
+    except Exception as e:
+        logger.error(f"No se pudo descargar {url}: {e}")
+        return False
