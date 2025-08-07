@@ -71,16 +71,16 @@ def build_quality_menu(task_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
     
 def build_download_quality_menu(task_id: str, formats: list) -> InlineKeyboardMarkup:
-    """Construye el menú de calidades de descarga de forma segura."""
+    """Construye el menú de calidades de descarga de forma profesional y segura."""
     keyboard = []
     
     video_formats = sorted(
-        [f for f in formats if f.get('vcodec', 'none') != 'none' and f.get('height')],
+        [f for f in formats if f.get('vcodec') not in ['none', None] and f.get('height')],
         key=lambda x: x.get('height', 0),
         reverse=True
     )
     audio_formats = sorted(
-        [f for f in formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none' and f.get('abr')],
+        [f for f in formats if f.get('vcodec') in ['none', None] and f.get('acodec') not in ['none', None] and f.get('abr')],
         key=lambda x: x.get('abr', 0),
         reverse=True
     )
@@ -89,31 +89,32 @@ def build_download_quality_menu(task_id: str, formats: list) -> InlineKeyboardMa
         keyboard.append([InlineKeyboardButton("--- 🎬 Video ---", callback_data="noop")])
         added_resolutions = set()
         for f in video_formats:
-            resolution = f.get('resolution') or f"{f.get('height')}p"
-            if not resolution or resolution in added_resolutions:
+            height = f.get('height')
+            if not height or height in added_resolutions:
                 continue
             
-            # --- CORRECCIÓN CRÍTICA ---
-            # Usamos el format_id original, que es corto y seguro para el callback_data.
             format_id = f.get('format_id')
             if not format_id: continue
 
-            filesize = f.get('filesize') or f.get('filesize_approx')
-            label = f"{resolution} ({f.get('ext')}) ~{format_bytes(filesize)}".strip()
+            filesize = f.get('filesize')
+            label = f"🎬 {height}p ({f.get('ext')})"
+            if filesize:
+                label += f" ~{format_bytes(filesize)}"
             
             keyboard.append([InlineKeyboardButton(label, callback_data=f"set_dlformat_{task_id}_{format_id}")])
-            added_resolutions.add(resolution)
-            if len(added_resolutions) >= 5:
-                break
+            added_resolutions.add(height)
             
     if audio_formats:
         keyboard.append([InlineKeyboardButton("--- 🎵 Solo Audio ---", callback_data="noop")])
-        for f in audio_formats[:4]:
+        for f in audio_formats[:5]: # Mostrar hasta 5 formatos de audio
             format_id = f.get('format_id')
             if not format_id: continue
             
-            filesize = f.get('filesize') or f.get('filesize_approx')
-            label = f"Audio {f.get('acodec')} ~{int(f.get('abr',0))}k ~{format_bytes(filesize)}".strip()
+            filesize = f.get('filesize')
+            label = f"🎵 Audio {f.get('acodec')} ~{int(f.get('abr',0))}k"
+            if filesize:
+                label += f" ~{format_bytes(filesize)}"
+
             keyboard.append([InlineKeyboardButton(label, callback_data=f"set_dlformat_{task_id}_{format_id}")])
             
     keyboard.append([InlineKeyboardButton("🔙 Volver al Panel", callback_data="panel_show")])

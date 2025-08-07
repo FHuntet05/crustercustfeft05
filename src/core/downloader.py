@@ -88,10 +88,12 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_track
     except ProgressError:
         logger.warning("Fallo de progreso detectado. Reintentando con estrategia inteligente...")
         
-        # Estrategia de reintento inteligente
-        # Si el formato original era solo audio, reintentamos con 'bestaudio'. Si no, con video+audio.
-        is_audio_only = 'bestaudio' in format_id or '+bestaudio' not in format_id
-        retry_format = 'bestaudio/best' if is_audio_only else 'bestvideo+bestaudio/best'
+        # --- LÓGICA DE REINTENTO PRECISA ---
+        # Si el format_id original NO contenía un '+', era un formato simple (probablemente audio).
+        # En ese caso, reintentamos con 'bestaudio/best'.
+        # Si contenía un '+', era una combinación video+audio, reintentamos con la misma lógica.
+        is_simple_format = '+' not in format_id
+        retry_format = 'bestaudio/best' if is_simple_format else 'bestvideo+bestaudio/best'
         
         logger.info(f"Estrategia de reintento seleccionada: {retry_format}")
 
@@ -121,7 +123,7 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_track
     return None
 
 def get_best_audio_format(formats: list) -> str:
-    audio_formats = [f for f in formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none' and f.get('abr')]
+    audio_formats = [f for f in formats if f.get('vcodec') in ['none', None] and f.get('acodec') not in ['none', None] and f.get('abr')]
     if not audio_formats:
         logger.warning("No se encontraron formatos de solo audio, se usará 'bestaudio/best'.")
         return 'bestaudio/best'
@@ -130,23 +132,6 @@ def get_best_audio_format(formats: list) -> str:
     logger.info(f"Mejor formato de audio seleccionado: ID {best_format.get('format_id')} con ABR {best_format.get('abr')}k")
     return best_format.get('format_id', 'bestaudio/best')
 
-def get_lyrics(url: str) -> str or None:
-    # (código sin cambios)
-    pass
-
-def get_url_info(url: str) -> dict or None:
-    # (código sin cambios)
-    pass
-
-def search_music(query: str, limit: int = 20) -> list:
-    # (código sin cambios)
-    pass
-
-def download_file(url: str, output_path: str) -> bool:
-    # (código sin cambios)
-    pass
-
-# ---- RE-AÑADO CÓDIGO OMITIDO POR BREVEDAD ----
 def get_lyrics(url: str) -> str or None:
     temp_lyrics_path = f"temp_lyrics_{os.urandom(4).hex()}"
     ydl_opts = get_common_ydl_opts()
