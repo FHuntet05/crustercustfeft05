@@ -36,7 +36,6 @@ def get_common_ydl_opts():
         'forcejson': True,
         'ignoreerrors': True,
         'geo_bypass': True,
-        # --- MEJORA CRÍTICA: Añadir un User-Agent de un navegador real ---
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.5',
@@ -136,8 +135,14 @@ def get_url_info(url: str) -> dict or None:
         logger.error(f"Excepción en get_url_info para {url}: {e}", exc_info=True)
         return None
 
-def download_from_url(url: str, output_path: str, format_id: str = 'best', progress_hook=None) -> bool:
+def download_from_url(url: str, output_path: str, format_id: str, progress_hook=None) -> bool:
     """Descarga contenido desde una URL usando yt-dlp con un formato específico."""
+    # --- CORRECCIÓN ---
+    # Asegurarnos de que no se intente descargar con un format_id nulo o vacío.
+    if not format_id:
+        logger.error("Se intentó descargar desde URL sin un format_id válido.")
+        return False
+        
     ydl_opts = get_common_ydl_opts()
     ydl_opts.update({
         'format': format_id, 'outtmpl': {'default': output_path},
@@ -157,7 +162,6 @@ def download_from_url(url: str, output_path: str, format_id: str = 'best', progr
         return False
 
 def search_music(query: str, limit: int = 20) -> list:
-    """Busca música usando la API de Spotify y/o YouTube."""
     results = []
     if spotify_api:
         try:
@@ -193,7 +197,6 @@ def search_music(query: str, limit: int = 20) -> list:
     return results
 
 def download_file(url: str, output_path: str) -> bool:
-    """Descarga un archivo genérico (como una imagen) desde una URL."""
     try:
         with requests.get(url, stream=True) as r:
             r.raise_for_status()

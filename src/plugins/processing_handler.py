@@ -110,16 +110,22 @@ async def set_value_callback(client: Client, query: CallbackQuery):
     task = await db_instance.get_task(task_id)
     if not task: return await query.message.edit_text("❌ Error: Tarea no encontrada.")
 
-    # --- CORRECCIÓN DE BUG: Guardar formato y LUEGO encolar ---
+    # --- CORRECCIÓN CRÍTICA DE LA LÓGICA ---
     if config_type == "dlformat":
-        # Guardar el formato seleccionado en la configuración de la tarea
-        await db_instance.update_task_config(task_id, "download_format_id", value)
-        
-        # Si se elige un formato de solo audio, actualizamos el tipo de archivo de la tarea
-        if 'bestaudio' in value or 'abr' in value: # Detección simple si es solo audio
+        # 1. Guardar el formato seleccionado en la configuración de la tarea.
+        #    Este es el paso que estaba fallando.
+        update_result = await db_instance.update_task_config(task_id, "download_format_id", value)
+        if not update_result or update_result.modified_count == 0:
+            return await query.message.edit_text("❌ Error: No se pudo guardar la selección de formato.")
+
+        # 2. Si se elige un formato de solo audio, actualizamos el tipo de archivo de la tarea.
+        url_info = task.get('url_info', {})
+        formats = url_info.get('formats', [])
+        selected_format = next((f for f in formats if f.get('format_id') == value), None)
+        if selected_format and selected_format.get('vcodec') == 'none':
             await db_instance.update_task(task_id, 'file_type', 'audio')
             
-        # Ahora que está guardado, encolar la tarea
+        # 3. Ahora que está guardado, encolar la tarea.
         await db_instance.update_task(task_id, "status", "queued")
         return await query.message.edit_text(f"✅ Formato seleccionado.\n\n🔥 Tarea enviada a la forja.", parse_mode=ParseMode.HTML)
     

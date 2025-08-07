@@ -21,13 +21,14 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 class ProgressContext:
-    def __init__(self, bot, message, task):
+    def __init__(self, bot, message, task, loop):
         self.bot = bot
         self.message = message
         self.task = task
         self.start_time = time.time()
         self.last_edit_time = 0
         self.last_update_text = ""
+        self.loop = loop # Guardar el loop de eventos
 
 progress_tracker = {}
 
@@ -74,9 +75,39 @@ async def _progress_callback_pyrogram(current, total, user_id, operation):
     )
     await _edit_status_message(user_id, text)
 
-def _progress_hook_yt_dlp(d, user_id, operation):
-    if d['status'] == 'finished':
-        logger.info(f"yt-dlp hook: Descarga finalizada para el usuario {user_id}.")
+def _progress_hook_yt_dlp(d):
+    """
+    Hook para yt-dlp. Ahora recibe el contexto completo para poder
+    llamar a la corutina de actualización de forma segura.
+    """
+    user_id = d.get('user_id')
+    if not user_id or user_id not in progress_tracker:
+        return
+
+    ctx = progress_tracker[user_id]
+    operation = "📥 Descargando (yt-dlp)..."
+
+    if d['status'] == 'downloading':
+        total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+        downloaded_bytes = d.get('downloaded_bytes', 0)
+        
+        if total_bytes > 0:
+            speed = d.get('speed', 0)
+            eta = d.get('eta', 0)
+            percentage = (downloaded_bytes / total_bytes) * 100
+            
+            user_mention = f"ID: {user_id}"
+            if hasattr(ctx.message, 'from_user') and ctx.message.from_user:
+                user_mention = ctx.message.from_user.mention
+
+            text = format_status_message(
+                operation=operation, filename=ctx.task.get('original_filename', 'archivo'),
+                percentage=percentage, processed_bytes=downloaded_bytes, total_bytes=total_bytes,
+                speed=speed, eta=eta, engine="yt-dlp", user_id=user_id,
+                user_mention=user_mention
+            )
+            # Ejecutar la corutina en el loop de eventos correcto
+            asyncio.run_coroutine_threadsafe(_edit_status_message(user_id, text), ctx.loop)
 
 async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
     duration_info = get_media_info(input_path)
@@ -127,7 +158,8 @@ async def process_task(bot, task: dict):
     status_message = await bot.send_message(user_id, f"Iniciando: <code>{escape_html(task.get('original_filename') or task.get('url', 'Tarea'))}</code>", parse_mode=ParseMode.HTML)
     
     global progress_tracker
-    progress_tracker[user_id] = ProgressContext(bot, status_message, task)
+    # --- CORRECCIÓN --- Pasamos el loop de eventos al contexto
+    progress_tracker[user_id] = ProgressContext(bot, status_message, task, asyncio.get_running_loop())
     
     files_to_clean = set()
     output_path = ""
@@ -145,22 +177,18 @@ async def process_task(bot, task: dict):
             if not format_id:
                  raise Exception("La tarea de URL no tiene 'download_format_id' seleccionado.")
             
-            # --- CORRECCIÓN CRÍTICA DE LA LÓGICA DE FORMATO ---
-            # Determinar si el format_id corresponde a un formato de solo video
-            # buscándolo en la lista de formatos guardada en la tarea.
             url_info = task.get('url_info', {})
             formats = url_info.get('formats', [])
             selected_format = next((f for f in formats if f.get('format_id') == format_id), None)
             
             final_format_id = format_id
-            # Si el formato seleccionado tiene video pero no audio (vcodec != 'none' y acodec == 'none'),
-            # entonces le pedimos a yt-dlp que lo fusione con el mejor audio disponible.
             if selected_format and selected_format.get('vcodec') != 'none' and selected_format.get('acodec') == 'none':
                 final_format_id = f"{format_id}+bestaudio"
             
-            await _edit_status_message(user_id, f"📥 Descargando con formato: <code>{final_format_id}</code>")
+            # Crear un hook de progreso que tenga el user_id
+            progress_hook = lambda d: _progress_hook_yt_dlp(d.copy().update({'user_id': user_id}) or d)
 
-            if not await asyncio.to_thread(downloader.download_from_url, url, base_download_path, final_format_id, progress_hook=None):
+            if not await asyncio.to_thread(downloader.download_from_url, url, base_download_path, final_format_id, progress_hook):
                 raise Exception("La descarga desde la URL falló.")
             
             found_files = glob.glob(f"{base_download_path}.*")
