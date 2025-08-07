@@ -9,8 +9,10 @@ from datetime import datetime
 from pyrogram.enums import ParseMode
 
 from src.db.mongo_manager import db_instance
-from src.helpers.utils import format_status_message, sanitize_filename, escape_html, _edit_status_message
+from src.helpers.utils import (format_status_message, sanitize_filename, 
+                               escape_html, _edit_status_message, ADMIN_USER_ID)
 from src.core import ffmpeg, downloader
+from src.core.downloader import AuthenticationError # Importar la nueva excepción
 from src.core.ffmpeg import get_media_info
 
 logger = logging.getLogger(__name__)
@@ -223,6 +225,15 @@ async def process_task(bot, task: dict):
 
         await db_instance.update_task(task_id, "status", "done")
         await status_message.delete()
+
+    except AuthenticationError as e:
+        logger.critical(f"Error de autenticación de YouTube: {e}")
+        error_msg = "YouTube me está bloqueando. Necesito nuevas cookies para funcionar."
+        await db_instance.update_task(task_id, "status", "error")
+        await db_instance.update_task(task_id, "last_error", error_msg)
+        await _edit_status_message(user_id, f"❌ <b>Error de Autenticación</b>\n\n<code>{escape_html(error_msg)}</code>", progress_tracker)
+        if ADMIN_USER_ID:
+            await bot.send_message(ADMIN_USER_ID, "⚠️ <b>¡Alerta de Mantenimiento, Jefe!</b>\n\nMis cookies de YouTube han expirado o han sido invalidadas. Por favor, genere un nuevo archivo <code>youtube_cookies.txt</code> y súbalo al servidor para restaurar la funcionalidad de descarga.", parse_mode=ParseMode.HTML)
 
     except Exception as e:
         logger.critical(f"Error al procesar la tarea {task_id}: {e}", exc_info=True)
