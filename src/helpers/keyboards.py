@@ -71,12 +71,13 @@ def build_quality_menu(task_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
     
 def build_download_quality_menu(task_id: str, formats: list) -> InlineKeyboardMarkup:
-    """Construye el menú de calidades de descarga para una URL, separando video y audio."""
+    """Construye el menú de calidades de descarga, mostrando más opciones."""
     keyboard = []
     
-    # Formatos de video con audio
+    # --- LÓGICA MEJORADA ---
+    # Formatos de video (incluso sin audio, yt-dlp los fusiona)
     video_formats = sorted(
-        [f for f in formats if f.get('vcodec', 'none') != 'none' and f.get('acodec', 'none') != 'none' and f.get('height')],
+        [f for f in formats if f.get('vcodec', 'none') != 'none' and f.get('height')],
         key=lambda x: x.get('height', 0),
         reverse=True
     )
@@ -88,12 +89,22 @@ def build_download_quality_menu(task_id: str, formats: list) -> InlineKeyboardMa
     )
     
     if video_formats:
-        keyboard.append([InlineKeyboardButton("--- 🎬 Video + Audio ---", callback_data="noop")])
-        for f in video_formats[:5]: # Limitar a 5 para no saturar
-            resolution = f.get('resolution') or f.get('height')
+        keyboard.append([InlineKeyboardButton("--- 🎬 Video ---", callback_data="noop")])
+        # Usamos un set para no mostrar resoluciones duplicadas (ej. 1080p y 1080p60)
+        added_resolutions = set()
+        for f in video_formats:
+            resolution = f.get('resolution') or f"{f.get('height')}p"
+            if resolution in added_resolutions:
+                continue
+            
             filesize = f.get('filesize') or f.get('filesize_approx')
             label = f"{resolution} ({f.get('ext')}) ~{format_bytes(filesize)}".strip()
-            keyboard.append([InlineKeyboardButton(label, callback_data=f"set_dlformat_{task_id}_{f.get('format_id')}")])
+            # Usar 'bestvideo[height<=...]+bestaudio' para asegurar que se obtenga video y audio
+            format_id = f"bestvideo[height<={f.get('height')}]+bestaudio/best[height<={f.get('height')}]"
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"set_dlformat_{task_id}_{format_id}")])
+            added_resolutions.add(resolution)
+            if len(added_resolutions) >= 5: # Limitar a 5 para no saturar
+                break
             
     if audio_formats:
         keyboard.append([InlineKeyboardButton("--- 🎵 Solo Audio ---", callback_data="noop")])
@@ -139,7 +150,6 @@ def build_search_results_keyboard(all_results: list, search_id: str, page: int =
 
     keyboard.append([InlineKeyboardButton("❌ Cancelar Búsqueda", callback_data=f"cancel_search_{search_id}")])
     return InlineKeyboardMarkup(keyboard)
-
 
 def build_audio_convert_menu(task_id: str) -> InlineKeyboardMarkup:
     """Construye el menú para configurar la conversión de audio."""

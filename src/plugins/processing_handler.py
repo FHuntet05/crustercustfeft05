@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 
 @Client.on_callback_query(filters.regex(r"^panel_"))
 async def on_panel_action(client: Client, query: CallbackQuery):
-    """Maneja acciones del panel principal, como 'mostrar' o 'limpiar'."""
     await query.answer()
     user = query.from_user
     action = query.data.split("_")[1]
@@ -42,7 +41,6 @@ async def on_panel_action(client: Client, query: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^task_"))
 async def on_task_action(client: Client, query: CallbackQuery):
-    """Maneja acciones directas sobre una tarea, como 'procesar' o 'encolar'."""
     await query.answer()
     parts = query.data.split("_")
     action, task_id = parts[1], "_".join(parts[2:])
@@ -62,7 +60,6 @@ async def on_task_action(client: Client, query: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^config_"))
 async def show_config_menu(client: Client, query: CallbackQuery):
-    """Muestra los menús de configuración específicos (renombrar, cortar, etc.)."""
     await query.answer()
     
     parts = query.data.split("_")
@@ -72,7 +69,6 @@ async def show_config_menu(client: Client, query: CallbackQuery):
     if not task:
         return await query.message.edit_text("❌ Error: Tarea no encontrada.")
 
-    # Menús que no requieren entrada de texto
     if menu_type == "dlquality":
         url_info = task.get('url_info')
         if not url_info or not url_info.get('formats'):
@@ -86,7 +82,6 @@ async def show_config_menu(client: Client, query: CallbackQuery):
         keyboard = build_audio_effects_menu(task_id, task.get('processing_config', {}))
         return await query.message.edit_text("🎧 Aplique efectos de audio:", reply_markup=keyboard)
 
-    # Menús que SÍ requieren entrada de texto del usuario
     original_filename = task.get('original_filename', 'archivo')
     greeting_prefix = get_greeting(query.from_user.id)
     
@@ -108,7 +103,6 @@ async def show_config_menu(client: Client, query: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^set_"))
 async def set_value_callback(client: Client, query: CallbackQuery):
-    """Guarda una configuración específica en la tarea (ej. calidad, formato)."""
     await query.answer()
     parts = query.data.split("_")
     config_type, task_id, value = parts[1], parts[2], "_".join(parts[3:])
@@ -116,19 +110,19 @@ async def set_value_callback(client: Client, query: CallbackQuery):
     task = await db_instance.get_task(task_id)
     if not task: return await query.message.edit_text("❌ Error: Tarea no encontrada.")
 
-    # Casos especiales que encolan la tarea directamente
+    # --- CORRECCIÓN DE BUG: Guardar formato y LUEGO encolar ---
     if config_type == "dlformat":
+        # Guardar el formato seleccionado en la configuración de la tarea
+        await db_instance.update_task_config(task_id, "download_format_id", value)
+        
         # Si se elige un formato de solo audio, actualizamos el tipo de archivo de la tarea
-        url_info = task.get('url_info', {})
-        chosen_format = next((f for f in url_info.get('formats', []) if f.get('format_id') == value), None)
-        if chosen_format and chosen_format.get('vcodec', 'none') == 'none':
+        if 'bestaudio' in value or 'abr' in value: # Detección simple si es solo audio
             await db_instance.update_task(task_id, 'file_type', 'audio')
             
-        await db_instance.update_task_config(task_id, "download_format_id", value)
+        # Ahora que está guardado, encolar la tarea
         await db_instance.update_task(task_id, "status", "queued")
-        return await query.message.edit_text(f"✅ Formato <code>{value}</code> seleccionado.\n\n🔥 Tarea enviada a la forja.", parse_mode=ParseMode.HTML)
+        return await query.message.edit_text(f"✅ Formato seleccionado.\n\n🔥 Tarea enviada a la forja.", parse_mode=ParseMode.HTML)
     
-    # Casos de configuración estándar
     elif config_type == "quality": await db_instance.update_task_config(task_id, "quality", value)
     elif config_type == "mute": current = task.get('processing_config', {}).get('mute_audio', False); await db_instance.update_task_config(task_id, "mute_audio", not current)
     elif config_type == "audioprop": prop_key, prop_value = parts[3], parts[4]; await db_instance.update_task_config(task_id, f"audio_{prop_key}", prop_value)
@@ -136,13 +130,11 @@ async def set_value_callback(client: Client, query: CallbackQuery):
         effect = parts[3]
         current = task.get('processing_config', {}).get(effect, False)
         await db_instance.update_task_config(task_id, effect, not current)
-        task = await db_instance.get_task(task_id) # Recargar para el menú
+        task = await db_instance.get_task(task_id)
         keyboard = build_audio_effects_menu(task_id, task.get('processing_config', {}))
         return await query.message.edit_text("🎧 Efectos de audio actualizados:", reply_markup=keyboard)
 
-
-    # Volver al menú principal de procesamiento después de cambiar una opción
-    task = await db_instance.get_task(task_id) # Recargar
+    task = await db_instance.get_task(task_id)
     keyboard = build_processing_menu(task_id, task['file_type'], task, task.get('original_filename', ''))
     await query.message.edit_text(
         f"🛠️ Configuración actualizada.",
@@ -151,9 +143,6 @@ async def set_value_callback(client: Client, query: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^song_select_"))
 async def on_song_select(client: Client, query: CallbackQuery):
-    """
-    Manejador para la selección de una canción. Inicia el flujo de descarga AUTOMÁTICA.
-    """
     result_id = query.data.split("_")[2]
     user = query.from_user
 
@@ -162,19 +151,16 @@ async def on_song_select(client: Client, query: CallbackQuery):
     search_result = await db_instance.search_results.find_one({"_id": ObjectId(result_id), "user_id": user.id})
     if not search_result: return await query.message.edit_text("❌ Error: Este resultado de búsqueda ha expirado o no es válido.")
     
-    # Limpiar todos los resultados de esta sesión de búsqueda para evitar contaminación
     if search_id := search_result.get('search_id'):
         await db_instance.search_results.delete_many({"search_id": search_id})
         await db_instance.search_sessions.delete_one({"_id": ObjectId(search_id)})
 
     search_term_or_url = search_result.get('url') or f"ytsearch1:{search_result.get('search_term')}"
     
-    # Usamos to_thread para no bloquear el bucle de eventos con la llamada a yt-dlp
     info = await asyncio.to_thread(downloader.get_url_info, search_term_or_url)
     if not info or not info.get('formats'):
         return await query.message.edit_text("❌ No pude obtener información para descargar esa selección.")
     
-    # --- Flujo Automático de Audio ---
     best_audio_format = downloader.get_best_audio_format(info['formats'])
     lyrics = await asyncio.to_thread(downloader.get_lyrics, info['url'])
 
@@ -203,7 +189,6 @@ async def on_song_select(client: Client, query: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^search_page_"))
 async def on_search_page(client: Client, query: CallbackQuery):
-    """Manejador para la paginación de los resultados de búsqueda."""
     await query.answer()
     parts = query.data.split("_")
     search_id, page = parts[2], int(parts[3])
@@ -224,7 +209,6 @@ async def on_search_page(client: Client, query: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^cancel_search_"))
 async def on_cancel_search(client: Client, query: CallbackQuery):
-    """Cancela una búsqueda y limpia los resultados de la DB."""
     await query.answer()
     search_id = query.data.split("_")[2]
     await db_instance.search_results.delete_many({"search_id": search_id})
@@ -233,16 +217,9 @@ async def on_cancel_search(client: Client, query: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^noop"))
 async def noop_callback(client: Client, query: CallbackQuery):
-    """Callback que no hace nada, útil para botones de solo texto."""
     await query.answer()
 
-# --- MANEJADOR DE ENTRADA DE TEXTO PARA CONFIGURACIÓN ---
-
 async def handle_text_input_for_config(client: Client, message: Message):
-    """
-    Procesa la entrada de texto del usuario cuando el bot está esperando
-    una configuración (ej. un nuevo nombre, tiempos de corte, etc.).
-    """
     user_id = message.from_user.id
     user_input = message.text.strip()
     
@@ -251,7 +228,7 @@ async def handle_text_input_for_config(client: Client, message: Message):
         return
 
     task_id, menu_type = active_config_data['task_id'], active_config_data['menu_type']
-    del client.user_data[user_id]['active_config'] # Limpiar el estado
+    del client.user_data[user_id]['active_config']
     
     feedback_message = "✅ Configuración guardada."
     try:
@@ -277,9 +254,8 @@ async def handle_text_input_for_config(client: Client, message: Message):
         logger.error(f"Error al procesar entrada de texto para config: {e}")
         feedback_message = "❌ Formato incorrecto o error al guardar."
 
-    await message.reply_html(feedback_message, quote=True)
+    await message.reply(feedback_message, parse_mode=ParseMode.HTML, quote=True)
     
-    # Mostrar de nuevo el menú de procesamiento
     task = await db_instance.get_task(task_id)
     if task:
         keyboard = build_processing_menu(task_id, task['file_type'], task, task.get('original_filename', ''))

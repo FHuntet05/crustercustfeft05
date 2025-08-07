@@ -5,9 +5,9 @@ import time
 import os
 import asyncio
 import re
+import glob
 from datetime import datetime
 from pyrogram.enums import ParseMode
-import glob
 
 from src.db.mongo_manager import db_instance
 from src.helpers.utils import format_status_message, sanitize_filename, escape_html
@@ -75,29 +75,17 @@ async def _progress_callback_pyrogram(current, total, user_id, operation):
     await _edit_status_message(user_id, text)
 
 def _progress_hook_yt_dlp(d, user_id, operation):
+    """
+    Hook para yt-dlp. Se ha simplificado para evitar errores de loop de eventos
+    y se ha desactivado temporalmente la actualización de mensajes desde aquí
+    para garantizar la estabilidad.
+    """
     if d['status'] == 'downloading':
-        total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-        downloaded_bytes = d.get('downloaded_bytes', 0)
-        if total_bytes > 0:
-            speed = d.get('speed', 0)
-            eta = d.get('eta', 0)
-            percentage = (downloaded_bytes / total_bytes) * 100
-            
-            ctx = progress_tracker.get(user_id)
-            if not ctx: return
-
-            # --- CORRECCIÓN DE BUG: 'NoneType' object has no attribute 'mention' ---
-            user_mention = f"ID: {user_id}"
-            if hasattr(ctx.message, 'from_user') and ctx.message.from_user:
-                user_mention = ctx.message.from_user.mention
-
-            text = format_status_message(
-                operation=operation, filename=ctx.task.get('original_filename', 'archivo'),
-                percentage=percentage, processed_bytes=downloaded_bytes, total_bytes=total_bytes,
-                speed=speed, eta=eta, engine="yt-dlp", user_id=user_id,
-                user_mention=user_mention
-            )
-            asyncio.run_coroutine_threadsafe(_edit_status_message(user_id, text), asyncio.get_event_loop())
+        # La lógica de la barra de progreso desde este hook se desactiva
+        # para prevenir el error 'There is no current event loop in thread'.
+        pass
+    elif d['status'] == 'finished':
+        logger.info(f"yt-dlp hook: Descarga finalizada para el usuario {user_id}.")
 
 async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
     duration_info = get_media_info(input_path)
@@ -116,26 +104,26 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
         if not line: break
         line_str = line.decode('utf-8', 'ignore').strip()
         all_stderr_lines.append(line_str)
-        match = time_pattern.search(line_str)
-        if match and total_duration_sec > 0:
-            h, m, s, ms = map(int, match.groups())
-            processed_sec = h * 3600 + m * 60 + s + ms / 100
-            percentage = (processed_sec / total_duration_sec) * 100
-            elapsed = time.time() - start_time
-            speed_factor = processed_sec / elapsed if elapsed > 0 else 0
-            eta = (total_duration_sec - processed_sec) / speed_factor if speed_factor > 0 else 0
-            
-            user_mention = f"ID: {user_id}"
-            if hasattr(ctx.message, 'from_user') and ctx.message.from_user:
-                user_mention = ctx.message.from_user.mention
-            
-            text = format_status_message(
-                operation="⚙️ Codificando...", filename=ctx.task.get('original_filename', 'archivo'),
-                percentage=percentage, processed_bytes=processed_sec, total_bytes=total_duration_sec,
-                speed=speed_factor, eta=eta, engine="FFmpeg", user_id=user_id,
-                user_mention=user_mention
-            )
-            await _edit_status_message(user_id, text)
+        if match := time_pattern.search(line_str):
+            if total_duration_sec > 0:
+                h, m, s, ms = map(int, match.groups())
+                processed_sec = h * 3600 + m * 60 + s + ms / 100
+                percentage = (processed_sec / total_duration_sec) * 100
+                elapsed = time.time() - start_time
+                speed_factor = processed_sec / elapsed if elapsed > 0 else 0
+                eta = (total_duration_sec - processed_sec) / speed_factor if speed_factor > 0 else 0
+                
+                user_mention = f"ID: {user_id}"
+                if hasattr(ctx.message, 'from_user') and ctx.message.from_user:
+                    user_mention = ctx.message.from_user.mention
+                
+                text = format_status_message(
+                    operation="⚙️ Codificando...", filename=ctx.task.get('original_filename', 'archivo'),
+                    percentage=percentage, processed_bytes=processed_sec, total_bytes=total_duration_sec,
+                    speed=speed_factor, eta=eta, engine="FFmpeg", user_id=user_id,
+                    user_mention=user_mention
+                )
+                await _edit_status_message(user_id, text)
             
     await process.wait()
     if process.returncode != 0:
@@ -157,28 +145,31 @@ async def process_task(bot, task: dict):
         if not task: raise Exception("La tarea fue eliminada o no se encontró en la DB.")
         progress_tracker[user_id].task = task
 
-        # --- CORRECCIÓN DE BUG: FFmpeg 'No such file or directory' ---
-        # 1. Definir la ruta base de descarga SIN extensión.
         base_download_path = os.path.join(DOWNLOAD_DIR, f"{task_id}_{sanitize_filename(task.get('original_filename', 'file'))}")
         actual_download_path = ""
 
-        # --- Fase de Descarga ---
         if url := task.get('url'):
             config = task.get('processing_config', {})
-            format_id = config.get('download_format_id', 'best')
-            if not await asyncio.to_thread(downloader.download_from_url, url, base_download_path, format_id, lambda d: _progress_hook_yt_dlp(d, user_id, "📥 Descargando...")):
+            format_id = config.get('download_format_id')
+            if not format_id:
+                 raise Exception("La tarea de URL no tiene 'download_format_id' seleccionado.")
+
+            # Desactivamos el hook de progreso temporalmente para evitar errores de loop
+            if not await asyncio.to_thread(downloader.download_from_url, url, base_download_path, format_id, progress_hook=None):
                 raise Exception("La descarga desde la URL falló.")
             
-            # 2. Después de descargar, buscar el archivo real que yt-dlp creó.
-            # yt-dlp añade extensiones como .mp4, .mkv, etc.
             found_files = glob.glob(f"{base_download_path}.*")
             if not found_files:
-                raise Exception(f"No se encontró el archivo descargado para la base: {base_download_path}")
-            actual_download_path = found_files[0] # Tomar el primer archivo encontrado
+                # A veces yt-dlp guarda el archivo sin añadir extensión si el nombre ya la tiene
+                if os.path.exists(base_download_path):
+                    actual_download_path = base_download_path
+                else:
+                    raise Exception(f"No se encontró el archivo descargado para la base: {base_download_path}")
+            else:
+                actual_download_path = found_files[0]
             files_to_clean.add(actual_download_path)
 
         elif file_id := task.get('file_id'):
-            # Para descargas de Telegram, el nombre es exacto.
             actual_download_path = base_download_path
             files_to_clean.add(actual_download_path)
             progress_tracker[user_id].start_time = time.time()
@@ -189,7 +180,6 @@ async def process_task(bot, task: dict):
         logger.info(f"Descarga de la tarea {task_id} completada en: {actual_download_path}")
         await _edit_status_message(user_id, "⚙️ Preparando para procesar...")
         
-        # --- Fase de Procesamiento (FFmpeg) ---
         config = task.get('processing_config', {})
         file_type = task.get('file_type')
         
@@ -208,7 +198,6 @@ async def process_task(bot, task: dict):
             if await asyncio.to_thread(downloader.download_file, config['thumbnail_url'], thumb_path):
                 thumbnail_to_embed = thumb_path
 
-        # 3. Usar la ruta REAL del archivo (`actual_download_path`) para FFmpeg.
         commands = ffmpeg.build_ffmpeg_command(task, actual_download_path, output_path, thumbnail_to_embed)
         if commands and commands[0]:
             progress_tracker[user_id].start_time = time.time()
