@@ -29,7 +29,6 @@ async def open_task_menu_from_p(client: Client, query: CallbackQuery):
     if not task:
         return await query.message.edit_text("❌ Error: La tarea ya no existe.")
 
-    # Asegurarse de que el mensaje y el teclado se actualicen si se eliminó la foto
     if query.message.photo:
         await query.message.delete()
         await client.send_message(
@@ -122,7 +121,6 @@ async def show_config_menu(client: Client, query: CallbackQuery):
 
     config = task.get('processing_config', {})
     
-    # --- Manejo de acciones directas ---
     if menu_type == "extract_audio":
         await db_instance.update_task_config(task_id, "extract_audio", True)
         await db_instance.update_task(task_id, "status", "queued")
@@ -167,7 +165,7 @@ async def show_config_menu(client: Client, query: CallbackQuery):
         "audiothumb": f"🖼️ <b>Añadir Carátula (Audio)</b>\n\n{greeting_prefix}envíeme la imagen para la carátula.",
         "addsubs": f"➕ <b>Añadir Subtítulos</b>\n\n{greeting_prefix}envíeme el archivo de subtítulos (<code>.srt</code>).",
         "thumbnail_add": f"🖼️ <b>Añadir Miniatura (Video)</b>\n\n{greeting_prefix}envíeme la imagen que será la nueva miniatura.",
-        "replace_audio": f"🎼 <b>Reemplazar Audio</b>\n\n{greeting_prefix}envíeme el nuevo archivo de audio que reemplazará al original." # NUEVO
+        "replace_audio": f"🎼 <b>Reemplazar Audio</b>\n\n{greeting_prefix}envíeme el nuevo archivo de audio que reemplazará al original."
     }
     
     text = menu_texts.get(menu_type, "Configuración no reconocida.")
@@ -176,7 +174,7 @@ async def show_config_menu(client: Client, query: CallbackQuery):
     await query.message.edit_text(text, reply_markup=build_back_button(back_button_cb), parse_mode=ParseMode.HTML)
 
 
-@Client.on_message((filters.photo | filters.document | filters.audio) & filters.reply) # AÑADIDO filters.audio
+@Client.on_message((filters.photo | filters.document | filters.audio) & filters.reply)
 async def handle_media_input(client: Client, message: Message):
     user_id = message.from_user.id
     if not hasattr(client, 'user_data') or not (active_config := client.user_data.get(user_id, {}).get("active_config")): return
@@ -189,12 +187,11 @@ async def handle_media_input(client: Client, message: Message):
         "addsubs": ("subs_file_id", "✅ Subtítulos guardados.", f'config_tracks_{task_id}'),
         "watermark_image": ("watermark", "✅ Imagen recibida. Ahora, elija la posición:", None),
         "thumbnail_add": ("thumbnail_file_id", "✅ Miniatura de video guardada.", f'config_thumbnail_{task_id}'),
-        "replace_audio": ("replace_audio_file_id", "✅ Nuevo audio guardado.", f'config_tracks_{task_id}') # NUEVO
+        "replace_audio": ("replace_audio_file_id", "✅ Nuevo audio guardado.", f'config_tracks_{task_id}')
     }
 
     if menu_type not in handler_map: return
     
-    # Validaciones de tipo de archivo
     if menu_type in ["audiothumb", "watermark_image", "thumbnail_add"] and (not hasattr(media, 'mime_type') or not media.mime_type.startswith("image/")):
         return await message.reply("❌ El archivo no es una imagen.")
     if menu_type == "replace_audio" and (not hasattr(media, 'mime_type') or not media.mime_type.startswith("audio/")):
@@ -203,8 +200,7 @@ async def handle_media_input(client: Client, message: Message):
     key, feedback, next_menu_cb_prefix = handler_map[menu_type]
     
     value_to_set = media.file_id
-    if menu_type == "watermark_image":
-        value_to_set = {"type": "image", "file_id": media.file_id}
+    if menu_type == "watermark_image": value_to_set = {"type": "image", "file_id": media.file_id}
     
     update_query = {"$set": {f"processing_config.{key}": value_to_set}}
     if menu_type == "thumbnail_add":
@@ -215,20 +211,15 @@ async def handle_media_input(client: Client, message: Message):
     
     next_menu_cb = f"{next_menu_cb_prefix}" if next_menu_cb_prefix else None
     keyboard = None
-    if menu_type == "watermark_image":
-        keyboard = build_position_menu(task_id, "config_watermark")
-    elif next_menu_cb:
-        keyboard = build_back_button(next_menu_cb)
+    if menu_type == "watermark_image": keyboard = build_position_menu(task_id, "config_watermark")
+    elif next_menu_cb: keyboard = build_back_button(next_menu_cb)
 
     reply_message = await message.reply(feedback, reply_markup=keyboard)
 
-    # Si volvemos a un menú, lo re-disparamos para mostrarlo
     if next_menu_cb and menu_type != "watermark_image":
         await asyncio.sleep(1)
         await reply_message.delete()
-        # Simula un callback para reabrir el menú anterior
         query_like_obj = type("Query", (), {"data": next_menu_cb, "message": message, "answer": lambda: asyncio.sleep(0), "from_user": message.from_user})()
-        # Adjuntar message al query para que la edición funcione
         query_like_obj.message = await client.send_message(message.chat.id, "Cargando menú...")
         await show_config_menu(client, query_like_obj)
 
@@ -236,12 +227,15 @@ async def handle_media_input(client: Client, message: Message):
 @Client.on_callback_query(filters.regex(r"^set_"))
 async def set_value_callback(client: Client, query: CallbackQuery):
     await query.answer()
-    parts = query.data.split("_"); config_type = parts[1]
-    task_id, value = parts[2], "_".join(parts[3:])
+    parts = query.data.split("_")
+    config_type = parts[1]
+    task_id = parts[2]
     
     if not (task := await db_instance.get_task(task_id)): return await query.message.delete()
-
+    
+    # --- LÓGICA REFACTORIZADA Y ROBUSTA ---
     if config_type == "transcode":
+        value = "_".join(parts[3:])
         if value == "remove_all":
             await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$unset": {"processing_config.transcode": ""}})
         else:
@@ -249,49 +243,56 @@ async def set_value_callback(client: Client, query: CallbackQuery):
             await db_instance.update_task_config(task_id, f"transcode.{key}", new_value)
     
     elif config_type == "watermark":
-        if parts[2] == "remove":
+        action = parts[2]
+        if action == "remove":
             await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$unset": {"processing_config.watermark": ""}})
-        elif parts[2] == "position":
+        elif action == "position":
             position = parts[4]
             await db_instance.update_task_config(task_id, "watermark.position", position)
         
     elif config_type == "thumb_op":
-        op, _ = parts[3], parts[4] # op es 'extract' o 'remove'
+        op = parts[3]
         config = task.get('processing_config', {})
         current_value = config.get(f"{op}_thumbnail", False)
-        
         update_query = {"$set": {f"processing_config.{op}_thumbnail": not current_value}}
-        # Si activamos una opción, desactivamos la otra y la miniatura personalizada
         if not current_value:
             other_op = "remove" if op == "extract" else "extract"
-            update_query["$unset"] = {
-                f"processing_config.{other_op}_thumbnail": "",
-                "processing_config.thumbnail_file_id": ""
-            }
+            update_query["$unset"] = {f"processing_config.{other_op}_thumbnail": "", "processing_config.thumbnail_file_id": ""}
         await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, update_query)
 
-    else:
-        config_updates = {
-            "mute": ("mute_audio", not task.get('processing_config', {}).get('mute_audio', False)),
-            "audioprop": (f"audio_{parts[3]}", parts[4]),
-            "audioeffect": (parts[3], not task.get('processing_config', {}).get(parts[3], False)),
-            "trackopt": (parts[3], not task.get('processing_config', {}).get(parts[3], False))
-        }
-        if config_type in config_updates:
-            key, new_value = config_updates[config_type]
-            await db_instance.update_task_config(task_id, key, new_value)
+    elif config_type == "mute":
+        current_value = task.get('processing_config', {}).get('mute_audio', False)
+        await db_instance.update_task_config(task_id, 'mute_audio', not current_value)
+
+    elif config_type == "audioprop":
+        prop_type, prop_value = parts[3], parts[4]
+        await db_instance.update_task_config(task_id, f"audio_{prop_type}", prop_value)
+
+    elif config_type == "audioeffect":
+        effect = parts[3]
+        current_value = task.get('processing_config', {}).get(effect, False)
+        await db_instance.update_task_config(task_id, effect, not current_value)
     
+    elif config_type == "trackopt":
+        option = parts[3]
+        current_value = task.get('processing_config', {}).get(option, False)
+        await db_instance.update_task_config(task_id, option, not current_value)
+
+    # Recargar la tarea y el teclado correspondiente
     task = await db_instance.get_task(task_id)
     config = task.get('processing_config', {})
     
+    keyboard = build_processing_menu(task_id, task['file_type'], task) # Default
     if config_type == "audioeffect": keyboard = build_audio_effects_menu(task_id, config)
     elif config_type == "trackopt": keyboard = build_tracks_menu(task_id, config)
     elif config_type == "transcode": keyboard = build_transcode_menu(task_id)
-    elif config_type == "watermark": keyboard = build_processing_menu(task_id, task['file_type'], task)
     elif config_type == "thumb_op": keyboard = build_thumbnail_menu(task_id, config)
-    else: keyboard = build_processing_menu(task_id, task['file_type'], task)
-        
-    await query.message.edit_text("🛠️ Configuración actualizada.", reply_markup=keyboard)
+    
+    message_text = "🛠️ Configuración actualizada."
+    if config_type == "watermark" and parts[2] == "position":
+        message_text = "✅ Posición de la marca de agua guardada. Volviendo al menú..."
+    
+    await query.message.edit_text(message_text, reply_markup=keyboard)
 
 
 @Client.on_callback_query(filters.regex(r"^set_dlformat_"))
@@ -302,7 +303,7 @@ async def set_download_format(client: Client, query: CallbackQuery):
 
     task = await db_instance.get_task(task_id)
     if not task: return await query.message.edit_text("❌ Tarea no encontrada.")
-    if query.message.photo: await query.message.delete() # Limpiar la foto con el menú
+    if query.message.photo: await query.message.delete()
 
     final_format_id = format_id
     if format_id == "bestaudio":
@@ -312,23 +313,18 @@ async def set_download_format(client: Client, query: CallbackQuery):
     elif format_id == "mp3":
         final_format_id = downloader.get_best_audio_format_id(task.get('url_info', {}).get('formats', []))
         await db_instance.update_task_config(task_id, "audio_format", "mp3")
-    # Para video, combinar con el mejor audio
     elif task['file_type'] == 'video':
         best_audio_id = downloader.get_best_audio_format_id(task.get('url_info', {}).get('formats', []))
         if best_audio_id:
             final_format_id = f"{format_id}+{best_audio_id}"
 
     await db_instance.update_task_config(task_id, "download_format_id", final_format_id)
-
-    # Recargar la tarea para obtener la config actualizada
-    task = await db_instance.get_task(task_id)
     
-    await client.send_message(
-        chat_id=query.from_user.id,
-        text=f"✅ Calidad seleccionada. Ahora puede procesar o configurar más opciones para:\n<code>{escape_html(task.get('original_filename', '...'))}</code>",
-        reply_markup=build_processing_menu(task_id, task['file_type'], task),
-        parse_mode=ParseMode.HTML
-    )
+    # --- NUEVO FLUJO SIMPLIFICADO ---
+    # Enviar a la cola directamente después de seleccionar la calidad
+    await db_instance.update_task(task_id, "status", "queued")
+    await db_instance.update_task_config(task_id, "initial_message_id", query.message.id)
+    await client.send_message(query.from_user.id, "✅ Calidad seleccionada. La tarea ha sido enviada a la forja...")
 
 
 async def handle_text_input_for_config(client: Client, message: Message):
@@ -337,7 +333,7 @@ async def handle_text_input_for_config(client: Client, message: Message):
     
     task_id, menu_type = active_config['task_id'], active_config['menu_type']
     
-    original_message_id_to_edit = message.reply_to_message.id
+    original_message_to_delete = message.reply_to_message
     
     try:
         feedback = "✅ Configuración guardada."
@@ -364,12 +360,12 @@ async def handle_text_input_for_config(client: Client, message: Message):
             feedback = "✅ Tags de audio actualizados."
         elif menu_type == "watermark_text":
             await db_instance.update_task_config(task_id, "watermark", {"type": "text", "text": user_input})
-            await client.edit_message_text(message.chat.id, original_message_id_to_edit, "✅ Texto recibido. Ahora, elija la posición:", reply_markup=build_position_menu(task_id, "config_watermark"))
+            await original_message_to_delete.edit_text("✅ Texto recibido. Ahora, elija la posición:", reply_markup=build_position_menu(task_id, "config_watermark"))
             await message.delete()
             del client.user_data[user_id]['active_config']
             return
         
-        await client.delete_messages(message.chat.id, [message.id, original_message_id_to_edit])
+        await client.delete_messages(message.chat.id, [message.id, original_message_to_delete.id])
         del client.user_data[user_id]['active_config']
 
     except Exception as e:
