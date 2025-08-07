@@ -1,3 +1,5 @@
+# src/core/ffmpeg.py
+
 import asyncio
 import logging
 import subprocess
@@ -30,16 +32,23 @@ def get_media_info(file_path: str) -> dict:
         logger.error(f"No se pudo obtener info de {file_path} (JSON o genérico): {e}")
         return {}
 
-def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnail_path: str = None, watermark_path: str = None, subs_path: str = None) -> list:
+def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnail_path: str = None, watermark_path: str = None, subs_path: str = None, new_audio_path: str = None) -> list:
     """
-    Construye el comando FFmpeg, ahora con soporte para transcodificación avanzada y descarte de adjuntos.
+    Construye el comando FFmpeg principal, delegando a funciones específicas según la tarea.
     """
     config = task.get('processing_config', {})
-    file_type = task.get('file_type')
-    
-    if 'gif_options' in config: return build_gif_command(config, input_path, output_path)
-    if 'split_criteria' in config: return [build_split_command(config, input_path, output_path)]
 
+    # Delegar a constructores de comandos específicos para tareas terminales
+    if config.get('extract_audio'):
+        return [build_extract_audio_command(input_path, output_path, get_media_info(input_path))]
+    if config.get('replace_audio_file_id') and new_audio_path:
+        return [build_replace_audio_command(input_path, new_audio_path, output_path)]
+    if 'gif_options' in config:
+        return build_gif_command(config, input_path, output_path)
+    if 'split_criteria' in config:
+        return [build_split_command(config, input_path, output_path)]
+
+    # --- Lógica de procesamiento estándar ---
     command_parts = ["ffmpeg", "-y"]
     
     if 'trim_times' in config:
@@ -61,7 +70,7 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
     filter_complex_parts = []
     
     transcode_config = config.get('transcode')
-    if file_type == 'video' and transcode_config and (resolution := transcode_config.get('resolution')):
+    if task.get('file_type') == 'video' and transcode_config and (resolution := transcode_config.get('resolution')):
         video_filters.append(f"scale=-2:{resolution.replace('p', '')}")
     
     if watermark_config := config.get('watermark'):
@@ -85,24 +94,30 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
     else:
         map_opts.append("-map 0:v:0?")
 
-    if file_type == 'video':
+    if task.get('file_type') == 'video':
         if transcode_config:
             codec_opts.extend(["-c:v libx264", "-preset veryfast", "-crf 28", "-c:a aac", "-b:a 128k"])
         else:
             codec_opts.extend(["-c:v copy", "-c:a copy"])
         
-        # --- SOLUCIÓN AL FALLO DE ENCODER DE SUBTÍTULOS ---
-        codec_opts.append("-c:s mov_text") # Especificar siempre el codec de subtítulos para MP4
+        codec_opts.append("-c:s mov_text")
 
         map_opts.append("-map 0:a:0?")
-        if thumbnail_path: map_opts.append(f"-map {thumb_map_idx}"); codec_opts.append("-c:v:1 mjpeg -disposition:v:1 attached_pic")
+        
+        if config.get('remove_thumbnail'):
+            map_opts.append("-map -0:v:1") 
+        elif thumbnail_path:
+            map_idx_str = f"v:{len(map_opts)-2}" if "[outv]" not in map_opts else f"v:{len(map_opts)-1}"
+            map_opts.append(f"-map {thumb_map_idx}")
+            codec_opts.append(f"-c:{map_idx_str} mjpeg -disposition:{map_idx_str} attached_pic")
+
         if config.get('remove_subtitles'): map_opts.append("-map -0:s")
         else: map_opts.append("-map 0:s?")
         if subs_path: map_opts.append(f"-map {subs_map_idx}")
         
         map_opts.append("-map -0:t")
     
-    elif file_type == 'audio':
+    elif task.get('file_type') == 'audio':
         fmt, bitrate = config.get('audio_format', 'mp3'), config.get('audio_bitrate', '192k')
         codec_map = {'mp3': 'libmp3lame', 'flac': 'flac', 'opus': 'libopus'}
         audio_filters = []
@@ -132,8 +147,54 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
     command_parts.append(shlex.quote(output_path))
     
     final_command = " ".join(part for part in command_parts if part)
-    logger.info(f"Comando FFmpeg construido: {final_command}")
+    logger.info(f"Comando FFmpeg estándar construido: {final_command}")
     return [final_command]
+
+# --- NUEVAS FUNCIONES AUXILIARES ---
+
+def build_join_command(file_list_path: str, output_path: str) -> str:
+    """Construye un comando para unir videos desde una lista de archivos."""
+    command = (
+        f"ffmpeg -y -f concat -safe 0 -i {shlex.quote(file_list_path)} "
+        f"-c copy {shlex.quote(output_path)}"
+    )
+    logger.info(f"Comando de unión de videos: {command}")
+    return command
+
+def build_extract_audio_command(input_path: str, output_path_base: str, media_info: dict) -> str:
+    """Construye un comando para extraer la pista de audio."""
+    audio_stream = next((s for s in media_info.get('streams', []) if s.get('codec_type') == 'audio'), None)
+    ext = ".m4a" # Default
+    if audio_stream:
+        codec_name = audio_stream.get('codec_name')
+        ext_map = {'mp3': '.mp3', 'aac': '.m4a', 'opus': '.opus', 'flac': '.flac'}
+        ext = ext_map.get(codec_name, '.m4a')
+    
+    output_path = f"{os.path.splitext(output_path_base)[0]}{ext}"
+    command = (
+        f"ffmpeg -y -i {shlex.quote(input_path)} -vn -c:a copy {shlex.quote(output_path)}"
+    )
+    logger.info(f"Comando de extracción de audio: {command}")
+    return command
+
+def build_replace_audio_command(input_path: str, new_audio_path: str, output_path: str) -> str:
+    """Construye un comando para reemplazar la pista de audio de un video."""
+    command = (
+        f"ffmpeg -y -i {shlex.quote(input_path)} -i {shlex.quote(new_audio_path)} "
+        f"-map 0:v:0 -map 1:a:0 -c:v copy -c:a copy -map 0:s? -map -0:t "
+        f"{shlex.quote(output_path)}"
+    )
+    logger.info(f"Comando de reemplazo de audio: {command}")
+    return command
+
+def build_extract_thumb_command(input_path: str, output_thumb_path: str) -> str:
+    """Construye un comando FFmpeg para extraer la miniatura de un video."""
+    command = (
+        f"ffmpeg -y -i {shlex.quote(input_path)} -an -vf select='eq(pict_type,I)' "
+        f"-vframes 1 -q:v 2 {shlex.quote(output_thumb_path)}"
+    )
+    logger.info(f"Comando de extracción de miniatura: {command}")
+    return command
 
 def build_gif_command(config, input_path, output_path):
     gif_opts = config['gif_options']; duration, fps = gif_opts['duration'], gif_opts['fps']

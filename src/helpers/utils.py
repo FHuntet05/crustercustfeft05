@@ -1,3 +1,5 @@
+# src/helpers/utils.py
+
 import os
 import time
 import asyncio
@@ -8,7 +10,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Cargar el ID del admin desde las variables de entorno de forma segura
 try:
     ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))
 except (TypeError, ValueError):
@@ -16,11 +17,11 @@ except (TypeError, ValueError):
 
 def get_greeting(user_id: int) -> str:
     """Devuelve un saludo personalizado si el usuario es el administrador."""
-    return "Jefe, " if user_id == ADMIN_USER_ID else ""
+    return "Jefe" if user_id == ADMIN_USER_ID else "Usuario"
 
 def format_bytes(size_in_bytes) -> str:
     """Formatea un tamaño en bytes a un formato legible (KB, MB, GB)."""
-    if size_in_bytes is None: return "N/A"
+    if size_in_bytes is None or not isinstance(size_in_bytes, (int, float)): return "N/A"
     try:
         size = float(size_in_bytes)
         if size < 0: return "N/A"
@@ -53,7 +54,7 @@ def escape_html(text: str) -> str:
     if not isinstance(text, str): return ""
     return escape(text, quote=False)
 
-def _create_text_bar(percentage: float, length: int = 10, fill_char: str = '█', empty_char: str = '░') -> str:
+def _create_text_bar(percentage: float, length: int = 20, fill_char: str = '▓', empty_char: str = '░') -> str:
     if not 0 <= percentage <= 100: percentage = max(0, min(100, percentage))
     filled_len = int(length * percentage / 100)
     return fill_char * filled_len + empty_char * (length - filled_len)
@@ -108,15 +109,14 @@ def format_status_message(
     eta: float, engine: str, user_id: int, user_mention: str
 ) -> str:
     """
-    Construye el mensaje de estado con el nuevo formato visual solicitado.
+    Construye el mensaje de estado con el formato visual solicitado.
     """
-    bar = _create_text_bar(percentage, 10)
+    bar = _create_text_bar(percentage, 20)
     short_filename = (filename[:35] + '…') if len(filename) > 38 else filename
-    greeting = get_greeting(user_id).replace(', ', '')
+    greeting = get_greeting(user_id)
     
-    # Header
     op_text = operation.replace('...', '').strip()
-    header = f"╭━━━━❰ <b>{greeting}{op_text}</b> ❱━"
+    header = f"╭─( <b>{greeting}</b> ⚙️ {op_text} )─"
 
     is_processing = "Procesando" in operation
     
@@ -131,12 +131,59 @@ def format_status_message(
 
     lines = [
         header,
-        f"┣⪼ <b>Archivo:</b> <code>{escape_html(short_filename)}</code>",
-        f"┣⪼ <b>Progreso:</b> [{bar}] {percentage:.1f}%",
-        f"┣⪼ <b>Tamaño:</b> {processed_text} de {total_text}",
-        f"┣⪼ <b>Velocidad:</b> {speed_text}",
-        f"┣⪼ <b>ETA:</b> {format_time(eta)}",
-        f"╰━━━━━━━━━━━━━━━➣  motor: {engine}"
+        f"┣❯ <b>Archivo:</b> <code>{escape_html(short_filename)}</code>",
+        f"┣❯ <b>Progreso:</b> [{bar}] {percentage:.1f}%",
+        f"┣❯ <b>Tamaño:</b> {processed_text} de {total_text}",
+        f"┣❯ <b>Velocidad:</b> {speed_text}",
+        f"┣❯ <b>ETA:</b> {format_time(eta)}",
+        f"╰───────────> motor: {engine}"
     ]
     
     return "\n".join(lines)
+
+def generate_summary_caption(task: dict, initial_size: int, final_size: int, final_filename: str) -> str:
+    """Genera un resumen detallado de las operaciones realizadas en una tarea."""
+    config = task.get('processing_config', {})
+    ops = []
+
+    # Detección de operaciones
+    if config.get('final_filename'): ops.append(f"✍️ Renombrado")
+    if config.get('transcode'): ops.append(f"📉 Transcodificado a {config['transcode'].get('resolution', 'N/A')}")
+    if config.get('trim_times'): ops.append(f"✂️ Cortado")
+    if config.get('split_criteria'): ops.append(f"🧩 Dividido en partes")
+    if config.get('gif_options'): ops.append(f"🎞️ Convertido a GIF")
+    if config.get('watermark'): ops.append(f"💧 Marca de agua añadida")
+    if config.get('mute_audio'): ops.append(f"🔇 Audio silenciado")
+    if config.get('remove_subtitles'): ops.append(f"📜 Subtítulos eliminados")
+    if config.get('subs_file_id'): ops.append(f"📜 Subtítulos añadidos")
+    if config.get('remove_thumbnail'): ops.append(f"🖼️ Miniatura eliminada")
+    if config.get('thumbnail_file_id') and task.get('file_type') == 'video': ops.append(f"🖼️ Miniatura cambiada")
+    if config.get('extract_audio'): ops.append(f"🎵 Audio extraído")
+    if config.get('replace_audio_file_id'): ops.append(f"🎼 Audio reemplazado")
+
+    if task.get('file_type') == 'audio':
+        if config.get('audio_format') or config.get('audio_bitrate'):
+            fmt = config.get('audio_format', 'mp3').upper()
+            br = config.get('audio_bitrate', '192k')
+            ops.append(f"🔊 Convertido a {fmt} ({br})")
+        if config.get('audio_tags'): ops.append(f"✍️ Metadatos editados")
+        if config.get('thumbnail_file_id'): ops.append(f"🖼️ Carátula cambiada")
+
+    # Construcción del caption
+    caption_parts = [f"✅ <b>Proceso Completado</b>"]
+    
+    size_reduction_str = ""
+    if final_size > 0 and initial_size > 0:
+        diff = final_size - initial_size
+        diff_str = f"+{format_bytes(abs(diff))}" if diff > 0 else f"-{format_bytes(abs(diff))}"
+        size_reduction_str = f" ({diff_str})"
+    
+    caption_parts.append(f"📦 <code>{escape_html(final_filename)}</code>")
+    caption_parts.append(f"💾 <b>Tamaño:</b> {format_bytes(initial_size)} ➞ {format_bytes(final_size)}{size_reduction_str}")
+
+    if ops:
+        caption_parts.append("\n<b>Operaciones Realizadas:</b>")
+        for op in ops:
+            caption_parts.append(f"  • {op}")
+            
+    return "\n".join(caption_parts)
