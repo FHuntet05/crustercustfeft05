@@ -17,7 +17,7 @@ YOUTUBE_COOKIES_FILE = "youtube_cookies.txt" if os.path.exists("youtube_cookies.
 if YOUTUBE_COOKIES_FILE:
     logger.info("Archivo de cookies de YouTube encontrado. Se utilizará para las peticiones.")
 else:
-    logger.warning("No se encontró 'youtube_cookies.txt'. Las descargas de YouTube podrían fallar o ser de baja calidad.")
+    logger.warning("No se encontró 'youtube_cookies.txt'. Las descargas de YouTube podrían fallar o ser de baja calidad debido a bloqueos.")
 
 spotify_api = None
 if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
@@ -58,18 +58,16 @@ def get_lyrics(url: str) -> str or None:
     ydl_opts = get_common_ydl_opts()
     ydl_opts.update({
         'writesubtitles': True,
-        'subtitleslangs': ['es', 'en', 'es-419'], # Prioridad de idiomas
+        'subtitleslangs': ['es', 'en', 'es-419'],
         'skip_download': True,
         'outtmpl': {'default': temp_lyrics_path}
     })
-    # yt-dlp necesita 'forcejson': False para descargar archivos
     if 'forcejson' in ydl_opts: del ydl_opts['forcejson']
 
     lyrics_filename = ""
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            # El nombre base no siempre coincide con el outtmpl, buscamos archivos generados
+            ydl.extract_info(url, download=True)
             generated_files = [f for f in os.listdir('.') if f.startswith(temp_lyrics_path)]
             
             for ext in ['.es.vtt', '.en.vtt', '.es-419.vtt', '.vtt']:
@@ -82,19 +80,15 @@ def get_lyrics(url: str) -> str or None:
             
             if lyrics_filename:
                 with open(lyrics_filename, 'r', encoding='utf-8') as f:
-                    # Limpieza simple de VTT
                     lines = [line.strip() for line in f if not line.strip().isdigit() and '-->' not in line and line.strip() and "WEBVTT" not in line]
-                    return "\n".join(lines)[:4000] # Limitar a 4000 caracteres
+                    return "\n".join(lines)[:4000]
     except Exception as e:
         logger.warning(f"No se pudo obtener la letra para {url}: {e}")
     finally:
-        # Limpiar todos los archivos temporales generados
         for fname in os.listdir('.'):
             if fname.startswith(temp_lyrics_path):
-                try:
-                    os.remove(fname)
-                except OSError:
-                    pass
+                try: os.remove(fname)
+                except OSError: pass
     return None
 
 def get_url_info(url: str) -> dict or None:
@@ -105,6 +99,14 @@ def get_url_info(url: str) -> dict or None:
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
+            
+            # --- CORRECCIÓN DE ROBUSTEZ ---
+            # Si yt-dlp falla (ej. bloqueo de YouTube), 'info' puede ser None.
+            # Se comprueba aquí para evitar el crash 'AttributeError'.
+            if not info:
+                logger.error(f"yt-dlp no devolvió NINGUNA información para {url}, probablemente por un bloqueo o error de red.")
+                return None
+            
             entry = info
             if 'entries' in info and info.get('entries'):
                 entry = info['entries'][0]
@@ -129,7 +131,8 @@ def get_url_info(url: str) -> dict or None:
                 'thumbnail': entry.get('thumbnail'), 'is_video': is_video, 'formats': formats
             }
     except Exception as e:
-        logger.error(f"yt-dlp no pudo obtener info de {url}: {e}", exc_info=True)
+        # Capturamos el error aquí para que no se propague sin control.
+        logger.error(f"Excepción en get_url_info para {url}: {e}", exc_info=True)
         return None
 
 def download_from_url(url: str, output_path: str, format_id: str = 'best', progress_hook=None) -> bool:
@@ -140,7 +143,7 @@ def download_from_url(url: str, output_path: str, format_id: str = 'best', progr
         'progress_hooks': [progress_hook] if progress_hook else [],
         'noplaylist': True, 'merge_output_format': 'mp4',
         'http_chunk_size': 10485760, 'retries': 5, 'fragment_retries': 5,
-        'writethumbnail': True # Pedimos a yt-dlp que descargue la carátula
+        'writethumbnail': True
     })
     if 'forcejson' in ydl_opts: del ydl_opts['forcejson']
 
@@ -168,7 +171,6 @@ def search_music(query: str, limit: int = 20) -> list:
         except Exception as e:
             logger.warning(f"Búsqueda en Spotify falló: {e}")
 
-    # Si Spotify no dio resultados, o no está configurado, usamos YouTube como fallback.
     if not results:
         logger.info(f"No se encontraron resultados en Spotify para '{query}'. Usando YouTube.")
         try:
@@ -177,7 +179,6 @@ def search_music(query: str, limit: int = 20) -> list:
                 for entry in info['entries']:
                     title = entry.get('title', 'Título Desconocido')
                     artist = entry.get('uploader', 'Artista Desconocido')
-                    # Intentar parsear "Artista - Título" desde el título del video
                     if ' - ' in title:
                         parts = title.split(' - ', 1)
                         if len(parts) == 2: artist, title = parts[0], parts[1]
