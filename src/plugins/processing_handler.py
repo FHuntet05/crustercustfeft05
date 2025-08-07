@@ -10,10 +10,10 @@ from bson.objectid import ObjectId
 
 from src.db.mongo_manager import db_instance
 from src.core import downloader
-from src.helpers.keyboards import (build_back_button, build_processing_menu, 
-                                   build_detailed_format_menu, build_audio_convert_menu, 
-                                   build_audio_effects_menu, build_watermark_menu, 
-                                   build_position_menu, build_audio_metadata_menu, 
+from src.helpers.keyboards import (build_back_button, build_processing_menu,
+                                   build_detailed_format_menu, build_audio_convert_menu,
+                                   build_audio_effects_menu, build_watermark_menu,
+                                   build_position_menu, build_audio_metadata_menu,
                                    build_tracks_menu, build_transcode_menu,
                                    build_thumbnail_menu)
 from src.helpers.utils import get_greeting, escape_html
@@ -213,17 +213,13 @@ async def handle_media_input(client: Client, message: Message):
     else:
         await client.send_message(user_id, f"{feedback}\n\nVolviendo al menú de configuración...", reply_markup=build_processing_menu(task_id, task['file_type'], task))
 
-
-@Client.on_message(filters.text & filters.private)
+# --- ESTA FUNCIÓN YA NO ES UN MANEJADOR DE EVENTOS, SINO UNA FUNCIÓN AUXILIAR ---
 async def handle_text_input(client: Client, message: Message):
     user_id, user_input = message.from_user.id, message.text.strip()
     
-    if user_input.startswith('/'):
-        return message.continue_propagation()
+    active_config = client.user_data.get(user_id, {}).get('active_config')
+    if not active_config: return
 
-    if not hasattr(client, 'user_data') or not (active_config := client.user_data.get(user_id, {}).get('active_config')):
-        return message.continue_propagation()
-    
     task_id, menu_type, source_message_id = active_config['task_id'], active_config['menu_type'], active_config.get('source_message_id')
     
     try:
@@ -259,7 +255,7 @@ async def handle_text_input(client: Client, message: Message):
             await client.send_message(user_id, "✅ Texto recibido. Ahora, elija la posición:", reply_markup=build_position_menu(task_id, "config_watermark"))
             return
         else:
-            return message.continue_propagation()
+            return
         
         del client.user_data[user_id]['active_config']
         await client.delete_messages(user_id, [source_message_id, message.id])

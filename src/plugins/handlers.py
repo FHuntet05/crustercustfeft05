@@ -18,7 +18,7 @@ from src.helpers.keyboards import (build_processing_menu, build_search_results_k
 from src.helpers.utils import (get_greeting, escape_html, sanitize_filename,
                                format_time, format_view_count, format_upload_date)
 from src.core import downloader
-from . import processing_handler
+from . import processing_handler # Importamos el módulo completo
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +220,7 @@ async def pr_delete_command(client: Client, message: Message):
 @Client.on_message(filters.media & filters.private)
 async def any_file_handler(client: Client, message: Message):
     user = message.from_user
-    # La propagación se detiene en el manejador de media de `processing_handler` si es necesario
+    # La propagación se detiene en `processing_handler` si es necesario
     
     original_media_object, file_type = None, None
     if message.video: original_media_object, file_type = message.video, 'video'
@@ -298,18 +298,25 @@ async def handle_music_search(client: Client, message: Message, query: str):
     await status_message.edit_text("✅ He encontrado esto. Seleccione una para descargar:", reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
 @Client.on_message(filters.text & filters.private)
-async def text_handler(client: Client, message: Message):
-    # La lógica de este manejador es ser el "último recurso" para el texto.
-    # Los manejadores de comandos y el manejador de configuración en `processing_handler`
-    # tienen prioridad. Si ellos no detienen la propagación, este se ejecuta.
+async def text_gatekeeper_handler(client: Client, message: Message):
+    user = message.from_user
     text = message.text.strip()
+    
+    if text.startswith('/'):
+        return
+
+    # PRIORIDAD 1: ¿El usuario está en un modo de configuración activa?
+    if hasattr(client, 'user_data') and user.id in client.user_data and client.user_data[user.id].get("active_config"):
+        return await processing_handler.handle_text_input(client, message)
+
+    # PRIORIDAD 2: ¿Es una URL?
     url_match = re.search(URL_REGEX, text)
     if url_match:
         return await handle_url_input(client, message, url_match.group(0))
 
+    # PRIORIDAD 3 (Fallback): Tratar como una búsqueda de música
     await handle_music_search(client, message, text)
 
-# --- CALLBACK HANDLERS PARA OPERACIONES EN LOTE Y BÚSQUEDA ---
 
 @Client.on_callback_query(filters.regex(r"^join_"))
 async def handle_join_actions(client: Client, query: CallbackQuery):
