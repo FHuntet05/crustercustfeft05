@@ -3,6 +3,7 @@
 import logging
 import re
 from datetime import datetime
+import asyncio # NUEVA IMPORTACIÓN
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery
@@ -13,7 +14,7 @@ from src.db.mongo_manager import db_instance
 from src.helpers.keyboards import (build_processing_menu, build_search_results_keyboard,
                                    build_detailed_format_menu, build_profiles_keyboard,
                                    build_confirmation_keyboard, build_batch_profiles_keyboard,
-                                   build_join_selection_keyboard) # NUEVA IMPORTACIÓN
+                                   build_join_selection_keyboard)
 from src.helpers.utils import (get_greeting, escape_html, sanitize_filename,
                                format_time, format_view_count, format_upload_date)
 from src.core import downloader
@@ -134,7 +135,6 @@ async def process_all_command(client: Client, message: Message):
         parse_mode=ParseMode.HTML
     )
 
-# --- NUEVO COMANDO ---
 @Client.on_message(filters.command("join"))
 async def join_videos_command(client: Client, message: Message):
     user = message.from_user
@@ -228,7 +228,8 @@ async def handle_url_input(client: Client, message: Message, url: str):
     status_message = await message.reply(f"🔎 Analizando enlace...", parse_mode=ParseMode.HTML)
     
     try:
-        info = await downloader.get_url_info(url)
+        # --- CORRECCIÓN ---
+        info = await asyncio.to_thread(downloader.get_url_info, url)
         if not info or not info.get('formats'):
             return await status_message.edit_text("❌ No pude obtener información de ese enlace.")
 
@@ -257,7 +258,9 @@ async def handle_url_input(client: Client, message: Message, url: str):
 async def handle_music_search(client: Client, message: Message, query: str):
     user = message.from_user
     status_message = await message.reply(f"🔎 Buscando <code>{escape_html(query)}</code>...", parse_mode=ParseMode.HTML)
-    search_results = await downloader.search_music(query, limit=20)
+    
+    # --- CORRECCIÓN ---
+    search_results = await asyncio.to_thread(downloader.search_music, query, limit=20)
     
     if not search_results:
         return await status_message.edit_text("❌ No encontré resultados para su búsqueda.")
@@ -280,8 +283,10 @@ async def text_handler(client: Client, message: Message):
     
     if text.startswith('/'): return
 
-    if hasattr(client, 'user_data') and user.id in client.user_data and 'active_config' in client.user_data[user.id]:
-        return await processing_handler.handle_text_input_for_config(client, message)
+    if hasattr(client, 'user_data') and user.id in client.user_data and ('active_config' in client.user_data[user.id] or 'join_mode' in client.user_data[user.id]):
+        # No hacer nada si está en un modo de configuración o unión, para evitar que el texto se interprete como una búsqueda.
+        # Los manejadores de reply se encargarán de ello.
+        return
         
     url_match = re.search(URL_REGEX, text)
     if url_match:
@@ -289,7 +294,6 @@ async def text_handler(client: Client, message: Message):
 
     await handle_music_search(client, message, text)
 
-# --- NUEVO HANDLER ---
 @Client.on_callback_query(filters.regex(r"^join_"))
 async def handle_join_actions(client: Client, query: CallbackQuery):
     await query.answer()
@@ -313,7 +317,6 @@ async def handle_join_actions(client: Client, query: CallbackQuery):
         else:
             selected_ids.append(task_id)
         
-        # Actualizar teclado y mensaje
         keyboard = build_join_selection_keyboard(join_data["available_tasks"], selected_ids)
         text = (f"🎬 <b>Modo de Unión de Videos</b>\n\n"
                 f"Seleccionados: <b>{len(selected_ids)} video(s)</b>. "
@@ -325,7 +328,6 @@ async def handle_join_actions(client: Client, query: CallbackQuery):
         if len(selected_ids) < 2:
             return await query.message.edit_text("❌ Necesita seleccionar al menos 2 videos para unir.")
 
-        # Crear la meta-tarea de unión
         join_task_id = await db_instance.add_task(
             user_id=user.id,
             file_type='join_operation',
@@ -334,7 +336,6 @@ async def handle_join_actions(client: Client, query: CallbackQuery):
             status='queued'
         )
 
-        # Eliminar las tareas fuente
         await db_instance.tasks.delete_many({
             "_id": {"$in": [ObjectId(tid) for tid in selected_ids]}
         })
@@ -405,7 +406,8 @@ async def select_song_from_search(client: Client, query: CallbackQuery):
             search_term = search_result.get('search_term', f"{search_result.get('title')} {search_result.get('artist')}")
             url_to_fetch = f"ytsearch:{search_term}"
 
-        info = await downloader.get_url_info(url_to_fetch)
+        # --- CORRECCIÓN ---
+        info = await asyncio.to_thread(downloader.get_url_info, url_to_fetch)
         if not info or not info.get('formats'):
             return await status_message.edit_text("❌ No pude obtener información de ese enlace.")
 
