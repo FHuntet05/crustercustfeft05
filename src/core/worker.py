@@ -116,17 +116,31 @@ async def process_task(bot, task: dict):
         config = task.get('processing_config', {})
 
         if config.get("task_type") == "audio_search":
-            await _edit_status_message(user_id, "🔎 Buscando la mejor fuente de audio...", progress_tracker)
-            info = await asyncio.to_thread(downloader.get_url_info, task['url'])
+            search_term = task['url'].replace('ytsearch1:', '') # Obtener el término de búsqueda original
+            
+            # --- BÚSQUEDA EN CASCADA INTELIGENTE ---
+            search_queries = [
+                f"ytsearch1:{search_term}",
+                f"ytsearch1:{search_term.replace('Audio', 'Lyrics')}",
+                f"ytsearch1:{search_term.replace('Official Audio', '').strip()}"
+            ]
+            info = None
+            for i, query in enumerate(search_queries):
+                await _edit_status_message(user_id, f"🔎 Buscando fuente de audio (Intento {i+1}/3)...", progress_tracker)
+                info = await asyncio.to_thread(downloader.get_url_info, query)
+                if info and info.get('formats'):
+                    logger.info(f"Fuente encontrada en intento {i+1} con query: {query}")
+                    break
+
             if not info or not info.get('formats'):
-                raise Exception("No se pudo obtener información para descargar la canción.")
+                raise Exception("No se pudo obtener información para descargar la canción tras varios intentos.")
 
             task['url'] = info['url']
             task['original_filename'] = sanitize_filename(info['title'])
             await db_instance.update_task(task_id, "url", info['url'])
             await db_instance.update_task(task_id, "original_filename", info['title'])
             
-            best_audio_format = downloader.get_best_audio_format(info['formats']) or 'bestaudio/best'
+            best_audio_format = downloader.get_best_audio_format(info['formats'])
             lyrics = await asyncio.to_thread(downloader.get_lyrics, info['url'])
             
             await db_instance.update_task_config(task_id, "download_format_id", best_audio_format)

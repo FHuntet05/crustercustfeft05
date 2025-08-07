@@ -33,7 +33,7 @@ YOUTUBE_COOKIES_FILE = "youtube_cookies.txt" if os.path.exists("youtube_cookies.
 if YOUTUBE_COOKIES_FILE:
     logger.info("Archivo de cookies de YouTube encontrado.")
 else:
-    logger.warning("No se encontró 'youtube_cookies.txt'.")
+    logger.warning("No se encontró 'youtube_cookies.txt'. La fiabilidad de las descargas de YouTube será menor.")
 
 spotify_api = None
 if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
@@ -88,20 +88,12 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_track
     except ProgressError:
         logger.warning("Fallo de progreso detectado. Reintentando con estrategia inteligente...")
         
-        # --- LÓGICA DE REINTENTO PRECISA ---
-        # Si el format_id original NO contenía un '+', era un formato simple (probablemente audio).
-        # En ese caso, reintentamos con 'bestaudio/best'.
-        # Si contenía un '+', era una combinación video+audio, reintentamos con la misma lógica.
-        is_simple_format = '+' not in format_id
-        retry_format = 'bestaudio/best' if is_simple_format else 'bestvideo+bestaudio/best'
+        is_audio_task = 'ba' in format_id or 'bestaudio' in format_id
+        retry_format = 'ba' if is_audio_task else 'best'
         
         logger.info(f"Estrategia de reintento seleccionada: {retry_format}")
 
-        ydl_opts.update({
-            'format': retry_format,
-            'progress_hooks': [],
-            'logger': None,
-        })
+        ydl_opts.update({ 'format': retry_format, 'progress_hooks': [], 'logger': None })
         
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -122,15 +114,16 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_track
     logger.error(f"yt-dlp finalizó pero no se encontró un archivo final válido en {output_path}.*")
     return None
 
-def get_best_audio_format(formats: list) -> str:
+def get_best_audio_format(formats: list) -> str or None:
+    """Selecciona el mejor formato de solo audio. Devuelve el format_id o 'ba' como fallback."""
     audio_formats = [f for f in formats if f.get('vcodec') in ['none', None] and f.get('acodec') not in ['none', None] and f.get('abr')]
     if not audio_formats:
-        logger.warning("No se encontraron formatos de solo audio, se usará 'bestaudio/best'.")
-        return 'bestaudio/best'
+        logger.warning("No se encontraron formatos de solo audio, se usará el fallback 'ba' (bestaudio).")
+        return 'ba'
     
     best_format = sorted(audio_formats, key=lambda x: x.get('abr', 0), reverse=True)[0]
     logger.info(f"Mejor formato de audio seleccionado: ID {best_format.get('format_id')} con ABR {best_format.get('abr')}k")
-    return best_format.get('format_id', 'bestaudio/best')
+    return best_format.get('format_id')
 
 def get_lyrics(url: str) -> str or None:
     temp_lyrics_path = f"temp_lyrics_{os.urandom(4).hex()}"
