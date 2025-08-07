@@ -149,6 +149,7 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_hook=
         'progress_hooks': [progress_hook] if progress_hook else [],
         'noplaylist': True, 'merge_output_format': 'mkv',
         'http_chunk_size': 10485760, 'retries': 5, 'fragment_retries': 5,
+        'nopart': True,  # Evita el uso de archivos .part para mayor fiabilidad
     })
     if 'forcejson' in ydl_opts: del ydl_opts['forcejson']
 
@@ -156,14 +157,16 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_hook=
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
         
-        # Después de la descarga, encontrar el archivo real, ya que yt-dlp añade la extensión.
+        # Después de la descarga, encontrar el archivo REAL, ignorando archivos temporales.
         found_files = glob.glob(f"{output_path}.*")
-        if found_files:
-            logger.info(f"Descarga de yt-dlp completada. Archivo: {found_files[0]}")
-            return found_files[0]
-        else:
-            logger.error(f"yt-dlp finalizó pero no se encontró el archivo en {output_path}.*")
-            return None
+        for f in found_files:
+            if not f.endswith(".part"):
+                logger.info(f"Descarga de yt-dlp completada. Archivo final: {f}")
+                return f  # ¡Éxito! Devolver la ruta del archivo final.
+
+        # Si el bucle termina, solo se encontraron archivos .part o ningún archivo.
+        logger.error(f"yt-dlp finalizó pero no se encontró un archivo final válido en {output_path}.*")
+        return None
 
     except Exception as e:
         logger.error(f"yt-dlp falló al descargar {url} con formato {format_id}: {e}")
