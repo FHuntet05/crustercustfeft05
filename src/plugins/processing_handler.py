@@ -13,7 +13,8 @@ from src.core import downloader
 from src.helpers.keyboards import (build_back_button, build_processing_menu, 
                                    build_quality_menu, build_detailed_format_menu, 
                                    build_audio_convert_menu, build_audio_effects_menu,
-                                   build_search_results_keyboard, build_panel_keyboard)
+                                   build_search_results_keyboard, build_panel_keyboard,
+                                   build_watermark_menu, build_position_menu)
 from src.helpers.utils import get_greeting, escape_html, sanitize_filename
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,7 @@ async def show_config_menu(client: Client, query: CallbackQuery):
     if menu_type == "audioeffects":
         keyboard = build_audio_effects_menu(task_id, task.get('processing_config', {}))
         return await query.message.edit_text("🎧 Aplique efectos de audio:", reply_markup=keyboard)
+    if menu_type == "watermark": return await query.message.edit_text("💧 Elija un tipo de marca de agua:", reply_markup=build_watermark_menu(task_id))
 
     original_filename = task.get('original_filename', 'archivo')
     greeting_prefix = get_greeting(query.from_user.id)
@@ -106,11 +108,67 @@ async def show_config_menu(client: Client, query: CallbackQuery):
     keyboard = build_back_button(back_button_cb)
     await query.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
+@Client.on_callback_query(filters.regex(r"^set_watermark_"))
+async def set_watermark_handler(client: Client, query: CallbackQuery):
+    """Maneja toda la lógica de los botones del menú de marca de agua."""
+    await query.answer()
+    parts = query.data.split("_")
+    action = parts[2]
+    task_id = "_".join(parts[3:])
+
+    if not hasattr(client, 'user_data'): client.user_data = {}
+    
+    if action == "image":
+        client.user_data[query.from_user.id] = {"active_config": {"task_id": task_id, "menu_type": "watermark_image"}}
+        await query.message.edit_text("🖼️ Por favor, envíeme la imagen que desea usar como marca de agua (preferiblemente PNG).", reply_markup=build_back_button(f"config_watermark_{task_id}"))
+    elif action == "text":
+        client.user_data[query.from_user.id] = {"active_config": {"task_id": task_id, "menu_type": "watermark_text"}}
+        await query.message.edit_text("✏️ Por favor, envíeme el texto que desea usar como marca de agua.", reply_markup=build_back_button(f"config_watermark_{task_id}"))
+    elif action == "remove":
+        await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$unset": {"processing_config.watermark": ""}})
+        task = await db_instance.get_task(task_id)
+        keyboard = build_processing_menu(task_id, task['file_type'], task, task.get('original_filename'))
+        await query.message.edit_text("✅ Marca de agua eliminada de la configuración.", reply_markup=keyboard)
+    elif action == "position":
+        position = parts[4]
+        await db_instance.update_task_config(task_id, "watermark.position", position)
+        task = await db_instance.get_task(task_id)
+        keyboard = build_processing_menu(task_id, task['file_type'], task, task.get('original_filename'))
+        await query.message.edit_text("✅ Posición de la marca de agua guardada.", reply_markup=keyboard)
+
+@Client.on_message((filters.photo | filters.document) & filters.reply)
+async def handle_watermark_image(client: Client, message: Message):
+    """Captura la imagen de la marca de agua enviada por el usuario."""
+    user_id = message.from_user.id
+    if not hasattr(client, 'user_data') or user_id not in client.user_data: return
+    
+    active_config = client.user_data[user_id].get("active_config")
+    if not active_config or active_config.get("menu_type") != "watermark_image": return
+    
+    task_id = active_config["task_id"]
+    media = message.photo or message.document
+    
+    # Validar que sea una imagen
+    if hasattr(media, 'mime_type') and not media.mime_type.startswith("image/"):
+        return await message.reply("❌ El archivo enviado no es una imagen. Por favor, inténtelo de nuevo.")
+
+    await db_instance.update_task_config(task_id, "watermark", {"type": "image", "file_id": media.file_id})
+    del client.user_data[user_id]["active_config"]
+    
+    keyboard = build_position_menu(task_id)
+    await message.reply("✅ Imagen recibida. Ahora, elija la posición:", reply_markup=keyboard)
+
 @Client.on_callback_query(filters.regex(r"^set_"))
 async def set_value_callback(client: Client, query: CallbackQuery):
     parts = query.data.split("_")
-    config_type, task_id, value = parts[1], parts[2], "_".join(parts[3:])
+    config_type = parts[1]
+    
+    # Redirigir si es un callback de marca de agua
+    if config_type == "watermark":
+        return await set_watermark_handler(client, query)
 
+    task_id, value = parts[2], "_".join(parts[3:])
+    
     task = await db_instance.get_task(task_id)
     if not task: 
         await query.answer("❌ Error: Tarea no encontrada.", show_alert=True)
@@ -257,14 +315,19 @@ async def handle_text_input_for_config(client: Client, message: Message):
         return
 
     task_id, menu_type = active_config_data['task_id'], active_config_data['menu_type']
-    del client.user_data[user_id]['active_config']
     
+    if menu_type == "watermark_text":
+        del client.user_data[user_id]['active_config']
+        await db_instance.update_task_config(task_id, "watermark", {"type": "text", "text": user_input})
+        keyboard = build_position_menu(task_id)
+        return await message.reply("✅ Texto recibido. Ahora, elija la posición:", reply_markup=keyboard)
+
+    del client.user_data[user_id]['active_config']
     feedback_message = "✅ Configuración guardada."
     try:
         if menu_type == "rename":
             await db_instance.update_task_config(task_id, "final_filename", user_input)
             feedback_message = f"✅ Nombre actualizado a <code>{escape_html(user_input)}</code>."
-        
         elif menu_type == "trim":
             time_regex = re.compile(r"^\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*$")
             if not time_regex.match(user_input):
@@ -272,11 +335,9 @@ async def handle_text_input_for_config(client: Client, message: Message):
             else:
                 await db_instance.update_task_config(task_id, "trim_times", user_input)
                 feedback_message = f"✅ Tiempos de corte guardados: <code>{escape_html(user_input)}</code>."
-
         elif menu_type == "split":
             await db_instance.update_task_config(task_id, "split_criteria", user_input)
             feedback_message = f"✅ Criterio de división guardado: <code>{escape_html(user_input)}</code>."
-        
         elif menu_type == "gif":
             parts = user_input.split()
             if len(parts) != 2:
@@ -284,7 +345,6 @@ async def handle_text_input_for_config(client: Client, message: Message):
             duration, fps = float(parts[0]), int(parts[1])
             await db_instance.update_task_config(task_id, "gif_options", {"duration": duration, "fps": fps})
             feedback_message = f"✅ GIF se creará con {duration}s a {fps}fps."
-        
         elif menu_type == "audiotags":
             title, artist = [part.strip() for part in user_input.split('-', 1)]
             await db_instance.update_task_config(task_id, "audio_tags", {"title": title, "artist": artist})

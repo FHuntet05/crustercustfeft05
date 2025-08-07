@@ -37,7 +37,7 @@ def build_processing_menu(task_id: str, file_type: str, task_data: dict, filenam
         keyboard.extend([
             [InlineKeyboardButton(quality_text, callback_data=f"config_quality_{task_id}")],
             [InlineKeyboardButton("✂️ Cortar", callback_data=f"config_trim_{task_id}"), InlineKeyboardButton("🧩 Dividir", callback_data=f"config_split_{task_id}")],
-            [InlineKeyboardButton("🎞️ a GIF", callback_data=f"config_gif_{task_id}"), InlineKeyboardButton("💧 Marca de Agua", callback_data="feature_not_implemented")],
+            [InlineKeyboardButton("🎞️ a GIF", callback_data=f"config_gif_{task_id}"), InlineKeyboardButton("💧 Marca de Agua", callback_data=f"config_watermark_{task_id}")],
             [InlineKeyboardButton(mute_text, callback_data=f"set_mute_{task_id}_toggle")],
         ])
     elif file_type == 'audio':
@@ -173,6 +173,30 @@ def build_audio_effects_menu(task_id: str, config: dict) -> InlineKeyboardMarkup
         [InlineKeyboardButton(f"🐌 Slowed {slowed}", callback_data=f"set_audioeffect_{task_id}_slowed_toggle")],
         [InlineKeyboardButton(f"🌌 Reverb {reverb}", callback_data=f"set_audioeffect_{task_id}_reverb_toggle")],
         [InlineKeyboardButton("🔙 Volver", callback_data=f"task_process_{task_id}")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def build_watermark_menu(task_id: str) -> InlineKeyboardMarkup:
+    """Construye el menú de opciones para la marca de agua."""
+    keyboard = [
+        [InlineKeyboardButton("🖼️ Añadir Imagen", callback_data=f"set_watermark_image_{task_id}")],
+        [InlineKeyboardButton("✏️ Añadir Texto", callback_data=f"set_watermark_text_{task_id}")],
+        [InlineKeyboardButton("❌ Quitar Marca de Agua", callback_data=f"set_watermark_remove_{task_id}")],
+        [InlineKeyboardButton("🔙 Volver", callback_data=f"task_process_{task_id}")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def build_position_menu(task_id: str) -> InlineKeyboardMarkup:
+    """Construye el menú de selección de posición para la marca de agua."""
+    keyboard = [
+        [
+            InlineKeyboardButton("↖️ Superior Izquierda", callback_data=f"set_watermark_position_{task_id}_top_left"),
+            InlineKeyboardButton("↗️ Superior Derecha", callback_data=f"set_watermark_position_{task_id}_top_right")
+        ],
+        [
+            InlineKeyboardButton("↙️ Inferior Izquierda", callback_data=f"set_watermark_position_{task_id}_bottom_left"),
+            InlineKeyboardButton("↘️ Inferior Derecha", callback_data=f"set_watermark_position_{task_id}_bottom_right")
+        ]
     ]
     return InlineKeyboardMarkup(keyboard)
 

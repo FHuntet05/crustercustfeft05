@@ -66,6 +66,19 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
         bitrate = config.get('audio_bitrate', '192k')
         codec_map = {'mp3': 'libmp3lame', 'flac': 'flac', 'opus': 'libopus'}
         
+        # --- NUEVA LÓGICA DE EFECTOS DE AUDIO ---
+        audio_filters = []
+        if config.get('slowed'):
+            audio_filters.append("atempo=0.8")
+        if config.get('reverb'):
+            # Formato: aecho=in_gain:out_gain:delays:decays
+            audio_filters.append("aecho=0.8:0.9:1000:0.3")
+
+        if audio_filters:
+            filter_string = ",".join(audio_filters)
+            codec_opts.append(f"-af {shlex.quote(filter_string)}")
+        # --- FIN DE LA NUEVA LÓGICA ---
+        
         codec_opts.append("-vn")
         
         codec_opts.append(f"-c:a {codec_map.get(fmt, 'libmp3lame')}")
