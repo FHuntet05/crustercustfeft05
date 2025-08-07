@@ -32,7 +32,7 @@ def get_media_info(file_path: str) -> dict:
 
 def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnail_path: str = None, watermark_path: str = None, subs_path: str = None) -> list:
     """
-    Construye el comando FFmpeg, ahora con soporte para transcodificación avanzada.
+    Construye el comando FFmpeg, ahora con soporte para transcodificación avanzada y descarte de adjuntos.
     """
     config = task.get('processing_config', {})
     file_type = task.get('file_type')
@@ -57,58 +57,48 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
     codec_opts, map_opts, metadata_opts = [], [], []
     video_filters = []
     
-    # --- LÓGICA DE TRANSCODIFICACIÓN Y FILTROS ---
-    transcode_config = config.get('transcode')
-    
-    # Inicia la cadena de filtros de video
     video_chain = "[0:v]"
     filter_complex_parts = []
-
-    # 1. Aplicar filtros de video (escala, etc.)
+    
+    transcode_config = config.get('transcode')
     if file_type == 'video' and transcode_config and (resolution := transcode_config.get('resolution')):
-        height = resolution.replace('p', '')
-        video_filters.append(f"scale=-2:{height}")
+        video_filters.append(f"scale=-2:{resolution.replace('p', '')}")
     
     if watermark_config := config.get('watermark'):
         if watermark_config.get('type') == 'text':
             text = watermark_config.get('text', '').replace("'", "’").replace(':', r'\:')
             pos_map = {'top_left': 'x=10:y=10', 'top_right': 'x=w-text_w-10:y=10', 'bottom_left': 'x=10:y=h-text_h-10', 'bottom_right': 'x=w-text_w-10:y=h-text_h-10'}
-            position = watermark_config.get('position', 'top_right')
-            video_filters.append(f"drawtext=text='{text}':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.5:boxborderw=5:{pos_map.get(position)}")
+            video_filters.append(f"drawtext=text='{text}':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.5:boxborderw=5:{pos_map.get(watermark_config.get('position', 'top_right'))}")
 
     if video_filters:
-        filter_str = ",".join(video_filters)
-        filter_complex_parts.append(f"{video_chain}{filter_str}[filtered_v]")
+        filter_complex_parts.append(f"{video_chain}{','.join(video_filters)}[filtered_v]")
         video_chain = "[filtered_v]"
     
-    # 2. Aplicar overlay de marca de agua de imagen (que es un filtro complejo)
     if config.get('watermark', {}).get('type') == 'image' and watermark_path:
         pos_map = {'top_left': '10:10', 'top_right': 'W-w-10:10', 'bottom_left': '10:H-h-10', 'bottom_right': 'W-w-10:H-h-10'}
-        position = config['watermark'].get('position', 'top_right')
-        filter_complex_parts.append(f"{video_chain}[{watermark_map_idx}:v]overlay={pos_map.get(position)}[outv]")
+        filter_complex_parts.append(f"{video_chain}[{watermark_map_idx}:v]overlay={pos_map.get(config['watermark'].get('position', 'top_right'))}[outv]")
         map_opts.append("-map [outv]")
     elif filter_complex_parts:
-        # Si hubo filtros pero no overlay, el último filtro es la salida
         last_filter = filter_complex_parts.pop()
         filter_complex_parts.append(last_filter.replace('[filtered_v]', '[outv]'))
         map_opts.append("-map [outv]")
     else:
-        # No hay filtros complejos, mapeo directo
-        map_opts.append("-map 0:v?")
+        map_opts.append("-map 0:v:0?") # Mapear solo el primer stream de video
 
-    # 3. Definir códecs basados en si se transcodifica o no
     if file_type == 'video':
         if transcode_config:
-            codec_opts.extend(["-c:v libx264", "-preset veryfast", "-crf 28"])
-            codec_opts.extend(["-c:a aac", "-b:a 128k"])
+            codec_opts.extend(["-c:v libx264", "-preset veryfast", "-crf 28", "-c:a aac", "-b:a 128k"])
         else:
             codec_opts.extend(["-c:v copy", "-c:a copy"])
         
-        map_opts.append("-map 0:a?")
+        map_opts.append("-map 0:a:0?") # Mapear solo el primer stream de audio
         if thumbnail_path: map_opts.append(f"-map {thumb_map_idx}"); codec_opts.append("-c:v:1 mjpeg -disposition:v:1 attached_pic")
         if config.get('remove_subtitles'): map_opts.append("-map -0:s")
         else: map_opts.append("-map 0:s?")
         if subs_path: map_opts.append(f"-map {subs_map_idx}"); codec_opts.append("-c:s mov_text")
+        
+        # --- SOLUCIÓN AL FALLO DE ENCODER ---
+        map_opts.append("-map -0:t") # Ignorar explícitamente todos los adjuntos (fuentes ttf, etc.)
     
     elif file_type == 'audio':
         fmt, bitrate = config.get('audio_format', 'mp3'), config.get('audio_bitrate', '192k')
@@ -119,7 +109,7 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
         if audio_filters: codec_opts.append(f"-af {shlex.quote(','.join(audio_filters))}")
         codec_opts.extend(["-vn", f"-c:a {codec_map.get(fmt, 'libmp3lame')}"])
         if fmt != 'flac': codec_opts.append(f"-b:a {bitrate}")
-        map_opts = ["-map 0:a:0"] # Resetear mapeo para audio
+        map_opts = ["-map 0:a:0"]
         if 'audio_tags' in config:
             tags = config['audio_tags']
             if tags.get('title'): metadata_opts.append(f"-metadata title={shlex.quote(tags['title'])}")
@@ -132,9 +122,7 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
         codec_opts = [opt for opt in codec_opts if '-c:a' not in opt and '-b:a' not in opt]
         map_opts = [opt for opt in map_opts if '0:a' not in opt]; codec_opts.append("-an")
 
-    # Ensamblaje final del comando
-    if filter_complex_parts:
-        command_parts.append(f'-filter_complex "{";".join(filter_complex_parts)}"')
+    if filter_complex_parts: command_parts.append(f'-filter_complex "{";".join(filter_complex_parts)}"')
 
     command_parts.extend(codec_opts)
     command_parts.extend(metadata_opts)

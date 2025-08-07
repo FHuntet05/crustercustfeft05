@@ -39,15 +39,23 @@ async def handle_task_actions(client: Client, query: CallbackQuery):
     parts = query.data.split("_")
     action, task_id = parts[1], "_".join(parts[2:])
 
-    if action == "manual":
-        if parts[2] == "config":
-             task = await db_instance.get_task(task_id)
-             if not task: return await query.message.edit_text("❌ Tarea no encontrada.")
-             await query.message.edit_text(f"✅ Tarea añadida al panel. Use `/p {await db_instance.tasks.count_documents({'user_id': query.from_user.id, 'status': 'pending_processing'})}` para configurarla.")
+    if action == "manual" and parts[2] == "config":
+        task = await db_instance.get_task(task_id)
+        if not task: return await query.message.edit_text("❌ Tarea no encontrada.")
+        
+        count = await db_instance.tasks.count_documents({'user_id': query.from_user.id, 'status': 'pending_processing'})
+        await query.message.edit_text(f"✅ Tarea añadida al panel. Use `/p {count}` para configurarla.")
 
     elif action == "queuesingle":
-        await db_instance.update_task(task_id, "status", "queued")
+        # --- SOLUCIÓN AL PROGRESO VISUAL ---
+        # 1. Guardar el ID del mensaje actual para que el worker lo edite.
+        await db_instance.update_task_config(task_id, "status_message_id", query.message.id)
+        
+        # 2. Editar el mensaje a un estado de "En cola".
         await query.message.edit_text("🔥 Tarea enviada a la forja. El procesamiento comenzará en breve.")
+        
+        # 3. Poner la tarea en la cola para que el worker la procese.
+        await db_instance.update_task(task_id, "status", "queued")
 
     elif action == "delete":
         await db_instance.delete_task_by_id(task_id)
@@ -67,7 +75,13 @@ async def handle_profile_and_panel_actions(client: Client, query: CallbackQuery)
             if not (preset := await db_instance.get_preset_by_id(preset_id)):
                 return await query.message.edit_text("❌ El perfil seleccionado ya no existe.")
             
-            await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": {"processing_config": preset.get('config_data', {}), "status": "queued"}})
+            # --- SOLUCIÓN AL PROGRESO VISUAL (PARA PERFILES) ---
+            await db_instance.update_task_config(task_id, "status_message_id", query.message.id)
+            
+            await db_instance.tasks.update_one(
+                {"_id": ObjectId(task_id)},
+                {"$set": {"processing_config": preset.get('config_data', {}), "status": "queued"}}
+            )
             await query.message.edit_text(f"✅ Perfil '<b>{preset['preset_name'].capitalize()}</b>' aplicado. La tarea ha sido enviada a la forja.", parse_mode=ParseMode.HTML)
         
         elif action == "save" and parts[2] == "request":
@@ -144,15 +158,13 @@ async def set_value_callback(client: Client, query: CallbackQuery):
     
     if not (task := await db_instance.get_task(task_id)): return await query.message.delete()
 
-    # --- CORRECCIÓN DE LÓGICA ---
     if config_type == "transcode":
         if value == "remove_all":
             await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$unset": {"processing_config.transcode": ""}})
         else:
-            key, new_value = value.split("_", 1) # Ej: "resolution_1080p" -> ("resolution", "1080p")
+            key, new_value = value.split("_", 1)
             await db_instance.update_task_config(task_id, f"transcode.{key}", new_value)
     else:
-        # Lógica anterior para otros toggles y propiedades
         config_updates = { "mute": ("mute_audio", not task.get('processing_config', {}).get('mute_audio', False)), "audioprop": (f"audio_{parts[3]}", parts[4]), "audioeffect": (parts[3], not task.get('processing_config', {}).get(parts[3], False)), "trackopt": (parts[3], not task.get('processing_config', {}).get(parts[3], False)) }
         if config_type in config_updates:
             key, new_value = config_updates[config_type]
@@ -161,11 +173,9 @@ async def set_value_callback(client: Client, query: CallbackQuery):
     task = await db_instance.get_task(task_id)
     config = task.get('processing_config', {})
     
-    # --- CORRECCIÓN DE NAVEGACIÓN ---
-    # Decidir a qué menú volver después de la acción
     if config_type == "audioeffect": keyboard = build_audio_effects_menu(task_id, config)
     elif config_type == "trackopt": keyboard = build_tracks_menu(task_id, config)
-    elif config_type == "transcode": keyboard = build_transcode_menu(task_id) # Volver al menú de transcode
+    elif config_type == "transcode": keyboard = build_transcode_menu(task_id)
     else: keyboard = build_processing_menu(task_id, task['file_type'], task)
         
     await query.message.edit_text("🛠️ Configuración actualizada.", reply_markup=keyboard)
