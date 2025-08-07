@@ -3,7 +3,6 @@
 import logging
 import re
 from datetime import datetime
-from uuid import uuid4
 
 from pyrogram import Client, filters
 from pyrogram.types import Message
@@ -18,7 +17,6 @@ from . import processing_handler # Importar para registrar los handlers de texto
 logger = logging.getLogger(__name__)
 
 URL_REGEX = r'(https?://[^\s]+)'
-FORWARD_CHANNEL_ID = -1001648782942 # Reemplazar con el ID de su canal privado si es necesario
 
 @Client.on_message(filters.command("start"))
 async def start_command(client: Client, message: Message):
@@ -30,10 +28,10 @@ async def start_command(client: Client, message: Message):
         f"A sus órdenes, {greeting_prefix}bienvenido a la <b>Suite de Medios</b>.\n\n"
         "Soy su Asistente personal, Forge. Estoy listo para procesar sus archivos.\n\n"
         "<b>¿Cómo empezar?</b>\n"
+        "• <b>Para buscar música:</b> simplemente escriba el nombre.\n"
         "• <b>Envíe un archivo:</b> video, audio o documento.\n"
         "• <b>Pegue un enlace:</b> de YouTube, etc.\n"
         "• <b>Use /panel:</b> para ver su mesa de trabajo y procesar archivos.\n"
-        "• <b>Use /findmusic [nombre]:</b> para buscar y descargar canciones.\n"
     )
     await message.reply_html(start_message)
 
@@ -51,54 +49,6 @@ async def panel_command(client: Client, message: Message):
     keyboard = build_panel_keyboard(pending_tasks)
     response_text = f"📋 <b>{greeting_prefix}Su mesa de trabajo actual:</b>"
     await message.reply_html(response_text, reply_markup=keyboard)
-
-@Client.on_message(filters.command("findmusic"))
-async def findmusic_command(client: Client, message: Message):
-    """Busca música y guarda los resultados en la DB para una selección segura y paginada."""
-    user = message.from_user
-    greeting_prefix = get_greeting(user.id)
-    query = message.text.split(None, 1)[1] if len(message.command) > 1 else ""
-
-    if not query:
-        return await message.reply_html("Por favor, deme algo que buscar. Uso: <code>/findmusic [nombre]</code>")
-    
-    status_message = await message.reply_html(f"🔎 {greeting_prefix}Buscando <code>{escape_html(query)}</code>...")
-    
-    search_results = downloader.search_music(query, limit=20)
-    
-    if not search_results:
-        return await status_message.edit_text(f"❌ {greeting_prefix}No encontré resultados para su búsqueda.")
-
-    # Crear una sesión de búsqueda para agrupar los resultados
-    search_id = str((await db_instance.search_sessions.insert_one({
-        'user_id': user.id,
-        'query': query,
-        'created_at': datetime.utcnow()
-    })).inserted_id)
-
-    # Preparar resultados para insertar en la DB, asociándolos a la sesión
-    docs_to_insert = []
-    for res in search_results:
-        res['created_at'] = datetime.utcnow()
-        res['search_id'] = search_id # Vincular resultado a la sesión
-        res['user_id'] = user.id # Guardar el user_id para seguridad
-        docs_to_insert.append(res)
-    
-    if docs_to_insert:
-        await db_instance.search_results.insert_many(docs_to_insert)
-
-    # Recuperar los resultados recién insertados para obtener sus _id
-    all_results_from_db = await db_instance.search_results.find({"search_id": search_id}).to_list(length=100)
-
-    keyboard = build_search_results_keyboard(all_results_from_db, search_id, page=1)
-    
-    response_text = f"✅ {greeting_prefix}He encontrado esto. Seleccione una para descargar:"
-    await status_message.edit_text(
-        response_text,
-        reply_markup=keyboard,
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True
-    )
 
 @Client.on_message(filters.media)
 async def any_file_handler(client: Client, message: Message):
@@ -139,16 +89,19 @@ async def any_file_handler(client: Client, message: Message):
 @Client.on_message(filters.text & ~filters.command)
 async def text_handler(client: Client, message: Message):
     """
-    Maneja entradas de texto. Determina si es una URL o una respuesta a una configuración.
+    Dispatcher de texto:
+    1. Si es URL -> Procesa URL.
+    2. Si es respuesta a config -> Procesa config.
+    3. Si no, es búsqueda de música.
     """
     user = message.from_user
     text = message.text.strip()
+    greeting_prefix = get_greeting(user.id)
 
-    # 1. Comprobar si es una URL
-    match = re.search(URL_REGEX, text)
-    if match:
-        url = match.group(0)
-        greeting_prefix = get_greeting(user.id)
+    # --- 1. ¿Es una URL? ---
+    url_match = re.search(URL_REGEX, text)
+    if url_match:
+        url = url_match.group(0)
         status_message = await message.reply_html(f"🔎 {greeting_prefix}Analizando enlace...")
         
         info = downloader.get_url_info(url)
@@ -178,9 +131,40 @@ async def text_handler(client: Client, message: Message):
             disable_web_page_preview=True
         )
 
-    # 2. Si no es URL, comprobar si es una respuesta a una configuración
-    if not hasattr(client, 'user_data'):
-        client.user_data = {}
-        
+    # --- 2. ¿Es una respuesta a un menú de configuración? ---
+    if not hasattr(client, 'user_data'): client.user_data = {}
     if user.id in client.user_data and 'active_config' in client.user_data[user.id]:
-        await processing_handler.handle_text_input_for_config(client, message)
+        return await processing_handler.handle_text_input_for_config(client, message)
+
+    # --- 3. Si no es nada de lo anterior, es una búsqueda de música ---
+    query = text
+    status_message = await message.reply_html(f"🔎 {greeting_prefix}Buscando <code>{escape_html(query)}</code>...")
+    
+    search_results = downloader.search_music(query, limit=20)
+    
+    if not search_results:
+        return await status_message.edit_text(f"❌ {greeting_prefix}No encontré resultados para su búsqueda.")
+
+    search_id = str((await db_instance.search_sessions.insert_one({
+        'user_id': user.id, 'query': query, 'created_at': datetime.utcnow()
+    })).inserted_id)
+
+    docs_to_insert = []
+    for res in search_results:
+        res.update({'search_id': search_id, 'user_id': user.id, 'created_at': datetime.utcnow()})
+        docs_to_insert.append(res)
+    
+    if docs_to_insert:
+        await db_instance.search_results.insert_many(docs_to_insert)
+
+    all_results_from_db = await db_instance.search_results.find({"search_id": search_id}).to_list(length=100)
+
+    keyboard = build_search_results_keyboard(all_results_from_db, search_id, page=1)
+    
+    response_text = f"✅ {greeting_prefix}He encontrado esto. Seleccione una para descargar:"
+    await status_message.edit_text(
+        response_text,
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
