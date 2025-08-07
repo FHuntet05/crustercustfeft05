@@ -205,7 +205,6 @@ def build_batch_profiles_keyboard(presets: list) -> InlineKeyboardMarkup:
     keyboard.append([InlineKeyboardButton("❌ Cancelar", callback_data="batch_cancel")])
     return InlineKeyboardMarkup(keyboard)
 
-# --- NUEVA FUNCIÓN ---
 def build_join_selection_keyboard(tasks: list, selected_ids: list) -> InlineKeyboardMarkup:
     """Construye el teclado interactivo para seleccionar videos a unir."""
     keyboard = []
@@ -219,7 +218,7 @@ def build_join_selection_keyboard(tasks: list, selected_ids: list) -> InlineKeyb
         button_text = f"{prefix}{escape_html(short_name)}"
         
         row.append(InlineKeyboardButton(button_text, callback_data=f"join_select_{task_id}"))
-        if len(row) == 1: # Un botón por fila para mayor claridad
+        if len(row) == 1:
             keyboard.append(row)
             row = []
     if row:
@@ -232,6 +231,39 @@ def build_join_selection_keyboard(tasks: list, selected_ids: list) -> InlineKeyb
     keyboard.append(action_row)
 
     return InlineKeyboardMarkup(keyboard)
+
+# --- NUEVA FUNCIÓN ---
+def build_zip_selection_keyboard(tasks: list, selected_ids: list) -> InlineKeyboardMarkup:
+    """Construye el teclado interactivo para seleccionar tareas a comprimir."""
+    keyboard = []
+    row = []
+    
+    emoji_map = {'video': '🎬', 'audio': '🎵', 'document': '📄', 'join_operation': '🔗'}
+
+    for task in tasks:
+        task_id = str(task['_id'])
+        filename = task.get('original_filename', 'Tarea sin nombre')
+        short_name = (filename[:45] + '...') if len(filename) > 48 else filename
+        
+        emoji = emoji_map.get(task.get('file_type'), '📦')
+        prefix = "✅ " if task_id in selected_ids else f"{emoji} "
+        button_text = f"{prefix}{escape_html(short_name)}"
+        
+        row.append(InlineKeyboardButton(button_text, callback_data=f"zip_select_{task_id}"))
+        if len(row) == 1:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+        
+    action_row = []
+    if selected_ids:
+        action_row.append(InlineKeyboardButton("✅ Comprimir Seleccionados", callback_data="zip_confirm"))
+    action_row.append(InlineKeyboardButton("❌ Cancelar", callback_data="zip_cancel"))
+    keyboard.append(action_row)
+
+    return InlineKeyboardMarkup(keyboard)
+
 
 def build_confirmation_keyboard(action_callback: str, cancel_callback: str) -> InlineKeyboardMarkup:
     """Crea un teclado de confirmación genérico (Sí/No)."""

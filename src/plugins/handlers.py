@@ -14,7 +14,7 @@ from src.db.mongo_manager import db_instance
 from src.helpers.keyboards import (build_processing_menu, build_search_results_keyboard,
                                    build_detailed_format_menu, build_profiles_keyboard,
                                    build_confirmation_keyboard, build_batch_profiles_keyboard,
-                                   build_join_selection_keyboard)
+                                   build_join_selection_keyboard, build_zip_selection_keyboard) # NUEVA IMPORTACIÓN
 from src.helpers.utils import (get_greeting, escape_html, sanitize_filename,
                                format_time, format_view_count, format_upload_date)
 from src.core import downloader
@@ -48,12 +48,13 @@ async def start_command(client: Client, message: Message):
     greeting_prefix = get_greeting(user.id)
     await db_instance.get_user_settings(user.id)
     start_message = (
-        f"A sus órdenes, {greeting_prefix}, bienvenido a la <b>Suite de Medios v2.4</b>.\n\n"
-        "He corregido y mejorado los flujos de trabajo.\n\n"
+        f"A sus órdenes, {greeting_prefix}, bienvenido a la <b>Suite de Medios v2.5</b>.\n\n"
+        "Ahora puedo comprimir archivos en ZIP.\n\n"
         "<b>Comandos Principales:</b>\n"
         "• /panel - Muestra su mesa de trabajo.\n"
         "• /p <code>[ID]</code> - Abre el menú de una tarea.\n"
-        "• /join - Inicia el modo para unir videos del panel.\n"
+        "• /join - Une videos del panel.\n"
+        "• /zip - Comprime tareas del panel en un ZIP.\n"
         "• /p_all - Procesa todas las tareas del panel a la vez.\n"
         "• /profiles - Gestiona sus perfiles.\n\n"
         "Envíe un archivo, una búsqueda o un enlace para comenzar."
@@ -85,6 +86,7 @@ async def panel_command(client: Client, message: Message):
 
     response_lines.append(f"Use /p <code>[ID]</code> para configurar una tarea (ej: <code>/p 1</code>).")
     response_lines.append(f"Use /join para unir videos del panel.")
+    response_lines.append(f"Use /zip para comprimir tareas.")
     response_lines.append(f"Use /p_all para procesar todo el panel.")
     response_lines.append(f"Use /p clean para limpiar todas las tareas.")
     await message.reply("\n".join(response_lines), parse_mode=ParseMode.HTML)
@@ -139,28 +141,42 @@ async def process_all_command(client: Client, message: Message):
 async def join_videos_command(client: Client, message: Message):
     user = message.from_user
     video_tasks = await db_instance.tasks.find({
-        "user_id": user.id,
-        "status": "pending_processing",
-        "file_type": "video"
+        "user_id": user.id, "status": "pending_processing", "file_type": "video"
     }).to_list(length=100)
 
     if len(video_tasks) < 2:
         return await message.reply("Necesita al menos 2 videos en su panel para unirlos.")
 
     if not hasattr(client, 'user_data'): client.user_data = {}
+    client.user_data[user.id] = { "join_mode": { "available_tasks": video_tasks, "selected_ids": [] } }
+
+    keyboard = build_join_selection_keyboard(video_tasks, [])
+    await message.reply(
+        "🎬 <b>Modo de Unión de Videos</b>\n\nSeleccione los videos que desea unir en el orden deseado.",
+        reply_markup=keyboard, parse_mode=ParseMode.HTML
+    )
+
+# --- NUEVO COMANDO ---
+@Client.on_message(filters.command("zip"))
+async def zip_files_command(client: Client, message: Message):
+    user = message.from_user
+    all_tasks = await db_instance.get_pending_tasks(user.id)
+
+    if not all_tasks:
+        return await message.reply("No hay tareas en su panel para comprimir.")
+
+    if not hasattr(client, 'user_data'): client.user_data = {}
     client.user_data[user.id] = {
-        "join_mode": {
-            "available_tasks": video_tasks,
+        "zip_mode": {
+            "available_tasks": all_tasks,
             "selected_ids": []
         }
     }
 
-    keyboard = build_join_selection_keyboard(video_tasks, [])
+    keyboard = build_zip_selection_keyboard(all_tasks, [])
     await message.reply(
-        "🎬 <b>Modo de Unión de Videos</b>\n\n"
-        "Seleccione los videos que desea unir en el orden deseado. Vuelva a pulsar para deseleccionar.",
-        reply_markup=keyboard,
-        parse_mode=ParseMode.HTML
+        "📦 <b>Modo de Compresión ZIP</b>\n\nSeleccione las tareas que desea añadir al archivo ZIP.",
+        reply_markup=keyboard, parse_mode=ParseMode.HTML
     )
 
 
@@ -281,7 +297,7 @@ async def text_handler(client: Client, message: Message):
     
     if text.startswith('/'): return
 
-    if hasattr(client, 'user_data') and user.id in client.user_data and ('active_config' in client.user_data.get(user.id, {}) or 'join_mode' in client.user_data.get(user.id, {})):
+    if hasattr(client, 'user_data') and user.id in client.user_data and ('active_config' in client.user_data.get(user.id, {}) or 'join_mode' in client.user_data.get(user.id, {}) or 'zip_mode' in client.user_data.get(user.id, {})):
         if message.reply_to_message:
              return await processing_handler.handle_text_input_for_config(client, message)
         return
@@ -327,19 +343,63 @@ async def handle_join_actions(client: Client, query: CallbackQuery):
             return await query.message.edit_text("❌ Necesita seleccionar al menos 2 videos para unir.")
 
         join_task_id = await db_instance.add_task(
-            user_id=user.id,
-            file_type='join_operation',
+            user_id=user.id, file_type='join_operation',
             file_name=f"Union de {len(selected_ids)} videos.mp4",
             processing_config={"source_task_ids": [ObjectId(tid) for tid in selected_ids]},
             status='queued'
         )
 
-        await db_instance.tasks.delete_many({
-            "_id": {"$in": [ObjectId(tid) for tid in selected_ids]}
-        })
-
+        await db_instance.tasks.delete_many({ "_id": {"$in": [ObjectId(tid) for tid in selected_ids]} })
         del client.user_data[user.id]["join_mode"]
         await query.message.edit_text(f"✅ ¡Perfecto! La tarea para unir <b>{len(selected_ids)}</b> videos ha sido enviada a la forja.")
+
+# --- NUEVO HANDLER ---
+@Client.on_callback_query(filters.regex(r"^zip_"))
+async def handle_zip_actions(client: Client, query: CallbackQuery):
+    await query.answer()
+    user = query.from_user
+    
+    if not hasattr(client, 'user_data') or not (zip_data := client.user_data.get(user.id, {}).get("zip_mode")):
+        return await query.message.edit_text("❌ El modo de compresión ha expirado. Por favor, inicie de nuevo con /zip.")
+
+    parts = query.data.split("_")
+    action = parts[1]
+
+    if action == "cancel":
+        del client.user_data[user.id]["zip_mode"]
+        return await query.message.edit_text("Operación de compresión cancelada.")
+
+    if action == "select":
+        task_id = parts[2]
+        selected_ids = zip_data["selected_ids"]
+        if task_id in selected_ids:
+            selected_ids.remove(task_id)
+        else:
+            selected_ids.append(task_id)
+        
+        keyboard = build_zip_selection_keyboard(zip_data["available_tasks"], selected_ids)
+        text = (f"📦 <b>Modo de Compresión ZIP</b>\n\n"
+                f"Seleccionados: <b>{len(selected_ids)} tarea(s)</b>. "
+                "Seleccione las tareas a comprimir.")
+        await query.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
+    elif action == "confirm":
+        selected_ids = zip_data["selected_ids"]
+        if not selected_ids:
+            return await query.message.edit_text("❌ No ha seleccionado ninguna tarea para comprimir.")
+        
+        # Crear la meta-tarea de compresión
+        zip_task_id = await db_instance.add_task(
+            user_id=user.id, file_type='zip_operation',
+            file_name=f"Compresion_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.zip",
+            processing_config={"source_task_ids": [ObjectId(tid) for tid in selected_ids]},
+            status='queued'
+        )
+
+        # Eliminar las tareas fuente
+        await db_instance.tasks.delete_many({ "_id": {"$in": [ObjectId(tid) for tid in selected_ids]} })
+        del client.user_data[user.id]["zip_mode"]
+        await query.message.edit_text(f"✅ ¡Hecho! La tarea para comprimir <b>{len(selected_ids)}</b> archivos ha sido enviada a la forja.")
 
 
 @Client.on_callback_query(filters.regex(r"^batch_"))
@@ -408,29 +468,18 @@ async def select_song_from_search(client: Client, query: CallbackQuery):
         if not info or not info.get('formats'):
             return await status_message.edit_text("❌ No pude obtener información de ese enlace.")
 
-        # --- CORRECCIÓN DEL FLUJO ---
-        # 1. Forzar tipo audio y establecer config por defecto
         file_type = 'audio'
         best_audio_id = downloader.get_best_audio_format_id(info.get('formats', []))
-        processing_config = {
-            "download_format_id": best_audio_id,
-            "audio_format": "mp3"
-        }
+        processing_config = { "download_format_id": best_audio_id, "audio_format": "mp3" }
 
-        # 2. Crear tarea y poner en cola directamente
         task_id = await db_instance.add_task(
-            user_id=user.id,
-            file_type=file_type,
-            url=info['url'],
-            file_name=sanitize_filename(info['title']),
-            url_info=info,
-            processing_config=processing_config,
-            status="queued" # Poner en cola inmediatamente
+            user_id=user.id, file_type=file_type, url=info['url'],
+            file_name=sanitize_filename(info['title']), url_info=info,
+            processing_config=processing_config, status="queued"
         )
         if not task_id:
             return await status_message.edit_text("❌ Error al crear la tarea en la DB.")
         
-        # 3. Informar al usuario
         await status_message.edit_text(
             f"✅ Canción '<b>{escape_html(info['title'])}</b>' seleccionada y enviada a la forja.",
             parse_mode=ParseMode.HTML
