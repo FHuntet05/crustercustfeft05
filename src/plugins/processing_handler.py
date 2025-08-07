@@ -27,7 +27,6 @@ async def open_task_menu_from_p(client: Client, query: CallbackQuery):
     if not task:
         return await query.message.edit_text("❌ Error: La tarea ya no existe.")
 
-    # El comando /p ya muestra el nombre, aquí solo mostramos el menú de nuevo
     await query.message.edit_text(
         f"🛠️ Configurando Tarea:\n<code>{escape_html(task.get('original_filename', '...'))}</code>",
         reply_markup=build_processing_menu(task_id, task['file_type'], task),
@@ -42,58 +41,44 @@ async def task_manual_config(client: Client, query: CallbackQuery):
     task = await db_instance.get_task(task_id)
     if not task: return await query.message.edit_text("❌ Tarea no encontrada.")
 
-    await query.message.edit_text(f"✅ Tarea añadida al panel. Use `/p [ID]` para acceder y configurar.")
+    await query.message.edit_text(f"✅ Tarea añadida al panel. Use `/p {await db_instance.tasks.count_documents({'user_id': query.from_user.id, 'status': 'pending_processing'})}` para configurarla.")
 
 @Client.on_callback_query(filters.regex(r"^(profile_|panel_delete_all_)"))
 async def handle_profile_and_panel_actions(client: Client, query: CallbackQuery):
     await query.answer()
     user = query.from_user
     parts = query.data.split("_")
-    action_type = parts[0]
-    action = parts[1]
+    action_type, action = parts[0], parts[1]
 
     if action_type == "profile":
         if action == "apply":
             task_id, preset_id = parts[2], parts[3]
-            preset = await db_instance.get_preset_by_id(preset_id)
-            if not preset: return await query.message.edit_text("❌ El perfil seleccionado ya no existe.")
+            if not (preset := await db_instance.get_preset_by_id(preset_id)):
+                return await query.message.edit_text("❌ El perfil seleccionado ya no existe.")
             
-            await db_instance.tasks.update_one(
-                {"_id": ObjectId(task_id)},
-                {"$set": {"processing_config": preset.get('config_data', {}), "status": "queued"}}
-            )
+            await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": {"processing_config": preset.get('config_data', {}), "status": "queued"}})
             await query.message.edit_text(f"✅ Perfil '<b>{preset['preset_name'].capitalize()}</b>' aplicado. La tarea ha sido enviada a la forja.", parse_mode=ParseMode.HTML)
         
-        elif action == "save":
-            if parts[2] == "request":
-                task_id = parts[3]
-                if not hasattr(client, 'user_data'): client.user_data = {}
-                client.user_data[user.id] = {"active_config": {"task_id": task_id, "menu_type": "profile_save"}}
-                await query.message.edit_text(
-                    "💾 Escriba un nombre para este perfil de configuración.\n\nEjemplo: `Reel Instagram`",
-                    reply_markup=build_back_button(f"p_open_{task_id}")
-                )
+        elif action == "save" and parts[2] == "request":
+            task_id = parts[3]
+            if not hasattr(client, 'user_data'): client.user_data = {}
+            client.user_data[user.id] = {"active_config": {"task_id": task_id, "menu_type": "profile_save"}}
+            await query.message.edit_text("💾 Escriba un nombre para este perfil:", reply_markup=build_back_button(f"p_open_{task_id}"))
         
         elif action == "delete":
+            preset_name = parts[3] if len(parts) > 3 else parts[2]
             if parts[2] == "confirm":
-                preset_name = parts[3]
-                # Buscar y eliminar por nombre (insensible a mayúsculas)
                 result = await db_instance.user_presets.delete_one({"user_id": user.id, "preset_name": preset_name.lower()})
-                if result.deleted_count > 0:
-                    await query.message.edit_text(f"🗑️ Perfil '<b>{escape_html(preset_name.capitalize())}</b>' eliminado.", parse_mode=ParseMode.HTML)
-                else:
-                    await query.message.edit_text("❌ No se encontró un perfil con ese nombre.")
+                await query.message.edit_text(f"🗑️ Perfil '<b>{escape_html(preset_name.capitalize())}</b>' eliminado." if result.deleted_count > 0 else "❌ Perfil no encontrado.")
             elif parts[2] == "cancel":
                 await query.message.delete()
     
-    elif action_type == "panel":
-        if action == "delete":
-            if parts[2] == "all":
-                if parts[3] == "confirm":
-                    deleted = await db_instance.delete_all_pending_tasks(user.id)
-                    await query.message.edit_text(f"💥 Panel limpiado. Se descartaron {deleted.deleted_count} tareas.")
-                elif parts[3] == "cancel":
-                    await query.message.edit_text("Operación cancelada.")
+    elif action_type == "panel" and action == "delete" and parts[2] == "all":
+        if parts[3] == "confirm":
+            deleted = await db_instance.delete_all_pending_tasks(user.id)
+            await query.message.edit_text(f"💥 Panel limpiado. Se descartaron {deleted.deleted_count} tareas.")
+        elif parts[3] == "cancel":
+            await query.message.edit_text("Operación cancelada.")
 
 @Client.on_callback_query(filters.regex(r"^config_"))
 async def show_config_menu(client: Client, query: CallbackQuery):
@@ -106,6 +91,8 @@ async def show_config_menu(client: Client, query: CallbackQuery):
     menu_messages = { "dlquality": "💿 Seleccione la calidad a descargar:", "audioconvert": "🔊 Configure la conversión de audio:", "audioeffects": "🎧 Aplique efectos de audio:", "audiometadata": "🖼️ Elija qué metadatos editar:", "watermark": "💧 Elija un tipo de marca de agua:", "tracks": "📜 Gestione las pistas del video:", "transcode": "📉 Seleccione una resolución para reducir el tamaño:" }
     
     if menu_type in keyboards:
+        if menu_type in ["audioeffects", "tracks"]:
+            return await query.message.edit_text(menu_messages[menu_type], reply_markup=keyboards[menu_type])
         return await query.message.edit_text(menu_messages[menu_type], reply_markup=keyboards[menu_type])
 
     if not hasattr(client, 'user_data'): client.user_data = {}
@@ -156,12 +143,20 @@ async def set_value_callback(client: Client, query: CallbackQuery):
         await db_instance.update_task_config(task_id, f"{config_type}.{key}", new_value)
     
     task = await db_instance.get_task(task_id)
-    next_keyboards = { "audioeffect": build_audio_effects_menu, "trackopt": build_tracks_menu, "transcode": build_transcode_menu }
+    config = task.get('processing_config', {})
     
-    if config_type in next_keyboards:
-        await query.message.edit_text("🛠️ Configuración actualizada.", reply_markup=next_keyboards[config_type](task_id, task.get('processing_config', {})))
+    # --- CORRECCIÓN ---
+    # Llamar a cada constructor de teclado con los argumentos correctos
+    if config_type == "audioeffect":
+        keyboard = build_audio_effects_menu(task_id, config)
+    elif config_type == "trackopt":
+        keyboard = build_tracks_menu(task_id, config)
+    elif config_type == "transcode":
+        keyboard = build_transcode_menu(task_id) # Esta era la línea del error
     else:
-        await query.message.edit_text("🛠️ Configuración actualizada.", reply_markup=build_processing_menu(task_id, task['file_type'], task))
+        keyboard = build_processing_menu(task_id, task['file_type'], task)
+        
+    await query.message.edit_text("🛠️ Configuración actualizada.", reply_markup=keyboard)
 
 async def handle_text_input_for_config(client: Client, message: Message):
     user_id, user_input = message.from_user.id, message.text.strip()
@@ -176,16 +171,12 @@ async def handle_text_input_for_config(client: Client, message: Message):
             if not task: raise ValueError("La tarea original ya no existe.")
             await db_instance.add_preset(user_id, user_input, task.get('processing_config', {}))
             feedback = f"✅ Perfil '<b>{escape_html(user_input.capitalize())}</b>' guardado."
-        elif menu_type == "rename":
-            await db_instance.update_task_config(task_id, "final_filename", user_input); feedback = f"✅ Nombre actualizado."
+        elif menu_type == "rename": await db_instance.update_task_config(task_id, "final_filename", user_input); feedback = f"✅ Nombre actualizado."
         elif menu_type == "trim":
             if not re.match(r"^\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*$", user_input): raise ValueError("Formato de tiempo inválido.")
             await db_instance.update_task_config(task_id, "trim_times", user_input); feedback = f"✅ Tiempos de corte guardados."
-        elif menu_type == "split":
-            await db_instance.update_task_config(task_id, "split_criteria", user_input); feedback = f"✅ Criterio de división guardado."
-        elif menu_type == "gif":
-            parts = user_input.split(); duration, fps = float(parts[0]), int(parts[1])
-            await db_instance.update_task_config(task_id, "gif_options", {"duration": duration, "fps": fps}); feedback = f"✅ GIF configurado."
+        elif menu_type == "split": await db_instance.update_task_config(task_id, "split_criteria", user_input); feedback = f"✅ Criterio de división guardado."
+        elif menu_type == "gif": parts = user_input.split(); await db_instance.update_task_config(task_id, "gif_options", {"duration": float(parts[0]), "fps": int(parts[1])}); feedback = f"✅ GIF configurado."
         elif menu_type == "audiotags":
             tags_to_update = {}
             for line in user_input.split('\n'):
