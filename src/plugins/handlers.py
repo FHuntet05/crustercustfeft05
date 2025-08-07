@@ -14,7 +14,7 @@ from src.db.mongo_manager import db_instance
 from src.helpers.keyboards import (build_processing_menu, build_search_results_keyboard,
                                    build_detailed_format_menu, build_profiles_keyboard,
                                    build_confirmation_keyboard, build_batch_profiles_keyboard,
-                                   build_join_selection_keyboard, build_zip_selection_keyboard) # NUEVA IMPORTACIÓN
+                                   build_join_selection_keyboard, build_zip_selection_keyboard)
 from src.helpers.utils import (get_greeting, escape_html, sanitize_filename,
                                format_time, format_view_count, format_upload_date)
 from src.core import downloader
@@ -42,17 +42,18 @@ def get_config_summary(config: dict) -> str:
     if not parts: return "<i>(Default)</i>"
     return ", ".join(parts)
 
-@Client.on_message(filters.command("start"))
+@Client.on_message(filters.command("start") & filters.private)
 async def start_command(client: Client, message: Message):
     user = message.from_user
     greeting_prefix = get_greeting(user.id)
     await db_instance.get_user_settings(user.id)
     start_message = (
-        f"A sus órdenes, {greeting_prefix}, bienvenido a la <b>Suite de Medios v2.5</b>.\n\n"
-        "Ahora puedo comprimir archivos en ZIP.\n\n"
+        f"A sus órdenes, {greeting_prefix}, bienvenido a la <b>Suite de Medios v2.6</b>.\n\n"
+        "He corregido y mejorado los flujos de trabajo.\n\n"
         "<b>Comandos Principales:</b>\n"
         "• /panel - Muestra su mesa de trabajo.\n"
         "• /p <code>[ID]</code> - Abre el menú de una tarea.\n"
+        "• /p clean <code>[ID]</code> - Elimina una tarea específica.\n"
         "• /join - Une videos del panel.\n"
         "• /zip - Comprime tareas del panel en un ZIP.\n"
         "• /p_all - Procesa todas las tareas del panel a la vez.\n"
@@ -61,7 +62,7 @@ async def start_command(client: Client, message: Message):
     )
     await message.reply(start_message, parse_mode=ParseMode.HTML)
 
-@Client.on_message(filters.command("panel"))
+@Client.on_message(filters.command("panel") & filters.private)
 async def panel_command(client: Client, message: Message):
     user = message.from_user
     greeting_prefix = get_greeting(user.id).replace(',', '')
@@ -91,19 +92,30 @@ async def panel_command(client: Client, message: Message):
     response_lines.append(f"Use /p clean para limpiar todas las tareas.")
     await message.reply("\n".join(response_lines), parse_mode=ParseMode.HTML)
 
-@Client.on_message(filters.command("p"))
+@Client.on_message(filters.command("p") & filters.private)
 async def process_command(client: Client, message: Message):
     user = message.from_user
     parts = message.text.split()
     if len(parts) < 2:
-        return await message.reply("Uso: `/p [ID]` o `/p clean`.", parse_mode=ParseMode.MARKDOWN)
+        return await message.reply("Uso: `/p [ID]` o `/p clean` o `/p clean [ID]`.", parse_mode=ParseMode.MARKDOWN)
     
     action = parts[1]
     if action.lower() == "clean":
-        return await message.reply(
-            "¿Seguro que desea eliminar TODAS las tareas de su panel?",
-            reply_markup=build_confirmation_keyboard("panel_delete_all_confirm", "panel_delete_all_cancel")
-        )
+        if len(parts) > 2 and parts[2].isdigit():
+            task_idx_to_delete = int(parts[2]) - 1
+            pending_tasks = await db_instance.get_pending_tasks(user.id)
+            if 0 <= task_idx_to_delete < len(pending_tasks):
+                task_to_delete = pending_tasks[task_idx_to_delete]
+                await db_instance.delete_task_by_id(str(task_to_delete['_id']))
+                await message.reply(f"🗑️ Tarea #{task_idx_to_delete + 1} eliminada del panel.")
+            else:
+                await message.reply("❌ ID de tarea inválido.")
+        else:
+            return await message.reply(
+                "¿Seguro que desea eliminar TODAS las tareas de su panel?",
+                reply_markup=build_confirmation_keyboard("panel_delete_all_confirm", "panel_delete_all_cancel")
+            )
+        return
 
     if not action.isdigit():
         return await message.reply("El ID debe ser un número. Use `/panel` para ver los IDs de sus tareas.")
@@ -120,7 +132,7 @@ async def process_command(client: Client, message: Message):
     else:
         await message.reply(f"❌ ID inválido. Tiene {len(pending_tasks)} tareas en su panel. Use un número entre 1 y {len(pending_tasks)}.")
 
-@Client.on_message(filters.command("p_all"))
+@Client.on_message(filters.command("p_all") & filters.private)
 async def process_all_command(client: Client, message: Message):
     user = message.from_user
     pending_tasks_count = await db_instance.tasks.count_documents({"user_id": user.id, "status": "pending_processing"})
@@ -137,7 +149,7 @@ async def process_all_command(client: Client, message: Message):
         parse_mode=ParseMode.HTML
     )
 
-@Client.on_message(filters.command("join"))
+@Client.on_message(filters.command("join") & filters.private)
 async def join_videos_command(client: Client, message: Message):
     user = message.from_user
     video_tasks = await db_instance.tasks.find({
@@ -156,8 +168,7 @@ async def join_videos_command(client: Client, message: Message):
         reply_markup=keyboard, parse_mode=ParseMode.HTML
     )
 
-# --- NUEVO COMANDO ---
-@Client.on_message(filters.command("zip"))
+@Client.on_message(filters.command("zip") & filters.private)
 async def zip_files_command(client: Client, message: Message):
     user = message.from_user
     all_tasks = await db_instance.get_pending_tasks(user.id)
@@ -166,12 +177,7 @@ async def zip_files_command(client: Client, message: Message):
         return await message.reply("No hay tareas en su panel para comprimir.")
 
     if not hasattr(client, 'user_data'): client.user_data = {}
-    client.user_data[user.id] = {
-        "zip_mode": {
-            "available_tasks": all_tasks,
-            "selected_ids": []
-        }
-    }
+    client.user_data[user.id] = { "zip_mode": { "available_tasks": all_tasks, "selected_ids": [] } }
 
     keyboard = build_zip_selection_keyboard(all_tasks, [])
     await message.reply(
@@ -180,7 +186,7 @@ async def zip_files_command(client: Client, message: Message):
     )
 
 
-@Client.on_message(filters.command(["profiles", "pr"]))
+@Client.on_message(filters.command(["profiles", "pr"]) & filters.private)
 async def profiles_command(client: Client, message: Message):
     user = message.from_user
     presets = await db_instance.get_user_presets(user.id)
@@ -198,7 +204,7 @@ async def profiles_command(client: Client, message: Message):
     response_lines.append("\nUse `/pr_delete [Nombre]` para eliminar un perfil.")
     await message.reply("\n".join(response_lines), parse_mode=ParseMode.HTML)
 
-@Client.on_message(filters.command("pr_delete"))
+@Client.on_message(filters.command("pr_delete") & filters.private)
 async def pr_delete_command(client: Client, message: Message):
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
@@ -211,9 +217,11 @@ async def pr_delete_command(client: Client, message: Message):
         parse_mode=ParseMode.HTML
     )
 
-@Client.on_message(filters.media)
+@Client.on_message(filters.media & filters.private)
 async def any_file_handler(client: Client, message: Message):
     user = message.from_user
+    # La propagación se detiene en el manejador de media de `processing_handler` si es necesario
+    
     original_media_object, file_type = None, None
     if message.video: original_media_object, file_type = message.video, 'video'
     elif message.audio: original_media_object, file_type = message.audio, 'audio'
@@ -289,24 +297,19 @@ async def handle_music_search(client: Client, message: Message, query: str):
     
     await status_message.edit_text("✅ He encontrado esto. Seleccione una para descargar:", reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
-
 @Client.on_message(filters.text & filters.private)
 async def text_handler(client: Client, message: Message):
-    user = message.from_user
+    # La lógica de este manejador es ser el "último recurso" para el texto.
+    # Los manejadores de comandos y el manejador de configuración en `processing_handler`
+    # tienen prioridad. Si ellos no detienen la propagación, este se ejecuta.
     text = message.text.strip()
-    
-    if text.startswith('/'): return
-
-    if hasattr(client, 'user_data') and user.id in client.user_data and ('active_config' in client.user_data.get(user.id, {}) or 'join_mode' in client.user_data.get(user.id, {}) or 'zip_mode' in client.user_data.get(user.id, {})):
-        if message.reply_to_message:
-             return await processing_handler.handle_text_input_for_config(client, message)
-        return
-        
     url_match = re.search(URL_REGEX, text)
     if url_match:
         return await handle_url_input(client, message, url_match.group(0))
 
     await handle_music_search(client, message, text)
+
+# --- CALLBACK HANDLERS PARA OPERACIONES EN LOTE Y BÚSQUEDA ---
 
 @Client.on_callback_query(filters.regex(r"^join_"))
 async def handle_join_actions(client: Client, query: CallbackQuery):
@@ -353,7 +356,7 @@ async def handle_join_actions(client: Client, query: CallbackQuery):
         del client.user_data[user.id]["join_mode"]
         await query.message.edit_text(f"✅ ¡Perfecto! La tarea para unir <b>{len(selected_ids)}</b> videos ha sido enviada a la forja.")
 
-# --- NUEVO HANDLER ---
+
 @Client.on_callback_query(filters.regex(r"^zip_"))
 async def handle_zip_actions(client: Client, query: CallbackQuery):
     await query.answer()
@@ -388,7 +391,6 @@ async def handle_zip_actions(client: Client, query: CallbackQuery):
         if not selected_ids:
             return await query.message.edit_text("❌ No ha seleccionado ninguna tarea para comprimir.")
         
-        # Crear la meta-tarea de compresión
         zip_task_id = await db_instance.add_task(
             user_id=user.id, file_type='zip_operation',
             file_name=f"Compresion_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.zip",
@@ -396,7 +398,6 @@ async def handle_zip_actions(client: Client, query: CallbackQuery):
             status='queued'
         )
 
-        # Eliminar las tareas fuente
         await db_instance.tasks.delete_many({ "_id": {"$in": [ObjectId(tid) for tid in selected_ids]} })
         del client.user_data[user.id]["zip_mode"]
         await query.message.edit_text(f"✅ ¡Hecho! La tarea para comprimir <b>{len(selected_ids)}</b> archivos ha sido enviada a la forja.")
