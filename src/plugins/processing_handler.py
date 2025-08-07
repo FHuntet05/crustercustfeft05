@@ -114,28 +114,39 @@ async def set_value_callback(client: Client, query: CallbackQuery):
     task = await db_instance.get_task(task_id)
     if not task: 
         await query.answer("❌ Error: Tarea no encontrada.", show_alert=True)
-        return await query.message.delete()
+        try: await query.message.delete()
+        except: pass
+        return
     
     if config_type == "dlformat":
-        format_id = value
+        url_info = task.get('url_info', {})
+        formats = url_info.get('formats', [])
+        final_format_id = value
+
+        # --- LÓGICA DE FUSIÓN DE STREAMS (DASH) ---
+        if value.isdigit(): # Es un format_id específico de un botón de video
+            selected_format = next((f for f in formats if f.get('format_id') == value), None)
+            # Si el formato seleccionado NO tiene audio (es un stream de solo video)
+            if selected_format and selected_format.get('acodec') in ['none', None]:
+                final_format_id = f"{value}+bestaudio/best"
+                logger.info(f"Formato de solo video detectado ({value}). Se fusionará con el mejor audio. Selector final: {final_format_id}")
+
         # Manejar los botones de acción rápida
-        if value == "mp3":
-            url_info = task.get('url_info', {})
-            format_id = downloader.get_best_audio_format_id(url_info.get('formats', []))
+        elif value == "mp3":
+            final_format_id = downloader.get_best_audio_format_id(formats)
             await db_instance.update_task(task_id, "file_type", "audio")
             await db_instance.update_task_config(task_id, "audio_format", "mp3")
         elif value == "bestaudio":
-            url_info = task.get('url_info', {})
-            format_id = downloader.get_best_audio_format_id(url_info.get('formats', []))
+            final_format_id = downloader.get_best_audio_format_id(formats)
             await db_instance.update_task(task_id, "file_type", "audio")
         elif value == "bestvideo":
-            url_info = task.get('url_info', {})
-            format_id = downloader.get_best_video_format_id(url_info.get('formats', []))
+            # El selector 'bestvideo+bestaudio/best' le dice a yt-dlp que fusione el mejor video con el mejor audio
+            final_format_id = "bestvideo+bestaudio/best"
         
         await db_instance.tasks.update_one(
             {"_id": ObjectId(task_id)},
             {"$set": {
-                "processing_config.download_format_id": format_id,
+                "processing_config.download_format_id": final_format_id,
                 "status": "queued"
             }}
         )
@@ -260,7 +271,7 @@ async def handle_text_input_for_config(client: Client, message: Message):
             feedback_message = f"✅ Nombre actualizado a <code>{escape_html(user_input)}</code>."
         
         elif menu_type == "trim":
-            time_regex = re.compile(r"^\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*$")
+            time_regex = re.compile(r"^\s*(\d{1,2}:\d{2}(?::d{2})?)\s*-\s*(\d{1,2}:\d{2}(?::d{2})?)\s*$")
             if not time_regex.match(user_input):
                 feedback_message = "❌ <b>Formato inválido.</b>\nPor favor, use <code>MM:SS-MM:SS</code> o <code>HH:MM:SS-HH:MM:SS</code>."
             else:
