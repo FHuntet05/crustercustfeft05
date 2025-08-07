@@ -1,5 +1,3 @@
-# --- START OF FILE src/core/worker.py ---
-
 import logging
 import time
 import os
@@ -71,38 +69,58 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
     ctx = progress_tracker.get(user_id)
     start_time = time.time()
 
+    stderr_buffer = ""
     all_stderr_lines = []
+
     while True:
-        line = await process.stderr.readline()
-        if not line: break
-        line_str = line.decode('utf-8', 'ignore').strip()
-        all_stderr_lines.append(line_str)
-        if match := time_pattern.search(line_str):
-            if total_duration_sec > 0:
-                h, m, s, ms = map(int, match.groups())
-                processed_sec = h * 3600 + m * 60 + s + ms / 100
-                percentage = (processed_sec / total_duration_sec) * 100
-                elapsed = time.time() - start_time
-                speed_factor = processed_sec / elapsed if elapsed > 0 else 0
-                eta = (total_duration_sec - processed_sec) / speed_factor if speed_factor > 0 else 0
-                
-                user_mention = "Usuario"
-                if hasattr(ctx.message, 'from_user') and ctx.message.from_user:
-                    user_mention = ctx.message.from_user.mention
-                
-                text = format_status_message(
-                    operation="⚙️ Procesando...", filename=ctx.task.get('original_filename', 'archivo'),
-                    percentage=percentage, processed_bytes=processed_sec, total_bytes=total_duration_sec,
-                    speed=speed_factor, eta=eta, engine="FFmpeg", user_id=user_id,
-                    user_mention=user_mention
-                )
-                await _edit_status_message(user_id, text, progress_tracker)
+        # Leemos en bloques, no por línea, para evitar LimitOverrunError
+        chunk = await process.stderr.read(1024)
+        if not chunk:
+            break
+        
+        stderr_buffer += chunk.decode('utf-8', 'ignore')
+        # FFmpeg usa \r para separar actualizaciones de progreso
+        lines = stderr_buffer.split('\r')
+        
+        # La última parte puede estar incompleta, la guardamos para la siguiente iteración.
+        stderr_buffer = lines.pop(-1)
+        
+        for line in lines:
+            if not line: continue
+            all_stderr_lines.append(line.strip())
+
+            if match := time_pattern.search(line):
+                if total_duration_sec > 0 and ctx:
+                    h, m, s, ms = map(int, match.groups())
+                    processed_sec = h * 3600 + m * 60 + s + ms / 100
+                    percentage = (processed_sec / total_duration_sec) * 100
+                    elapsed = time.time() - start_time
+                    speed_factor = processed_sec / elapsed if elapsed > 0 else 0
+                    eta = (total_duration_sec - processed_sec) / speed_factor if speed_factor > 0 else 0
+                    
+                    user_mention = "Usuario"
+                    if hasattr(ctx.message, 'from_user') and ctx.message.from_user:
+                        user_mention = ctx.message.from_user.mention
+                    
+                    text = format_status_message(
+                        operation="⚙️ Procesando...", filename=ctx.task.get('original_filename', 'archivo'),
+                        percentage=percentage, processed_bytes=processed_sec, total_bytes=total_duration_sec,
+                        speed=speed_factor, eta=eta, engine="FFmpeg", user_id=user_id,
+                        user_mention=user_mention
+                    )
+                    await _edit_status_message(user_id, text, progress_tracker)
+
+    # Procesar cualquier dato remanente en el buffer al final
+    if stderr_buffer.strip():
+        all_stderr_lines.append(stderr_buffer.strip())
             
     await process.wait()
     if process.returncode != 0:
-        error_message = "\n".join(all_stderr_lines)
-        logger.error(f"FFmpeg falló. Código: {process.returncode}\nError: {error_message}")
-        raise Exception(f"El proceso de FFmpeg falló: {error_message[-500:]}")
+        # Unir las últimas 20 líneas del log de error para un mensaje conciso
+        error_log = "\n".join(all_stderr_lines[-20:])
+        logger.error(f"FFmpeg falló. Código: {process.returncode}\nError: {error_log}")
+        raise Exception(f"El proceso de FFmpeg falló. Log:\n...{error_log[-450:]}")
+
 
 async def process_task(bot, task: dict):
     task_id, user_id = str(task['_id']), task['user_id']
@@ -272,4 +290,3 @@ async def worker_loop(bot_instance):
         except Exception as e:
             logger.critical(f"[WORKER] Bucle del worker falló críticamente: {e}", exc_info=True)
             await asyncio.sleep(30)
-# --- END OF FILE src/core/worker.py ---
