@@ -33,7 +33,8 @@ async def start_command(client: Client, message: Message):
         "• <b>Pegue un enlace:</b> de YouTube, etc.\n"
         "• <b>Use /panel:</b> para ver su mesa de trabajo y procesar archivos.\n"
     )
-    await message.reply_html(start_message)
+    # --- CORRECCIÓN ---
+    await message.reply(start_message, parse_mode=ParseMode.HTML)
 
 @Client.on_message(filters.command("panel"))
 async def panel_command(client: Client, message: Message):
@@ -44,11 +45,13 @@ async def panel_command(client: Client, message: Message):
     
     if not pending_tasks:
         text = f"✅ ¡{greeting_prefix}Su mesa de trabajo está vacía!"
-        return await message.reply_html(text)
+        # --- CORRECCIÓN ---
+        return await message.reply(text, parse_mode=ParseMode.HTML)
         
     keyboard = build_panel_keyboard(pending_tasks)
     response_text = f"📋 <b>{greeting_prefix}Su mesa de trabajo actual:</b>"
-    await message.reply_html(response_text, reply_markup=keyboard)
+    # --- CORRECCIÓN ---
+    await message.reply(response_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
 @Client.on_message(filters.media)
 async def any_file_handler(client: Client, message: Message):
@@ -78,16 +81,16 @@ async def any_file_handler(client: Client, message: Message):
     )
 
     if task_id:
-        await message.reply_html(
+        response_text = (
             f"✅ {greeting_prefix}He recibido <code>{escape_html(final_file_name)}</code> y lo he añadido a su mesa de trabajo.\n\n"
             "Use /panel para ver y procesar sus tareas."
         )
+        # --- CORRECCIÓN ---
+        await message.reply(response_text, parse_mode=ParseMode.HTML)
     else:
-        await message.reply_html(f"❌ {greeting_prefix}Hubo un error al registrar la tarea en la base de datos.")
+        # --- CORRECCIÓN ---
+        await message.reply(f"❌ {greeting_prefix}Hubo un error al registrar la tarea en la base de datos.", parse_mode=ParseMode.HTML)
 
-# --- CORRECCIÓN CRÍTICA ---
-# El decorador ahora es simple: `filters.text`.
-# La lógica para ignorar comandos se maneja dentro de la función.
 @Client.on_message(filters.text)
 async def text_handler(client: Client, message: Message):
     """
@@ -101,15 +104,14 @@ async def text_handler(client: Client, message: Message):
     text = message.text.strip()
     greeting_prefix = get_greeting(user.id)
 
-    # 1. Ignorar cualquier texto que empiece con / para no interferir con comandos.
     if text.startswith('/'):
         return
 
-    # --- 2. ¿Es una URL? ---
     url_match = re.search(URL_REGEX, text)
     if url_match:
         url = url_match.group(0)
-        status_message = await message.reply_html(f"🔎 {greeting_prefix}Analizando enlace...")
+        # --- CORRECCIÓN ---
+        status_message = await message.reply(f"🔎 {greeting_prefix}Analizando enlace...", parse_mode=ParseMode.HTML)
         
         info = downloader.get_url_info(url)
         if not info or not info.get('formats'):
@@ -138,14 +140,13 @@ async def text_handler(client: Client, message: Message):
             disable_web_page_preview=True
         )
 
-    # --- 3. ¿Es una respuesta a un menú de configuración? ---
     if not hasattr(client, 'user_data'): client.user_data = {}
     if user.id in client.user_data and 'active_config' in client.user_data[user.id]:
         return await processing_handler.handle_text_input_for_config(client, message)
 
-    # --- 4. Si no es nada de lo anterior, es una búsqueda de música ---
     query = text
-    status_message = await message.reply_html(f"🔎 {greeting_prefix}Buscando <code>{escape_html(query)}</code>...")
+    # --- CORRECCIÓN ---
+    status_message = await message.reply(f"🔎 {greeting_prefix}Buscando <code>{escape_html(query)}</code>...", parse_mode=ParseMode.HTML)
     
     search_results = downloader.search_music(query, limit=20)
     
