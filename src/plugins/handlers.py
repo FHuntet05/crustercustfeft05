@@ -1,124 +1,130 @@
 # src/plugins/handlers.py
 
-import asyncio
-import os
+import logging
+import re
+import uuid
+from datetime import datetime
+from math import ceil
+
 from pyrogram import Client, filters
-from pyrogram.types import Message, CallbackQuery
-from bson import ObjectId
+from pyrogram.types import Message
 
 from src.db.mongo_manager import db
-from src.core.downloader import downloader, Downloader
-from src.helpers.keyboards import create_search_results_keyboard, create_quality_selection_keyboard, create_processing_menu
-from src.helpers.utils import get_sanitized_filename, is_valid_timestamp
+# --- CORRECCIÓN CLAVE: Importar el módulo entero ---
+from src.core import downloader
+from src.helpers import keyboards, utils
 
-@Client.on_message(filters.private & (filters.document | filters.video | filters.audio))
-async def file_handler(client: Client, message: Message):
+# Configuración del logger
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Expresión regular para detectar URLs
+URL_REGEX = re.compile(
+    r'((http|https)://(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}'
+    r'(\/[-a-zA-Z0-9()@:%_\+.~#?&//=]*)?)'
+)
+ITEMS_PER_PAGE = 5
+
+@Client.on_message(filters.command("start"))
+async def start_command(client: Client, message: Message):
+    """Manejador para el comando /start."""
+    await message.reply_text(
+        "¡Hola! Soy tu asistente de medios.\n\n"
+        "Puedes enviarme:\n"
+        "• Un **enlace** de YouTube para descargar video o audio.\n"
+        "• El **nombre de una canción** para buscar y descargar música.\n"
+        "• Un **archivo de audio o video** para acceder a las herramientas de edición."
+    )
+
+@Client.on_message(filters.private & (filters.text | filters.document | filters.video | filters.audio))
+async def message_handler(client: Client, message: Message):
+    """
+    Punto de entrada principal para todos los mensajes.
+    Discrimina entre texto, enlaces y archivos.
+    """
     user_id = message.from_user.id
+    text = message.text or message.caption
+
+    # 1. Si es un comando, lo ignora para que lo manejen otros handlers
+    if text and text.startswith('/'):
+        # Podríamos añadir un mensaje de "comando no reconocido" aquí si queremos
+        return
+
+    # 2. Si es un enlace (Camino B: Interactivo)
+    if text and URL_REGEX.search(text):
+        url = URL_REGEX.search(text).group(0)
+        await handle_link(client, message, url)
+    # 3. Si es un archivo
+    elif message.media:
+        await handle_file(client, message)
+    # 4. Si es texto libre (Camino A: Búsqueda de Música)
+    elif text:
+        await handle_text_search(client, message)
+
+async def handle_link(client: Client, message: Message, url: str):
+    """Maneja los mensajes que contienen un enlace."""
+    user_id = message.from_user.id
+    sent_message = await message.reply_text("🔎 Analizando enlace, por favor espera...")
     
-    try:
-        file_id = getattr(message, message.media.value).file_id
-        file_name = getattr(message, message.media.value).file_name or "archivo_recibido"
-        
-        task = {
-            "user_id": user_id,
-            "file_id": file_id,
-            "file_name": file_name,
-            "original_message_id": message.id,
-            "status": "awaiting_action",
-            "processing_steps": [],
-        }
-        
-        result = await db.tasks.insert_one(task)
-        task_id = result.inserted_id
-
-        await message.reply_text(
-            f"📄 **Archivo recibido:** `{file_name}`\n\n¿Qué quieres hacer con él?",
-            reply_markup=create_processing_menu(str(task_id))
-        )
-    except Exception as e:
-        await message.reply(f"❌ Ocurrió un error al procesar tu archivo: {e}")
-
-@Client.on_message(filters.private & filters.text & ~filters.command(["start", "panel", "cancelar", "historial"]))
-async def text_handler(client: Client, message: Message):
-    user_id = message.from_user.id
-    text = message.text
-
-    pending_task = await db.tasks.find_one({"user_id": user_id, "status": "awaiting_input"})
-    if pending_task:
-        prompt_type = pending_task.get("input_prompt")
-        
-        if prompt_type in ["trim_start_time", "trim_end_time"]:
-            if not is_valid_timestamp(text):
-                await message.reply("❌ Formato de tiempo no válido. Inténtalo de nuevo (ej. `01:23`).")
-                return
-
-            if prompt_type == "trim_start_time":
-                await db.tasks.update_one(
-                    {"_id": pending_task["_id"]},
-                    {"$set": {"input_prompt": "trim_end_time", "processing_data.trim_start": text}}
-                )
-                await message.reply("✅ Tiempo de inicio guardado.\n\nAhora, envíame el **tiempo de fin** (ej. `01:45`).")
-                return
-
-            elif prompt_type == "trim_end_time":
-                start_time = pending_task.get("processing_data", {}).get("trim_start")
-                end_time = text
-                await db.tasks.update_one(
-                    {"_id": pending_task["_id"]},
-                    {
-                        "$set": {
-                            "status": "queued",
-                            "processing_steps": [{"type": "trim", "start": start_time, "end": end_time}]
-                        },
-                        "$unset": {"input_prompt": "", "processing_data": ""}
-                    }
-                )
-                await message.reply(f"✅ ¡Perfecto! La tarea para cortar desde `{start_time}` hasta `{end_time}` ha sido encolada.")
-                return
+    media_info = await downloader.get_media_info(url)
+    if not media_info or not media_info.get('formats'):
+        await sent_message.edit_text("❌ No se pudo obtener información del enlace. Asegúrate de que sea un video válido.")
         return
 
-    if text.startswith("http://") or text.startswith("https://"):
-        sent_message = await message.reply("🔎 Analizando enlace...")
-        try:
-            info = await asyncio.to_thread(downloader.get_url_info, text)
-            
-            task_data = {
-                "user_id": user_id,
-                "url": text,
-                "title": info.get('title', 'Sin título'),
-                "status": "awaiting_quality",
-                "formats": info.get('formats', []),
-            }
-            result = await db.tasks.insert_one(task_data)
-            task_id = result.inserted_id
+    task_data = {
+        "user_id": user_id,
+        "message_id": message.id,
+        "chat_id": message.chat.id,
+        "url": url,
+        "title": media_info.get("title", "Título Desconocido"),
+        "thumbnail_url": media_info.get("thumbnail"),
+        "status": "awaiting_format", # Esperando que el usuario elija
+        "file_type": "video" if any(f.get('vcodec') != 'none' for f in media_info['formats']) else "audio",
+        "created_at": datetime.utcnow()
+    }
+    task_id = await db.create_task(task_data)
+    
+    keyboard = keyboards.create_format_selection_keyboard(media_info['formats'], task_id)
+    await sent_message.edit_text(
+        f"**Selecciona el formato que deseas descargar para:**\n\n_{media_info['title']}_",
+        reply_markup=keyboard
+    )
+    
+async def handle_text_search(client: Client, message: Message):
+    """Maneja el texto libre como una búsqueda de música."""
+    query = message.text
+    sent_message = await message.reply_text(f"🔍 Buscando \"{query}\"...")
 
-            await sent_message.edit_text(
-                "✅ Enlace analizado. Por favor, selecciona la calidad deseada:",
-                reply_markup=create_quality_selection_keyboard(info, str(task_id))
-            )
-        except Downloader.DownloaderError as e:
-            await sent_message.edit_text(
-                f"❌ **Error al obtener información del enlace.**\n\n"
-                f"**Motivo:** `{e}`\n\n"
-                "Por favor, verifica el enlace. Si es un video de YouTube y el problema persiste, es posible que las cookies hayan expirado."
-            )
-        except Exception as e:
-            await sent_message.edit_text(f"❌ Ocurrió un error inesperado al procesar el enlace: {e}")
+    # --- CAMBIO CLAVE: Usar la función importada del módulo ---
+    results = await downloader.search_music(query)
+    
+    if not results:
+        await sent_message.edit_text("❌ No se encontraron resultados para tu búsqueda.")
         return
 
-    sent_message = await message.reply("🎶 Buscando música...")
-    try:
-        results = await asyncio.to_thread(downloader.search_music, text)
-        if not results:
-            await sent_message.edit_text("No se encontraron resultados para tu búsqueda.")
-            return
-        
-        await db.create_search_session(user_id, results)
-        keyboard, text_content = await create_search_results_keyboard(user_id, 0)
+    # Guardar resultados en una sesión de búsqueda temporal en la DB
+    query_id = str(uuid.uuid4())
+    await db.create_search_session(query_id, results)
+    
+    total_pages = ceil(len(results) / ITEMS_PER_PAGE)
+    
+    # Mostrar la primera página de resultados
+    keyboard = keyboards.create_search_results_keyboard(
+        results[:ITEMS_PER_PAGE], 
+        current_page=1, 
+        total_pages=total_pages, 
+        query_id=query_id
+    )
+    
+    await sent_message.edit_text(
+        f"**Resultados para \"{query}\":**\n\nSelecciona una canción para descargarla automáticamente.",
+        reply_markup=keyboard
+    )
 
-        await sent_message.edit_text(text_content, reply_markup=keyboard)
-
-    except Downloader.DownloaderError as e:
-        await sent_message.edit_text(f"❌ Error durante la búsqueda: {e}")
-    except Exception as e:
-        await sent_message.edit_text(f"❌ Ocurrió un error inesperado durante la búsqueda: {e}")
+async def handle_file(client: Client, message: Message):
+    """Maneja los archivos enviados al bot."""
+    # Lógica futura para el panel de control y edición
+    await message.reply_text(
+        "He recibido tu archivo. Próximamente podrás editarlo.\n\n"
+        "Para ver tus tareas pendientes de acción manual, usa el comando `/panel` (aún en desarrollo)."
+    )
