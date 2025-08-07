@@ -79,8 +79,7 @@ def get_lyrics(url: str) -> str or None:
                     if fname.endswith(ext):
                         lyrics_filename = fname
                         break
-                if lyrics_filename:
-                    break
+                if lyrics_filename: break
             
             if lyrics_filename:
                 with open(lyrics_filename, 'r', encoding='utf-8') as f:
@@ -105,12 +104,12 @@ def get_url_info(url: str) -> dict or None:
             info = ydl.extract_info(url, download=False)
             
             if not info:
-                logger.error(f"yt-dlp no devolvió NINGUNA información para {url}, probablemente por un bloqueo o error de red.")
+                logger.error(f"yt-dlp no devolvió información para {url}.")
                 return None
             
-            entry = info
-            if 'entries' in info and info.get('entries'):
-                entry = info['entries'][0]
+            # Si es una lista, tomar el primer elemento. Si no, usar el diccionario directamente.
+            entry = info.get('entries', [info])[0]
+            if not entry: return None
 
             formats = []
             if entry.get('formats'):
@@ -119,12 +118,12 @@ def get_url_info(url: str) -> dict or None:
                         formats.append({
                             'format_id': f.get('format_id'), 'ext': f.get('ext'),
                             'resolution': f.get('resolution') or (f"{f.get('height', 0)}p" if f.get('height') else None),
-                            'fps': f.get('fps'), 'filesize': f.get('filesize') or f.get('filesize_approx'),
-                            'abr': f.get('abr'), 'vbr': f.get('vbr'), 'acodec': f.get('acodec'), 'vcodec': f.get('vcodec'),
+                            'filesize': f.get('filesize') or f.get('filesize_approx'),
+                            'abr': f.get('abr'), 'acodec': f.get('acodec'), 'vcodec': f.get('vcodec'),
                             'height': f.get('height')
                         })
             
-            is_video = any(f.get('vcodec', 'none') != 'none' and f.get('acodec', 'none') != 'none' for f in formats)
+            is_video = any(f.get('vcodec', 'none') != 'none' for f in formats)
 
             return {
                 'url': entry.get('webpage_url', url), 'title': entry.get('title', 'Título Desconocido'),
@@ -137,8 +136,6 @@ def get_url_info(url: str) -> dict or None:
 
 def download_from_url(url: str, output_path: str, format_id: str, progress_hook=None) -> bool:
     """Descarga contenido desde una URL usando yt-dlp con un formato específico."""
-    # --- CORRECCIÓN ---
-    # Asegurarnos de que no se intente descargar con un format_id nulo o vacío.
     if not format_id:
         logger.error("Se intentó descargar desde URL sin un format_id válido.")
         return False
@@ -147,9 +144,8 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_hook=
     ydl_opts.update({
         'format': format_id, 'outtmpl': {'default': output_path},
         'progress_hooks': [progress_hook] if progress_hook else [],
-        'noplaylist': True, 'merge_output_format': 'mp4',
+        'noplaylist': True, 'merge_output_format': 'mkv', # Usar MKV para mejor compatibilidad de streams
         'http_chunk_size': 10485760, 'retries': 5, 'fragment_retries': 5,
-        'writethumbnail': True
     })
     if 'forcejson' in ydl_opts: del ydl_opts['forcejson']
 
@@ -162,6 +158,7 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_hook=
         return False
 
 def search_music(query: str, limit: int = 20) -> list:
+    """Busca música usando la API de Spotify y/o YouTube."""
     results = []
     if spotify_api:
         try:
@@ -177,13 +174,12 @@ def search_music(query: str, limit: int = 20) -> list:
             logger.warning(f"Búsqueda en Spotify falló: {e}")
 
     if not results:
-        logger.info(f"No se encontraron resultados en Spotify para '{query}'. Usando YouTube.")
+        logger.info(f"No hay resultados en Spotify, usando YouTube.")
         try:
             info = get_url_info(f"ytsearch{limit}:{query} official audio")
             if info and 'entries' in info:
                 for entry in info['entries']:
-                    title = entry.get('title', 'Título Desconocido')
-                    artist = entry.get('uploader', 'Artista Desconocido')
+                    title, artist = entry.get('title', 'N/A'), entry.get('uploader', 'N/A')
                     if ' - ' in title:
                         parts = title.split(' - ', 1)
                         if len(parts) == 2: artist, title = parts[0], parts[1]
@@ -192,11 +188,12 @@ def search_music(query: str, limit: int = 20) -> list:
                         'album': 'YouTube', 'duration': entry.get('duration'), 'url': entry.get('webpage_url'),
                     })
         except Exception as e:
-            logger.error(f"La búsqueda de música en YouTube falló: {e}")
+            logger.error(f"La búsqueda en YouTube falló: {e}")
             
     return results
 
 def download_file(url: str, output_path: str) -> bool:
+    """Descarga un archivo genérico (como una imagen) desde una URL."""
     try:
         with requests.get(url, stream=True) as r:
             r.raise_for_status()
@@ -205,5 +202,5 @@ def download_file(url: str, output_path: str) -> bool:
                     f.write(chunk)
         return True
     except Exception as e:
-        logger.error(f"No se pudo descargar el archivo desde {url}: {e}")
+        logger.error(f"No se pudo descargar {url}: {e}")
         return False

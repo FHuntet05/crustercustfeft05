@@ -12,7 +12,7 @@ from src.core import downloader
 from src.helpers.keyboards import (build_back_button, build_processing_menu, 
                                    build_quality_menu, build_download_quality_menu, 
                                    build_audio_convert_menu, build_audio_effects_menu,
-                                   build_search_results_keyboard)
+                                   build_search_results_keyboard, build_panel_keyboard)
 from src.helpers.utils import get_greeting, escape_html, sanitize_filename
 
 logger = logging.getLogger(__name__)
@@ -110,25 +110,20 @@ async def set_value_callback(client: Client, query: CallbackQuery):
     task = await db_instance.get_task(task_id)
     if not task: return await query.message.edit_text("❌ Error: Tarea no encontrada.")
 
-    # --- CORRECCIÓN CRÍTICA DE LA LÓGICA ---
     if config_type == "dlformat":
-        # 1. Guardar el formato seleccionado en la configuración de la tarea.
-        #    Este es el paso que estaba fallando.
-        update_result = await db_instance.update_task_config(task_id, "download_format_id", value)
-        if not update_result or update_result.modified_count == 0:
-            return await query.message.edit_text("❌ Error: No se pudo guardar la selección de formato.")
+        update_result = await db_instance.tasks.update_one(
+            {"_id": ObjectId(task_id)},
+            {"$set": {
+                "processing_config.download_format_id": value,
+                "status": "queued"
+            }}
+        )
+        if update_result.modified_count > 0:
+            await query.message.edit_text("✅ Formato seleccionado.\n\n🔥 Tarea enviada a la forja.", parse_mode=ParseMode.HTML)
+        else:
+            await query.message.edit_text("❌ Error al encolar la tarea. Por favor, inténtelo de nuevo.")
+        return
 
-        # 2. Si se elige un formato de solo audio, actualizamos el tipo de archivo de la tarea.
-        url_info = task.get('url_info', {})
-        formats = url_info.get('formats', [])
-        selected_format = next((f for f in formats if f.get('format_id') == value), None)
-        if selected_format and selected_format.get('vcodec') == 'none':
-            await db_instance.update_task(task_id, 'file_type', 'audio')
-            
-        # 3. Ahora que está guardado, encolar la tarea.
-        await db_instance.update_task(task_id, "status", "queued")
-        return await query.message.edit_text(f"✅ Formato seleccionado.\n\n🔥 Tarea enviada a la forja.", parse_mode=ParseMode.HTML)
-    
     elif config_type == "quality": await db_instance.update_task_config(task_id, "quality", value)
     elif config_type == "mute": current = task.get('processing_config', {}).get('mute_audio', False); await db_instance.update_task_config(task_id, "mute_audio", not current)
     elif config_type == "audioprop": prop_key, prop_value = parts[3], parts[4]; await db_instance.update_task_config(task_id, f"audio_{prop_key}", prop_value)
@@ -154,7 +149,7 @@ async def on_song_select(client: Client, query: CallbackQuery):
 
     await query.message.edit_text(f"✅ Canción seleccionada. Preparando descarga automática...", parse_mode=ParseMode.HTML)
 
-    search_result = await db_instance.search_results.find_one({"_id": ObjectId(result_id), "user_id": user.id})
+    search_result = await db_instance.search_results.find_one_and_delete({"_id": ObjectId(result_id), "user_id": user.id})
     if not search_result: return await query.message.edit_text("❌ Error: Este resultado de búsqueda ha expirado o no es válido.")
     
     if search_id := search_result.get('search_id'):
@@ -179,18 +174,15 @@ async def on_song_select(client: Client, query: CallbackQuery):
     task_id = await db_instance.add_task(
         user_id=user.id, file_type='audio', url=info['url'], 
         file_name=sanitize_filename(info['title']), 
-        url_info=info, processing_config=processing_config
+        url_info=info, processing_config=processing_config,
+        status="queued" # Encolar directamente
     )
 
     if not task_id: return await query.message.edit_text("❌ Error al crear la tarea en la DB.")
     
-    await db_instance.update_task(str(task_id), "status", "queued")
-    
     await query.message.edit_text(
-        f"🔥 <b>{escape_html(info['title'])}</b>\n\n"
-        "Tu canción ha sido enviada a la forja. El procesamiento comenzará en breve.", 
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True
+        f"🔥 <b>{escape_html(info['title'])}</b>\n\nTu canción ha sido enviada a la forja.", 
+        parse_mode=ParseMode.HTML, disable_web_page_preview=True
     )
 
 @Client.on_callback_query(filters.regex(r"^search_page_"))
