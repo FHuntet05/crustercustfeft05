@@ -178,12 +178,10 @@ async def process_task(bot, task: dict):
             format_id = config.get('download_format_id')
             if not format_id: raise Exception("La tarea no tiene 'download_format_id'.")
             
-            # La copia del dict 'd' se hace aquí para asegurar que 'user_id' se añade correctamente.
-            progress_hook = lambda d: _progress_hook_yt_dlp({**d, 'user_id': user_id})
-
-            # download_from_url ahora devuelve la ruta completa del archivo o None
+            # La lógica del progress hook se encapsula en el downloader.
+            # Aquí solo pasamos el user_id.
             actual_download_path = await asyncio.to_thread(
-                downloader.download_from_url, url, base_filename, format_id, progress_hook
+                downloader.download_from_url, url, base_filename, format_id, user_id=user_id
             )
 
             if not actual_download_path:

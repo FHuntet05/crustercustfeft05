@@ -8,6 +8,9 @@ import os
 import requests
 import glob
 
+# Se importa la función de progreso del worker para usarla aquí
+from src.core.worker import _progress_hook_yt_dlp
+
 logger = logging.getLogger(__name__)
 
 # --- Configuración de APIs y Cookies ---
@@ -108,7 +111,6 @@ def get_url_info(url: str) -> dict or None:
                 logger.error(f"yt-dlp no devolvió información para {url}.")
                 return None
             
-            # Si es una lista, tomar el primer elemento. Si no, usar el diccionario directamente.
             entry = info.get('entries', [info])[0]
             if not entry: return None
 
@@ -135,13 +137,18 @@ def get_url_info(url: str) -> dict or None:
         logger.error(f"Excepción en get_url_info para {url}: {e}", exc_info=True)
         return None
 
-def download_from_url(url: str, output_path: str, format_id: str, progress_hook=None) -> str or None:
+def download_from_url(url: str, output_path: str, format_id: str, user_id: int = None) -> str or None:
     """
-    Descarga contenido desde una URL y devuelve la ruta del archivo creado o None si falla.
+    Descarga contenido con un mecanismo de reintento inteligente.
+    Intenta con progreso, si falla por error de tamaño, reintenta sin progreso.
     """
     if not format_id:
         logger.error("Se intentó descargar desde URL sin un format_id válido.")
         return None
+    
+    progress_hook = None
+    if user_id:
+        progress_hook = lambda d: _progress_hook_yt_dlp({**d, 'user_id': user_id})
         
     ydl_opts = get_common_ydl_opts()
     ydl_opts.update({
@@ -149,28 +156,42 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_hook=
         'progress_hooks': [progress_hook] if progress_hook else [],
         'noplaylist': True, 'merge_output_format': 'mkv',
         'http_chunk_size': 10485760, 'retries': 5, 'fragment_retries': 5,
-        'nopart': True,  # Evita el uso de archivos .part para mayor fiabilidad
+        'nopart': True,
     })
     if 'forcejson' in ydl_opts: del ydl_opts['forcejson']
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-        
-        # Después de la descarga, encontrar el archivo REAL, ignorando archivos temporales.
-        found_files = glob.glob(f"{output_path}.*")
-        for f in found_files:
-            if not f.endswith(".part"):
-                logger.info(f"Descarga de yt-dlp completada. Archivo final: {f}")
-                return f  # ¡Éxito! Devolver la ruta del archivo final.
-
-        # Si el bucle termina, solo se encontraron archivos .part o ningún archivo.
-        logger.error(f"yt-dlp finalizó pero no se encontró un archivo final válido en {output_path}.*")
-        return None
-
+    except yt_dlp.utils.DownloadError as e:
+        # Detectar el error específico de 'NoneType' y 'int'
+        if "not supported between instances of 'NoneType' and 'int'" in str(e):
+            logger.warning("Fallo de descarga con progreso debido a tamaño desconocido. Reintentando sin progreso...")
+            ydl_opts['progress_hooks'] = []  # Desactivar el hook de progreso
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+            except Exception as retry_e:
+                logger.error(f"El reintento de descarga también falló: {retry_e}")
+                return None
+        else:
+            # Otro tipo de DownloadError
+            logger.error(f"yt-dlp falló al descargar {url} con formato {format_id}: {e}")
+            return None
     except Exception as e:
-        logger.error(f"yt-dlp falló al descargar {url} con formato {format_id}: {e}")
+        # Otro error genérico
+        logger.error(f"Error inesperado durante la descarga de yt-dlp: {e}")
         return None
+
+    # Verificar que el archivo final existe y no es un .part
+    found_files = glob.glob(f"{output_path}.*")
+    for f in found_files:
+        if not f.endswith(".part"):
+            logger.info(f"Descarga de yt-dlp completada. Archivo final: {f}")
+            return f
+
+    logger.error(f"yt-dlp finalizó pero no se encontró un archivo final válido en {output_path}.*")
+    return None
 
 def search_music(query: str, limit: int = 20) -> list:
     """Busca música usando la API de Spotify y/o YouTube."""
