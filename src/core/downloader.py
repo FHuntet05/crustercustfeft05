@@ -29,6 +29,7 @@ class YtdlpLogger:
     def info(self, msg): pass
     def warning(self, msg): pass
     def error(self, msg):
+        # El error de "Sign in" ya no debería ocurrir, pero se mantiene por si acaso.
         if "Sign in to confirm" in msg or "confirm you’re not a bot" in msg:
             raise AuthenticationError(msg)
         if "not supported between instances of 'NoneType' and 'int'" in msg:
@@ -51,8 +52,8 @@ if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
 
 def get_common_ydl_opts():
     """
-    Construye las opciones comunes para yt-dlp.
-    La comprobación de cookies es ahora dinámica en cada llamada.
+    Construye las opciones comunes para yt-dlp, usando una API interna de YouTube
+    para evitar bloqueos y la necesidad de cookies.
     """
     opts = {
         'quiet': True, 'no_warnings': True, 'forcejson': True,
@@ -61,17 +62,20 @@ def get_common_ydl_opts():
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.5',
         },
+        # --- CAMBIO ESTRATÉGICO: USAR API INTERNA DE YOUTUBE ---
+        'extractor_args': {
+            'youtube': {
+                'client': 'android', # Simula ser la app de Android para evitar bloqueos
+            }
+        }
     }
     ffmpeg_path = shutil.which('ffmpeg')
     if ffmpeg_path:
         opts['ffmpeg_location'] = ffmpeg_path
     
-    cookies_file_path = "youtube_cookies.txt"
-    if os.path.exists(cookies_file_path):
-        opts['cookiefile'] = cookies_file_path
-    else:
-        logger.warning("ADVERTENCIA en tiempo de ejecución: No se encontró 'youtube_cookies.txt'. La fiabilidad de las descargas será muy baja.")
-
+    # --- CAMBIO ESTRATÉGICO: ELIMINACIÓN DE LA LÓGICA DE COOKIES ---
+    # Ya no es necesario buscar o advertir sobre 'youtube_cookies.txt'.
+    
     return opts
 
 def download_from_url(url: str, output_path: str, format_id: str, progress_tracker: dict = None, user_id: int = None) -> str or None:
@@ -164,7 +168,6 @@ def get_best_video_format_id(formats: list) -> str:
 
     if video_formats:
         try:
-            # Ordenar por altura, luego por fps, luego por bitrate de video
             best_format = sorted(
                 video_formats, 
                 key=lambda x: (x.get('height', 0), x.get('fps', 0), x.get('vbr', 0)), 
@@ -240,7 +243,6 @@ def get_url_info(url: str) -> dict or None:
             formats = []
             if entry.get('formats'):
                 for f in entry['formats']:
-                    # Solo añadir formatos que sean realmente descargables
                     if f.get('vcodec', 'none') != 'none' or f.get('acodec', 'none') != 'none':
                         formats.append({
                             'format_id': f.get('format_id'), 'ext': f.get('ext'),

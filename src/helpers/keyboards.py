@@ -28,7 +28,6 @@ def build_processing_menu(task_id: str, file_type: str, task_data: dict, filenam
     keyboard = []
     task_config = task_data.get('processing_config', {})
     
-    # Menú específico para tareas de URL que aún no han sido descargadas
     if task_data.get('url_info') and not task_config.get('download_format_id'):
          keyboard.append([InlineKeyboardButton("💿 Elegir Calidad de Descarga", callback_data=f"config_dlquality_{task_id}")])
 
@@ -74,26 +73,26 @@ def build_detailed_format_menu(task_id: str, formats: list) -> InlineKeyboardMar
     """Construye el menú de calidades de descarga detallado y enriquecido."""
     keyboard = []
     
-    # Filtrar solo formatos de video con resolución y FPS
+    # --- CORRECCIÓN DE LÓGICA DE FILTRADO ---
+    # Filtrar formatos de video que tengan al menos resolución (height).
     video_formats = sorted(
-        [f for f in formats if f.get('vcodec') not in ['none', None] and f.get('height') and f.get('fps')],
-        key=lambda x: (x.get('height', 0), x.get('fps', 0)),
+        [f for f in formats if f.get('vcodec') not in ['none', None] and f.get('height')],
+        key=lambda x: (x.get('height', 0), x.get('fps', 0) or 0), # Usar 0 si fps es None
         reverse=True
     )
     
-    # Agrupar formatos en filas de dos
     row = []
-    for f in video_formats:
+    for f in video_formats[:10]: # Limitar a los 10 mejores formatos para no saturar
         format_id = f.get('format_id')
         if not format_id: continue
 
         height = f.get('height')
-        fps = int(f.get('fps'))
+        fps = int(f.get('fps', 0))
         ext = f.get('ext')
         filesize = f.get('filesize')
         
-        # Etiqueta visualmente atractiva
-        label = f"🎬 {height}p{fps} {ext.upper()}"
+        fps_str = f"{fps}" if fps > 0 else ""
+        label = f"🎬 {height}p{fps_str} {ext.upper()}"
         if filesize:
             label += f" ({format_bytes(filesize)})"
         
@@ -103,11 +102,9 @@ def build_detailed_format_menu(task_id: str, formats: list) -> InlineKeyboardMar
             keyboard.append(row)
             row = []
     
-    # Añadir la última fila si no está completa
     if row:
         keyboard.append(row)
             
-    # Botones de acción rápida
     keyboard.extend([
         [
             InlineKeyboardButton("🎵 MP3", callback_data=f"set_dlformat_{task_id}_mp3"),
