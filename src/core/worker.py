@@ -145,13 +145,19 @@ async def process_task(bot, task: dict):
             if not format_id:
                  raise Exception("La tarea de URL no tiene 'download_format_id' seleccionado.")
             
-            # --- LÓGICA DE CONSTRUCCIÓN DE COMANDO ---
-            # Si el format_id NO es para solo audio, construir el comando para obtener video+audio.
-            if 'bestaudio' not in format_id and 'abr' not in format_id:
-                final_format_id = f"{format_id}+bestaudio/best[height={task.get('url_info', {}).get('height')}]"
-            else:
-                final_format_id = format_id
-
+            # --- CORRECCIÓN CRÍTICA DE LA LÓGICA DE FORMATO ---
+            # Determinar si el format_id corresponde a un formato de solo video
+            # buscándolo en la lista de formatos guardada en la tarea.
+            url_info = task.get('url_info', {})
+            formats = url_info.get('formats', [])
+            selected_format = next((f for f in formats if f.get('format_id') == format_id), None)
+            
+            final_format_id = format_id
+            # Si el formato seleccionado tiene video pero no audio (vcodec != 'none' y acodec == 'none'),
+            # entonces le pedimos a yt-dlp que lo fusione con el mejor audio disponible.
+            if selected_format and selected_format.get('vcodec') != 'none' and selected_format.get('acodec') == 'none':
+                final_format_id = f"{format_id}+bestaudio"
+            
             await _edit_status_message(user_id, f"📥 Descargando con formato: <code>{final_format_id}</code>")
 
             if not await asyncio.to_thread(downloader.download_from_url, url, base_download_path, final_format_id, progress_hook=None):
