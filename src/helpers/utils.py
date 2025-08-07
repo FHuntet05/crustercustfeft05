@@ -1,5 +1,3 @@
-# --- START OF FILE src/helpers/utils.py ---
-
 import os
 import time
 import asyncio
@@ -104,37 +102,41 @@ def _progress_hook_yt_dlp(d, progress_tracker: dict):
     except Exception as e:
         logger.warning(f"Error menor en el hook de progreso de yt-dlp (ignorado): {e}")
 
-def format_status_message(operation: str, filename: str, percentage: float, 
-                          processed_bytes: float, total_bytes: float, speed: float, 
-                          eta: float, engine: str, user_id: int, user_mention: str) -> str:
+def format_status_message(
+    operation: str, filename: str, percentage: float, 
+    processed_bytes: float, total_bytes: float, speed: float, 
+    eta: float, engine: str, user_id: int, user_mention: str
+) -> str:
     """
-    Construye el mensaje de estado con un formato visual mejorado y detallado.
-    CORRECCIÓN: Usa format_time para procesamiento y format_bytes para transferencias.
+    Construye el mensaje de estado con el nuevo formato visual solicitado.
     """
     bar = _create_text_bar(percentage, 10)
-    short_filename = (filename[:45] + '…') if len(filename) > 48 else filename
+    short_filename = (filename[:35] + '…') if len(filename) > 38 else filename
     greeting = get_greeting(user_id).replace(', ', '')
-    title = f"<b>{greeting} {operation}</b>"
+    
+    # Header
+    op_text = operation.replace('...', '').strip()
+    header = f"╭━━━━❰ <b>{greeting}{op_text}</b> ❱━"
 
     is_processing = "Procesando" in operation
     
     if is_processing:
         processed_text = format_time(processed_bytes)
         total_text = format_time(total_bytes)
-        speed_text = f"{speed:.2f}x"
+        speed_text = f"{speed:.2f}x" if speed > 0 else "N/A"
     else: # Descargando o Subiendo
         processed_text = format_bytes(processed_bytes)
         total_text = format_bytes(total_bytes)
-        speed_text = f"{format_bytes(speed)}/s"
+        speed_text = f"{format_bytes(speed)}/s" if speed > 0 else "N/A"
 
     lines = [
-        f"┏ <b>ꜰɪʟᴇ</b>: <code>{escape_html(short_filename)}</code>",
-        f"┠ <b>ᴘʀᴏɢʀᴇss</b>: [{bar}] {percentage:.1f}%",
-        f"┠ <b>sɪᴢᴇ</b>: {processed_text} / {total_text}",
-        f"┠ <b>sᴘᴇᴇᴅ</b>: {speed_text}",
-        f"┠ <b>ᴇᴛᴀ</b>: {format_time(eta)}",
-        f"┗ <b>ᴇɴɢɪɴᴇ</b>: {engine}",
+        header,
+        f"┣⪼ <b>Archivo:</b> <code>{escape_html(short_filename)}</code>",
+        f"┣⪼ <b>Progreso:</b> [{bar}] {percentage:.1f}%",
+        f"┣⪼ <b>Tamaño:</b> {processed_text} de {total_text}",
+        f"┣⪼ <b>Velocidad:</b> {speed_text}",
+        f"┣⪼ <b>ETA:</b> {format_time(eta)}",
+        f"╰━━━━━━━━━━━━━━━➣  motor: {engine}"
     ]
     
-    return f"{title}\n" + "\n".join(lines)
-# --- END OF FILE src/helpers/utils.py ---
+    return "\n".join(lines)

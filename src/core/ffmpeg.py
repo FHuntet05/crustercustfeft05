@@ -1,5 +1,3 @@
-# --- START OF FILE src/core/ffmpeg.py ---
-
 import asyncio
 import logging
 import subprocess
@@ -34,7 +32,7 @@ def get_media_info(file_path: str) -> dict:
 
 def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnail_path: str = None, watermark_path: str = None, subs_path: str = None) -> list:
     """
-    Construye el comando FFmpeg, ahora con soporte para manipulación de pistas de subtítulos.
+    Construye el comando FFmpeg, ahora con soporte para transcodificación avanzada.
     """
     config = task.get('processing_config', {})
     file_type = task.get('file_type')
@@ -52,93 +50,91 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
     command_parts.append(f"-i {shlex.quote(input_path)}")
     input_count = 1
     
-    if thumbnail_path:
-        command_parts.append(f"-i {shlex.quote(thumbnail_path)}")
-        thumb_map_idx = input_count
-        input_count += 1
+    if thumbnail_path: command_parts.append(f"-i {shlex.quote(thumbnail_path)}"); thumb_map_idx = input_count; input_count += 1
+    if watermark_path: command_parts.append(f"-i {shlex.quote(watermark_path)}"); watermark_map_idx = input_count; input_count += 1
+    if subs_path: command_parts.append(f"-i {shlex.quote(subs_path)}"); subs_map_idx = input_count; input_count += 1
 
-    if watermark_path:
-        command_parts.append(f"-i {shlex.quote(watermark_path)}")
-        watermark_map_idx = input_count
-        input_count += 1
+    codec_opts, map_opts, metadata_opts = [], [], []
+    video_filters = []
     
-    if subs_path:
-        command_parts.append(f"-i {shlex.quote(subs_path)}")
-        subs_map_idx = input_count
-        input_count += 1
-
-    codec_opts = []
-    map_opts = []
-    metadata_opts = []
+    # --- LÓGICA DE TRANSCODIFICACIÓN Y FILTROS ---
+    transcode_config = config.get('transcode')
     
-    watermark_config = config.get('watermark')
+    # Inicia la cadena de filtros de video
+    video_chain = "[0:v]"
     filter_complex_parts = []
+
+    # 1. Aplicar filtros de video (escala, etc.)
+    if file_type == 'video' and transcode_config and (resolution := transcode_config.get('resolution')):
+        height = resolution.replace('p', '')
+        video_filters.append(f"scale=-2:{height}")
     
-    if file_type == 'video' and watermark_config:
-        position = watermark_config.get('position', 'top_right')
-        
+    if watermark_config := config.get('watermark'):
         if watermark_config.get('type') == 'text':
             text = watermark_config.get('text', '').replace("'", "’").replace(':', r'\:')
             pos_map = {'top_left': 'x=10:y=10', 'top_right': 'x=w-text_w-10:y=10', 'bottom_left': 'x=10:y=h-text_h-10', 'bottom_right': 'x=w-text_w-10:y=h-text_h-10'}
-            drawtext_filter = f"drawtext=text='{text}':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.5:boxborderw=5:{pos_map.get(position)}"
-            filter_complex_parts.append(f"[0:v]{drawtext_filter}[outv]")
-        
-        elif watermark_config.get('type') == 'image' and watermark_path:
-            pos_map = {'top_left': '10:10', 'top_right': 'W-w-10:10', 'bottom_left': '10:H-h-10', 'bottom_right': 'W-w-10:H-h-10'}
-            overlay_filter = f"[0:v][{watermark_map_idx}:v]overlay={pos_map.get(position)}[outv]"
-            filter_complex_parts.append(overlay_filter)
+            position = watermark_config.get('position', 'top_right')
+            video_filters.append(f"drawtext=text='{text}':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.5:boxborderw=5:{pos_map.get(position)}")
+
+    if video_filters:
+        filter_str = ",".join(video_filters)
+        filter_complex_parts.append(f"{video_chain}{filter_str}[filtered_v]")
+        video_chain = "[filtered_v]"
     
-    if filter_complex_parts:
-        command_parts.append(f'-filter_complex "{";".join(filter_complex_parts)}"')
+    # 2. Aplicar overlay de marca de agua de imagen (que es un filtro complejo)
+    if config.get('watermark', {}).get('type') == 'image' and watermark_path:
+        pos_map = {'top_left': '10:10', 'top_right': 'W-w-10:10', 'bottom_left': '10:H-h-10', 'bottom_right': 'W-w-10:H-h-10'}
+        position = config['watermark'].get('position', 'top_right')
+        filter_complex_parts.append(f"{video_chain}[{watermark_map_idx}:v]overlay={pos_map.get(position)}[outv]")
+        map_opts.append("-map [outv]")
+    elif filter_complex_parts:
+        # Si hubo filtros pero no overlay, el último filtro es la salida
+        last_filter = filter_complex_parts.pop()
+        filter_complex_parts.append(last_filter.replace('[filtered_v]', '[outv]'))
         map_opts.append("-map [outv]")
     else:
+        # No hay filtros complejos, mapeo directo
         map_opts.append("-map 0:v?")
 
-    if file_type == 'audio':
+    # 3. Definir códecs basados en si se transcodifica o no
+    if file_type == 'video':
+        if transcode_config:
+            codec_opts.extend(["-c:v libx264", "-preset veryfast", "-crf 28"])
+            codec_opts.extend(["-c:a aac", "-b:a 128k"])
+        else:
+            codec_opts.extend(["-c:v copy", "-c:a copy"])
+        
+        map_opts.append("-map 0:a?")
+        if thumbnail_path: map_opts.append(f"-map {thumb_map_idx}"); codec_opts.append("-c:v:1 mjpeg -disposition:v:1 attached_pic")
+        if config.get('remove_subtitles'): map_opts.append("-map -0:s")
+        else: map_opts.append("-map 0:s?")
+        if subs_path: map_opts.append(f"-map {subs_map_idx}"); codec_opts.append("-c:s mov_text")
+    
+    elif file_type == 'audio':
         fmt, bitrate = config.get('audio_format', 'mp3'), config.get('audio_bitrate', '192k')
         codec_map = {'mp3': 'libmp3lame', 'flac': 'flac', 'opus': 'libopus'}
-        
         audio_filters = []
         if config.get('slowed'): audio_filters.append("atempo=0.8")
         if config.get('reverb'): audio_filters.append("aecho=0.8:0.9:1000:0.3")
-
         if audio_filters: codec_opts.append(f"-af {shlex.quote(','.join(audio_filters))}")
-        
         codec_opts.extend(["-vn", f"-c:a {codec_map.get(fmt, 'libmp3lame')}"])
         if fmt != 'flac': codec_opts.append(f"-b:a {bitrate}")
-        map_opts.append("-map 0:a:0")
-        
+        map_opts = ["-map 0:a:0"] # Resetear mapeo para audio
         if 'audio_tags' in config:
             tags = config['audio_tags']
             if tags.get('title'): metadata_opts.append(f"-metadata title={shlex.quote(tags['title'])}")
             if tags.get('artist'): metadata_opts.append(f"-metadata artist={shlex.quote(tags['artist'])}")
             if tags.get('album'): metadata_opts.append(f"-metadata album={shlex.quote(tags['album'])}")
-        
         if thumbnail_path:
-            map_opts.append(f"-map {thumb_map_idx}")
-            codec_opts.extend(["-c:v copy", "-disposition:v:0 attached_pic"])
+            map_opts.append(f"-map {thumb_map_idx}"); codec_opts.extend(["-c:v copy", "-disposition:v:0 attached_pic"])
     
-    elif file_type == 'video':
-        codec_opts.append("-c:a copy")
-        map_opts.append("-map 0:a?")
-        if thumbnail_path:
-            map_opts.append(f"-map {thumb_map_idx}")
-            codec_opts.append("-c:v:1 mjpeg -disposition:v:1 attached_pic")
-        
-        # --- NUEVA LÓGICA: Manipulación de Subtítulos ---
-        if config.get('remove_subtitles'):
-            map_opts.append("-map -0:s")
-        else:
-            map_opts.append("-map 0:s?") # Mapear subtítulos existentes si no se quitan
-
-        if subs_path:
-            map_opts.append(f"-map {subs_map_idx}")
-            codec_opts.append("-c:s mov_text") # Códec compatible
-
     if config.get('mute_audio'):
         codec_opts = [opt for opt in codec_opts if '-c:a' not in opt and '-b:a' not in opt]
-        map_opts = [opt for opt in map_opts if '-map 0:a' not in opt]
-        codec_opts.append("-an")
+        map_opts = [opt for opt in map_opts if '0:a' not in opt]; codec_opts.append("-an")
+
+    # Ensamblaje final del comando
+    if filter_complex_parts:
+        command_parts.append(f'-filter_complex "{";".join(filter_complex_parts)}"')
 
     command_parts.extend(codec_opts)
     command_parts.extend(metadata_opts)
@@ -150,26 +146,16 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
     return [final_command]
 
 def build_gif_command(config, input_path, output_path):
-    gif_opts = config['gif_options']
-    duration, fps = gif_opts['duration'], gif_opts['fps']
-    palette_path = f"{output_path}.palette.png"
-    filters = f"fps={fps},scale=480:-1:flags=lanczos"
-    
-    cmd1 = (f"ffmpeg -y -ss 0 -t {duration} -i {shlex.quote(input_path)} "
-            f"-vf \"{filters},palettegen\" {shlex.quote(palette_path)}")
-            
-    base_name, _ = os.path.splitext(output_path)
-    final_gif_path = f"{base_name}.gif"
-    cmd2 = (f"ffmpeg -ss 0 -t {duration} -i {shlex.quote(input_path)} -i {shlex.quote(palette_path)} "
-            f"-lavfi \"{filters} [x]; [x][1:v] paletteuse\" {shlex.quote(final_gif_path)}")
-            
+    gif_opts = config['gif_options']; duration, fps = gif_opts['duration'], gif_opts['fps']
+    palette_path = f"{os.path.splitext(output_path)[0]}.palette.png"; filters = f"fps={fps},scale=480:-1:flags=lanczos"
+    cmd1 = (f"ffmpeg -y -ss 0 -t {duration} -i {shlex.quote(input_path)} -vf \"{filters},palettegen\" {shlex.quote(palette_path)}")
+    final_gif_path = f"{os.path.splitext(output_path)[0]}.gif"
+    cmd2 = (f"ffmpeg -ss 0 -t {duration} -i {shlex.quote(input_path)} -i {shlex.quote(palette_path)} -lavfi \"{filters} [x]; [x][1:v] paletteuse\" {shlex.quote(final_gif_path)}")
     return [cmd1, cmd2]
 
 def build_split_command(config, input_path, output_path):
-    criteria = config['split_criteria']
-    base_name, ext = os.path.splitext(output_path)
+    criteria = config['split_criteria']; base_name, ext = os.path.splitext(output_path)
     if 's' in criteria.lower():
         return (f"ffmpeg -y -i {shlex.quote(input_path)} -c copy -map 0 "
                 f"-segment_time {criteria.lower().replace('s', '')} -f segment -reset_timestamps 1 {shlex.quote(base_name)}_part%03d{ext}")
     return ""
-# --- END OF FILE src/core/ffmpeg.py ---
