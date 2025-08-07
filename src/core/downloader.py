@@ -126,35 +126,56 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_track
     logger.error(f"yt-dlp finalizó pero no se encontró un archivo final válido en {output_path}.*")
     return None
 
-def get_best_audio_format(formats: list) -> str:
+def get_best_audio_format_id(formats: list) -> str:
     """
     Selecciona el mejor formato de SÓLO AUDIO para una descarga rápida y eficiente.
     """
-    # --- CAMBIO CRÍTICO Y FINAL: Estrategia "Audio-First" ---
     if not formats:
         logger.warning("No se proporcionaron formatos. Usando el selector final 'bestaudio/best'.")
         return 'bestaudio/best'
 
-    # Prioridad #1: Buscar el mejor stream de SÓLO audio.
     audio_only_formats = [
         f for f in formats 
         if f.get('vcodec') in ['none', None] and f.get('acodec') not in ['none', None]
     ]
 
     if audio_only_formats:
-        # Ordenar por bitrate de audio (abr) si está disponible, sino dejar como está.
-        # Esto es más robusto si 'abr' no existe.
         try:
             best_format = sorted(audio_only_formats, key=lambda x: x.get('abr', 0), reverse=True)[0]
             logger.info(f"Estrategia Audio-First (Éxito): Mejor formato de SOLO AUDIO seleccionado: ID {best_format.get('format_id')}")
             return best_format.get('format_id')
         except (IndexError, TypeError):
-             # Si falla el ordenamiento o la lista está vacía después de todo
              pass
     
-    # Fallback de Emergencia: Si no hay streams de solo audio (muy raro).
     logger.warning("No se encontraron streams de solo audio. Recurriendo al selector 'bestaudio/best'.")
     return 'bestaudio/best'
+
+def get_best_video_format_id(formats: list) -> str:
+    """
+    Selecciona el mejor formato de VIDEO (con audio) disponible.
+    """
+    if not formats:
+        return 'bestvideo+bestaudio/best'
+
+    video_formats = [
+        f for f in formats 
+        if f.get('vcodec') not in ['none', None] and f.get('acodec') not in ['none', None]
+    ]
+
+    if video_formats:
+        try:
+            # Ordenar por altura, luego por fps, luego por bitrate de video
+            best_format = sorted(
+                video_formats, 
+                key=lambda x: (x.get('height', 0), x.get('fps', 0), x.get('vbr', 0)), 
+                reverse=True
+            )[0]
+            logger.info(f"Mejor formato de VIDEO seleccionado: ID {best_format.get('format_id')}")
+            return best_format.get('format_id')
+        except (IndexError, TypeError):
+             pass
+             
+    return 'bestvideo+bestaudio/best'
 
 def get_lyrics(url: str) -> str or None:
     """Intenta descargar la letra (subtítulos) de una URL."""
@@ -198,7 +219,7 @@ def get_lyrics(url: str) -> str or None:
     return None
 
 def get_url_info(url: str) -> dict or None:
-    """Usa yt-dlp para obtener información detallada de una URL sin descargarla."""
+    """Usa yt-dlp para obtener información detallada y enriquecida de una URL."""
     ydl_opts = get_common_ydl_opts()
     ydl_opts.update({
         'skip_download': True,
@@ -219,13 +240,14 @@ def get_url_info(url: str) -> dict or None:
             formats = []
             if entry.get('formats'):
                 for f in entry['formats']:
+                    # Solo añadir formatos que sean realmente descargables
                     if f.get('vcodec', 'none') != 'none' or f.get('acodec', 'none') != 'none':
                         formats.append({
                             'format_id': f.get('format_id'), 'ext': f.get('ext'),
-                            'resolution': f.get('resolution') or (f"{f.get('height', 0)}p" if f.get('height') else None),
+                            'format_note': f.get('format_note'),
                             'filesize': f.get('filesize') or f.get('filesize_approx'),
-                            'abr': f.get('abr'), 'acodec': f.get('acodec'), 'vcodec': f.get('vcodec'),
-                            'height': f.get('height')
+                            'vcodec': f.get('vcodec'), 'acodec': f.get('acodec'),
+                            'height': f.get('height'), 'fps': f.get('fps'),
                         })
             
             is_video = any(f.get('vcodec', 'none') != 'none' for f in formats)
@@ -233,7 +255,10 @@ def get_url_info(url: str) -> dict or None:
             return {
                 'url': entry.get('webpage_url', url), 'title': entry.get('title', 'Título Desconocido'),
                 'uploader': entry.get('uploader', 'Uploader Desconocido'), 'duration': entry.get('duration'),
-                'thumbnail': entry.get('thumbnail'), 'is_video': is_video, 'formats': formats
+                'thumbnail': entry.get('thumbnail'), 'is_video': is_video, 'formats': formats,
+                'chapters': entry.get('chapters'), 
+                'view_count': entry.get('view_count'),
+                'upload_date': entry.get('upload_date')
             }
     except AuthenticationError:
         logger.error(f"Error de autenticación al obtener info de {url}. Propagando excepción al worker.")

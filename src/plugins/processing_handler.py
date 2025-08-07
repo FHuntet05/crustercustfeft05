@@ -11,7 +11,7 @@ from bson.objectid import ObjectId
 from src.db.mongo_manager import db_instance
 from src.core import downloader
 from src.helpers.keyboards import (build_back_button, build_processing_menu, 
-                                   build_quality_menu, build_download_quality_menu, 
+                                   build_quality_menu, build_detailed_format_menu, 
                                    build_audio_convert_menu, build_audio_effects_menu,
                                    build_search_results_keyboard, build_panel_keyboard)
 from src.helpers.utils import get_greeting, escape_html, sanitize_filename
@@ -59,6 +59,10 @@ async def on_task_action(client: Client, query: CallbackQuery):
         await db_instance.update_task(task_id, "status", "queued")
         await query.message.edit_text("🔥 Tarea enviada a la forja. El procesamiento comenzará en breve.")
 
+    elif action == "delete":
+        await db_instance.tasks.delete_one({"_id": ObjectId(task_id)})
+        await query.message.edit_text("🗑️ Tarea cancelada y eliminada.")
+
 @Client.on_callback_query(filters.regex(r"^config_"))
 async def show_config_menu(client: Client, query: CallbackQuery):
     await query.answer()
@@ -74,7 +78,7 @@ async def show_config_menu(client: Client, query: CallbackQuery):
         url_info = task.get('url_info')
         if not url_info or not url_info.get('formats'):
             return await query.message.edit_text("❌ No hay información de formatos para esta tarea.")
-        keyboard = build_download_quality_menu(task_id, url_info['formats'])
+        keyboard = build_detailed_format_menu(task_id, url_info['formats'])
         return await query.message.edit_text("💿 Seleccione la calidad a descargar:", reply_markup=keyboard)
 
     if menu_type == "quality": return await query.message.edit_text("⚙️ Seleccione el perfil de calidad:", reply_markup=build_quality_menu(task_id))
@@ -104,28 +108,44 @@ async def show_config_menu(client: Client, query: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^set_"))
 async def set_value_callback(client: Client, query: CallbackQuery):
-    await query.answer()
     parts = query.data.split("_")
     config_type, task_id, value = parts[1], parts[2], "_".join(parts[3:])
 
     task = await db_instance.get_task(task_id)
-    if not task: return await query.message.edit_text("❌ Error: Tarea no encontrada.")
-
+    if not task: 
+        await query.answer("❌ Error: Tarea no encontrada.", show_alert=True)
+        return await query.message.delete()
+    
     if config_type == "dlformat":
-        update_result = await db_instance.tasks.update_one(
+        format_id = value
+        # Manejar los botones de acción rápida
+        if value == "mp3":
+            url_info = task.get('url_info', {})
+            format_id = downloader.get_best_audio_format_id(url_info.get('formats', []))
+            await db_instance.update_task(task_id, "file_type", "audio")
+            await db_instance.update_task_config(task_id, "audio_format", "mp3")
+        elif value == "bestaudio":
+            url_info = task.get('url_info', {})
+            format_id = downloader.get_best_audio_format_id(url_info.get('formats', []))
+            await db_instance.update_task(task_id, "file_type", "audio")
+        elif value == "bestvideo":
+            url_info = task.get('url_info', {})
+            format_id = downloader.get_best_video_format_id(url_info.get('formats', []))
+        
+        await db_instance.tasks.update_one(
             {"_id": ObjectId(task_id)},
             {"$set": {
-                "processing_config.download_format_id": value,
+                "processing_config.download_format_id": format_id,
                 "status": "queued"
             }}
         )
-        if update_result.modified_count > 0:
-            await query.message.edit_text("✅ Formato seleccionado.\n\n🔥 Tarea enviada a la forja.", parse_mode=ParseMode.HTML)
-        else:
-            await query.message.edit_text("❌ Error al encolar la tarea. Por favor, inténtelo de nuevo.")
+        await query.message.edit_text("✅ Formato seleccionado.\n\n🔥 Tarea enviada a la forja.", reply_markup=None)
+        await query.answer()
         return
 
-    elif config_type == "quality": await db_instance.update_task_config(task_id, "quality", value)
+    # Lógica anterior para otros menús de configuración
+    await query.answer()
+    if config_type == "quality": await db_instance.update_task_config(task_id, "quality", value)
     elif config_type == "mute": current = task.get('processing_config', {}).get('mute_audio', False); await db_instance.update_task_config(task_id, "mute_audio", not current)
     elif config_type == "audioprop": prop_key, prop_value = parts[3], parts[4]; await db_instance.update_task_config(task_id, f"audio_{prop_key}", prop_value)
     elif config_type == "audioeffect": 
@@ -145,7 +165,6 @@ async def set_value_callback(client: Client, query: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^song_select_"))
 async def on_song_select(client: Client, query: CallbackQuery):
-    # --- ARQUITECTURA "HYPER-SPEED" ---
     result_id = query.data.split("_")[2]
     user = query.from_user
 
@@ -160,24 +179,21 @@ async def on_song_select(client: Client, query: CallbackQuery):
         await db_instance.search_results.delete_many({"search_id": search_id})
         await db_instance.search_sessions.delete_one({"_id": ObjectId(search_id)})
     
-    # 1. Editar mensaje original a "Procesando..." para una respuesta instantánea.
     status_message = await query.message.edit_text(f"🔥 Procesando: <b>{escape_html(search_result.get('title'))}</b>...", parse_mode=ParseMode.HTML)
     await query.answer()
 
-    # 2. Obtener información de la URL de forma asíncrona.
     search_term_or_url = search_result.get('url') or f"ytsearch1:{search_result.get('search_term')}"
     info = await asyncio.to_thread(downloader.get_url_info, search_term_or_url)
     
     if not info or not info.get('formats'):
         return await status_message.edit("❌ No se pudo obtener información del video. Puede que haya sido eliminado.")
 
-    # 3. Crear tarea COMPLETA con toda la información necesaria.
-    best_audio_format = downloader.get_best_audio_format(info['formats'])
+    best_audio_format = downloader.get_best_audio_format_id(info['formats'])
     
     processing_config = {
         "download_format_id": best_audio_format,
-        "suppress_progress": True, # Nueva bandera para una ejecución silenciosa
-        "status_message_id": status_message.id # Guardar ID para borrarlo al final
+        "suppress_progress": True,
+        "status_message_id": status_message.id
     }
     
     task_id = await db_instance.add_task(

@@ -1,4 +1,4 @@
-# src/helpers/keyboards.py
+# --- START OF FILE src/helpers/keyboards.py ---
 
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from .utils import escape_html, format_bytes, format_time
@@ -70,54 +70,55 @@ def build_quality_menu(task_id: str) -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(keyboard)
     
-def build_download_quality_menu(task_id: str, formats: list) -> InlineKeyboardMarkup:
-    """Construye el menú de calidades de descarga de forma profesional y segura."""
+def build_detailed_format_menu(task_id: str, formats: list) -> InlineKeyboardMarkup:
+    """Construye el menú de calidades de descarga detallado y enriquecido."""
     keyboard = []
     
+    # Filtrar solo formatos de video con resolución y FPS
     video_formats = sorted(
-        [f for f in formats if f.get('vcodec') not in ['none', None] and f.get('height')],
-        key=lambda x: x.get('height', 0),
-        reverse=True
-    )
-    audio_formats = sorted(
-        [f for f in formats if f.get('vcodec') in ['none', None] and f.get('acodec') not in ['none', None] and f.get('abr')],
-        key=lambda x: x.get('abr', 0),
+        [f for f in formats if f.get('vcodec') not in ['none', None] and f.get('height') and f.get('fps')],
+        key=lambda x: (x.get('height', 0), x.get('fps', 0)),
         reverse=True
     )
     
-    if video_formats:
-        keyboard.append([InlineKeyboardButton("--- 🎬 Video ---", callback_data="noop")])
-        added_resolutions = set()
-        for f in video_formats:
-            height = f.get('height')
-            if not height or height in added_resolutions:
-                continue
-            
-            format_id = f.get('format_id')
-            if not format_id: continue
+    # Agrupar formatos en filas de dos
+    row = []
+    for f in video_formats:
+        format_id = f.get('format_id')
+        if not format_id: continue
 
-            filesize = f.get('filesize')
-            label = f"🎬 {height}p ({f.get('ext')})"
-            if filesize:
-                label += f" ~{format_bytes(filesize)}"
+        height = f.get('height')
+        fps = int(f.get('fps'))
+        ext = f.get('ext')
+        filesize = f.get('filesize')
+        
+        # Etiqueta visualmente atractiva
+        label = f"🎬 {height}p{fps} {ext.upper()}"
+        if filesize:
+            label += f" ({format_bytes(filesize)})"
+        
+        row.append(InlineKeyboardButton(label, callback_data=f"set_dlformat_{task_id}_{format_id}"))
+        
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    
+    # Añadir la última fila si no está completa
+    if row:
+        keyboard.append(row)
             
-            keyboard.append([InlineKeyboardButton(label, callback_data=f"set_dlformat_{task_id}_{format_id}")])
-            added_resolutions.add(height)
-            
-    if audio_formats:
-        keyboard.append([InlineKeyboardButton("--- 🎵 Solo Audio ---", callback_data="noop")])
-        for f in audio_formats[:5]: # Mostrar hasta 5 formatos de audio
-            format_id = f.get('format_id')
-            if not format_id: continue
-            
-            filesize = f.get('filesize')
-            label = f"🎵 Audio {f.get('acodec')} ~{int(f.get('abr',0))}k"
-            if filesize:
-                label += f" ~{format_bytes(filesize)}"
-
-            keyboard.append([InlineKeyboardButton(label, callback_data=f"set_dlformat_{task_id}_{format_id}")])
-            
-    keyboard.append([InlineKeyboardButton("🔙 Volver al Panel", callback_data="panel_show")])
+    # Botones de acción rápida
+    keyboard.extend([
+        [
+            InlineKeyboardButton("🎵 MP3", callback_data=f"set_dlformat_{task_id}_mp3"),
+            InlineKeyboardButton("🔊 Mejor Audio", callback_data=f"set_dlformat_{task_id}_bestaudio")
+        ],
+        [
+            InlineKeyboardButton("🏆 Mejor Video", callback_data=f"set_dlformat_{task_id}_bestvideo"),
+            InlineKeyboardButton("❌ Cancelar", callback_data=f"task_delete_{task_id}")
+        ]
+    ])
+    
     return InlineKeyboardMarkup(keyboard)
 
 def build_search_results_keyboard(all_results: list, search_id: str, page: int = 1, page_size: int = 5) -> InlineKeyboardMarkup:
@@ -182,3 +183,4 @@ def build_audio_effects_menu(task_id: str, config: dict) -> InlineKeyboardMarkup
 
 def build_back_button(callback_data: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data=callback_data)]])
+# --- END OF FILE src/helpers/keyboards.py ---

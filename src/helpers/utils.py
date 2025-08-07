@@ -4,7 +4,7 @@ import os
 import time
 import asyncio
 from html import escape
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pyrogram.enums import ParseMode
 
 # Cargar el ID del admin desde las variables de entorno de forma segura
@@ -33,6 +33,28 @@ def format_bytes(size_in_bytes) -> str:
         return f"{size:.2f} {power_labels[n]}"
     except (ValueError, TypeError):
         return "Tamaño inválido"
+
+def format_view_count(count) -> str:
+    """Formatea un contador de vistas a un formato legible (K, M)."""
+    if count is None: return "N/A"
+    try:
+        num = float(count)
+        if num < 1000:
+            return str(int(num))
+        elif num < 1_000_000:
+            return f"{num/1000:.1f} K"
+        else:
+            return f"{num/1_000_000:.1f} M"
+    except (ValueError, TypeError):
+        return "N/A"
+
+def format_upload_date(date_str) -> str:
+    """Formatea una fecha YYYYMMDD a DD-MM-YYYY."""
+    if date_str is None or len(date_str) != 8: return "N/A"
+    try:
+        return datetime.strptime(date_str, "%Y%m%d").strftime("%d-%m-%Y")
+    except ValueError:
+        return "N/A"
 
 def escape_html(text: str) -> str:
     """Escapa caracteres HTML de un texto para evitar problemas de parseo en Telegram."""
@@ -73,7 +95,7 @@ async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
     ctx.last_update_text = text
     
     current_time = time.time()
-    if current_time - ctx.last_edit_time > 1.5:  # --- OPTIMIZACIÓN DE VISUALIZACIÓN ---
+    if current_time - ctx.last_edit_time > 1.5:
         try:
             await ctx.bot.edit_message_text(
                 chat_id=ctx.message.chat.id, 
@@ -83,7 +105,6 @@ async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
             )
             ctx.last_edit_time = current_time
         except Exception: 
-            # Si la edición falla (ej. mensaje eliminado), no hacer nada.
             pass
 
 def _progress_hook_yt_dlp(d, progress_tracker: dict):
@@ -119,11 +140,8 @@ def _progress_hook_yt_dlp(d, progress_tracker: dict):
                     user_id=user_id,
                     user_mention=user_mention
                 )
-                # Enviar la corutina al bucle de eventos principal de forma segura desde un hilo.
                 asyncio.run_coroutine_threadsafe(_edit_status_message(user_id, text, progress_tracker), ctx.loop)
     except Exception as e:
-        # --- OPTIMIZACIÓN DE VISUALIZACIÓN: Evitar que el hook de progreso falle ---
-        # A veces yt-dlp puede enviar un diccionario incompleto, esto lo previene.
         logger.warning(f"Error menor en el hook de progreso de yt-dlp (ignorado): {e}")
 
 def format_status_message(
@@ -134,7 +152,6 @@ def format_status_message(
     """
     Construye el mensaje de estado con un formato visual mejorado y detallado.
     """
-    # --- OPTIMIZACIÓN DE VISUALIZACIÓN: Formato de mensaje mejorado ---
     bar = _create_text_bar(percentage, 10)
     short_filename = (filename[:45] + '…') if len(filename) > 48 else filename
 
