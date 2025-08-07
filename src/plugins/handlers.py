@@ -86,7 +86,8 @@ async def any_file_handler(client: Client, message: Message):
     else:
         await message.reply(f"❌ {greeting_prefix}Hubo un error al registrar la tarea en la base de datos.", parse_mode=ParseMode.HTML)
 
-@Client.on_message(filters.text & ~filters.command)
+# --- CORRECCIÓN DE SINTAXIS CRÍTICA ---
+@Client.on_message(filters.text & ~filters.command())
 async def text_handler(client: Client, message: Message):
     """
     Dispatcher de texto:
@@ -117,7 +118,6 @@ async def text_handler(client: Client, message: Message):
         if not task_id:
             return await status_message.edit_text(f"❌ {greeting_prefix}Error al crear la tarea en la DB.")
         
-        # --- NUEVO FLUJO DE MENÚ DETALLADO ---
         caption_parts = [
             f"<b>📝 Nombre:</b> {escape_html(info['title'])}",
             f"<b>🗓️ Creado:</b> {format_upload_date(info.get('upload_date'))}",
@@ -128,7 +128,7 @@ async def text_handler(client: Client, message: Message):
 
         if info.get('chapters'):
             caption_parts.append("\n<b>🎬 Capítulos:</b>")
-            for chapter in info['chapters'][:15]: # Limitar a 15 capítulos para no exceder el límite
+            for chapter in info['chapters'][:15]:
                 start = format_time(chapter.get('start_time'))
                 end = format_time(chapter.get('end_time'))
                 title = escape_html(chapter.get('title'))
@@ -139,7 +139,6 @@ async def text_handler(client: Client, message: Message):
         
         keyboard = build_detailed_format_menu(str(task_id), info['formats'])
         
-        # Enviar como foto para una mejor vista previa
         await client.send_photo(
             chat_id=user.id,
             photo=info.get('thumbnail'),
@@ -149,11 +148,9 @@ async def text_handler(client: Client, message: Message):
         )
         return await status_message.delete()
 
-    # Manejar respuestas para configuraciones pendientes
     if hasattr(client, 'user_data') and user.id in client.user_data and 'active_config' in client.user_data[user.id]:
         return await processing_handler.handle_text_input_for_config(client, message)
 
-    # El resto del texto se asume como búsqueda de música
     query = text
     status_message = await message.reply(f"🔎 {greeting_prefix}Buscando <code>{escape_html(query)}</code>...", parse_mode=ParseMode.HTML)
     
