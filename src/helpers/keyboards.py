@@ -71,17 +71,14 @@ def build_quality_menu(task_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
     
 def build_download_quality_menu(task_id: str, formats: list) -> InlineKeyboardMarkup:
-    """Construye el menú de calidades de descarga, mostrando más opciones."""
+    """Construye el menú de calidades de descarga de forma segura."""
     keyboard = []
     
-    # --- LÓGICA MEJORADA ---
-    # Formatos de video (incluso sin audio, yt-dlp los fusiona)
     video_formats = sorted(
         [f for f in formats if f.get('vcodec', 'none') != 'none' and f.get('height')],
         key=lambda x: x.get('height', 0),
         reverse=True
     )
-    # Formatos de solo audio
     audio_formats = sorted(
         [f for f in formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none' and f.get('abr')],
         key=lambda x: x.get('abr', 0),
@@ -90,34 +87,39 @@ def build_download_quality_menu(task_id: str, formats: list) -> InlineKeyboardMa
     
     if video_formats:
         keyboard.append([InlineKeyboardButton("--- 🎬 Video ---", callback_data="noop")])
-        # Usamos un set para no mostrar resoluciones duplicadas (ej. 1080p y 1080p60)
         added_resolutions = set()
         for f in video_formats:
             resolution = f.get('resolution') or f"{f.get('height')}p"
-            if resolution in added_resolutions:
+            if not resolution or resolution in added_resolutions:
                 continue
             
+            # --- CORRECCIÓN CRÍTICA ---
+            # Usamos el format_id original, que es corto y seguro para el callback_data.
+            format_id = f.get('format_id')
+            if not format_id: continue
+
             filesize = f.get('filesize') or f.get('filesize_approx')
             label = f"{resolution} ({f.get('ext')}) ~{format_bytes(filesize)}".strip()
-            # Usar 'bestvideo[height<=...]+bestaudio' para asegurar que se obtenga video y audio
-            format_id = f"bestvideo[height<={f.get('height')}]+bestaudio/best[height<={f.get('height')}]"
+            
             keyboard.append([InlineKeyboardButton(label, callback_data=f"set_dlformat_{task_id}_{format_id}")])
             added_resolutions.add(resolution)
-            if len(added_resolutions) >= 5: # Limitar a 5 para no saturar
+            if len(added_resolutions) >= 5:
                 break
             
     if audio_formats:
         keyboard.append([InlineKeyboardButton("--- 🎵 Solo Audio ---", callback_data="noop")])
-        for f in audio_formats[:4]: # Limitar a 4 para no saturar
+        for f in audio_formats[:4]:
+            format_id = f.get('format_id')
+            if not format_id: continue
+            
             filesize = f.get('filesize') or f.get('filesize_approx')
             label = f"Audio {f.get('acodec')} ~{int(f.get('abr',0))}k ~{format_bytes(filesize)}".strip()
-            keyboard.append([InlineKeyboardButton(label, callback_data=f"set_dlformat_{task_id}_{f.get('format_id')}")])
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"set_dlformat_{task_id}_{format_id}")])
             
     keyboard.append([InlineKeyboardButton("🔙 Volver al Panel", callback_data="panel_show")])
     return InlineKeyboardMarkup(keyboard)
 
 def build_search_results_keyboard(all_results: list, search_id: str, page: int = 1, page_size: int = 5) -> InlineKeyboardMarkup:
-    """Construye el teclado paginado para los resultados de búsqueda de música."""
     keyboard = []
     
     start_index = (page - 1) * page_size
@@ -152,7 +154,6 @@ def build_search_results_keyboard(all_results: list, search_id: str, page: int =
     return InlineKeyboardMarkup(keyboard)
 
 def build_audio_convert_menu(task_id: str) -> InlineKeyboardMarkup:
-    """Construye el menú para configurar la conversión de audio."""
     keyboard = [
         [
             InlineKeyboardButton("MP3", callback_data=f"set_audioprop_{task_id}_format_mp3"),
@@ -169,7 +170,6 @@ def build_audio_convert_menu(task_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 def build_audio_effects_menu(task_id: str, config: dict) -> InlineKeyboardMarkup:
-    """Construye el menú para aplicar efectos de audio."""
     slowed = "✅" if config.get('slowed') else "❌"
     reverb = "✅" if config.get('reverb') else "❌"
     keyboard = [
@@ -180,5 +180,4 @@ def build_audio_effects_menu(task_id: str, config: dict) -> InlineKeyboardMarkup
     return InlineKeyboardMarkup(keyboard)
 
 def build_back_button(callback_data: str) -> InlineKeyboardMarkup:
-    """Construye un simple teclado con un único botón de 'Volver'."""
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data=callback_data)]])

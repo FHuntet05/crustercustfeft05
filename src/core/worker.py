@@ -75,16 +75,7 @@ async def _progress_callback_pyrogram(current, total, user_id, operation):
     await _edit_status_message(user_id, text)
 
 def _progress_hook_yt_dlp(d, user_id, operation):
-    """
-    Hook para yt-dlp. Se ha simplificado para evitar errores de loop de eventos
-    y se ha desactivado temporalmente la actualización de mensajes desde aquí
-    para garantizar la estabilidad.
-    """
-    if d['status'] == 'downloading':
-        # La lógica de la barra de progreso desde este hook se desactiva
-        # para prevenir el error 'There is no current event loop in thread'.
-        pass
-    elif d['status'] == 'finished':
+    if d['status'] == 'finished':
         logger.info(f"yt-dlp hook: Descarga finalizada para el usuario {user_id}.")
 
 async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
@@ -153,14 +144,21 @@ async def process_task(bot, task: dict):
             format_id = config.get('download_format_id')
             if not format_id:
                  raise Exception("La tarea de URL no tiene 'download_format_id' seleccionado.")
+            
+            # --- LÓGICA DE CONSTRUCCIÓN DE COMANDO ---
+            # Si el format_id NO es para solo audio, construir el comando para obtener video+audio.
+            if 'bestaudio' not in format_id and 'abr' not in format_id:
+                final_format_id = f"{format_id}+bestaudio/best[height={task.get('url_info', {}).get('height')}]"
+            else:
+                final_format_id = format_id
 
-            # Desactivamos el hook de progreso temporalmente para evitar errores de loop
-            if not await asyncio.to_thread(downloader.download_from_url, url, base_download_path, format_id, progress_hook=None):
+            await _edit_status_message(user_id, f"📥 Descargando con formato: <code>{final_format_id}</code>")
+
+            if not await asyncio.to_thread(downloader.download_from_url, url, base_download_path, final_format_id, progress_hook=None):
                 raise Exception("La descarga desde la URL falló.")
             
             found_files = glob.glob(f"{base_download_path}.*")
             if not found_files:
-                # A veces yt-dlp guarda el archivo sin añadir extensión si el nombre ya la tiene
                 if os.path.exists(base_download_path):
                     actual_download_path = base_download_path
                 else:
