@@ -33,15 +33,26 @@ async def open_task_menu_from_p(client: Client, query: CallbackQuery):
         parse_mode=ParseMode.HTML
     )
 
-@Client.on_callback_query(filters.regex(r"^task_manual_config_"))
-async def task_manual_config(client: Client, query: CallbackQuery):
-    """Manejador para el botón 'Configuración Manual'."""
+@Client.on_callback_query(filters.regex(r"^task_"))
+async def handle_task_actions(client: Client, query: CallbackQuery):
     await query.answer()
-    task_id = query.data.split("_")[3]
-    task = await db_instance.get_task(task_id)
-    if not task: return await query.message.edit_text("❌ Tarea no encontrada.")
+    parts = query.data.split("_")
+    action, task_id = parts[1], "_".join(parts[2:])
 
-    await query.message.edit_text(f"✅ Tarea añadida al panel. Use `/p {await db_instance.tasks.count_documents({'user_id': query.from_user.id, 'status': 'pending_processing'})}` para configurarla.")
+    if action == "manual":
+        if parts[2] == "config":
+             task = await db_instance.get_task(task_id)
+             if not task: return await query.message.edit_text("❌ Tarea no encontrada.")
+             await query.message.edit_text(f"✅ Tarea añadida al panel. Use `/p {await db_instance.tasks.count_documents({'user_id': query.from_user.id, 'status': 'pending_processing'})}` para configurarla.")
+
+    elif action == "queuesingle":
+        await db_instance.update_task(task_id, "status", "queued")
+        await query.message.edit_text("🔥 Tarea enviada a la forja. El procesamiento comenzará en breve.")
+
+    elif action == "delete":
+        await db_instance.delete_task_by_id(task_id)
+        await query.message.edit_text("🗑️ Tarea cancelada y eliminada.")
+
 
 @Client.on_callback_query(filters.regex(r"^(profile_|panel_delete_all_)"))
 async def handle_profile_and_panel_actions(client: Client, query: CallbackQuery):
@@ -69,7 +80,7 @@ async def handle_profile_and_panel_actions(client: Client, query: CallbackQuery)
             preset_name = parts[3] if len(parts) > 3 else parts[2]
             if parts[2] == "confirm":
                 result = await db_instance.user_presets.delete_one({"user_id": user.id, "preset_name": preset_name.lower()})
-                await query.message.edit_text(f"🗑️ Perfil '<b>{escape_html(preset_name.capitalize())}</b>' eliminado." if result.deleted_count > 0 else "❌ Perfil no encontrado.")
+                await query.message.edit_text(f"🗑️ Perfil '<b>{escape_html(preset_name.capitalize())}</b>' eliminado." if result.deleted_count > 0 else "❌ Perfil no encontrado.", parse_mode=ParseMode.HTML)
             elif parts[2] == "cancel":
                 await query.message.delete()
     
@@ -87,12 +98,11 @@ async def show_config_menu(client: Client, query: CallbackQuery):
     if not (task := await db_instance.get_task(task_id)):
         return await query.message.edit_text("❌ Error: Tarea no encontrada.")
 
-    keyboards = { "dlquality": build_detailed_format_menu(task_id, task.get('url_info', {}).get('formats', [])), "audioconvert": build_audio_convert_menu(task_id), "audioeffects": build_audio_effects_menu(task_id, task.get('processing_config', {})), "audiometadata": build_audio_metadata_menu(task_id), "watermark": build_watermark_menu(task_id), "tracks": build_tracks_menu(task_id, task.get('processing_config', {})), "transcode": build_transcode_menu(task_id) }
+    config = task.get('processing_config', {})
+    keyboards = { "dlquality": build_detailed_format_menu(task_id, task.get('url_info', {}).get('formats', [])), "audioconvert": build_audio_convert_menu(task_id), "audioeffects": build_audio_effects_menu(task_id, config), "audiometadata": build_audio_metadata_menu(task_id), "watermark": build_watermark_menu(task_id), "tracks": build_tracks_menu(task_id, config), "transcode": build_transcode_menu(task_id) }
     menu_messages = { "dlquality": "💿 Seleccione la calidad a descargar:", "audioconvert": "🔊 Configure la conversión de audio:", "audioeffects": "🎧 Aplique efectos de audio:", "audiometadata": "🖼️ Elija qué metadatos editar:", "watermark": "💧 Elija un tipo de marca de agua:", "tracks": "📜 Gestione las pistas del video:", "transcode": "📉 Seleccione una resolución para reducir el tamaño:" }
     
     if menu_type in keyboards:
-        if menu_type in ["audioeffects", "tracks"]:
-            return await query.message.edit_text(menu_messages[menu_type], reply_markup=keyboards[menu_type])
         return await query.message.edit_text(menu_messages[menu_type], reply_markup=keyboards[menu_type])
 
     if not hasattr(client, 'user_data'): client.user_data = {}
@@ -134,27 +144,29 @@ async def set_value_callback(client: Client, query: CallbackQuery):
     
     if not (task := await db_instance.get_task(task_id)): return await query.message.delete()
 
-    config_updates = { "mute": ("mute_audio", not task.get('processing_config', {}).get('mute_audio', False)), "audioprop": (f"audio_{parts[3]}", parts[4]), "audioeffect": (parts[3], not task.get('processing_config', {}).get(parts[3], False)), "trackopt": (parts[3], not task.get('processing_config', {}).get(parts[3], False)), "transcode": (parts[3], parts[4]) }
-    
-    if config_type == "transcode" and value == "remove_all":
-        await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$unset": {"processing_config.transcode": ""}})
-    elif config_type in config_updates:
-        key, new_value = config_updates[config_type]
-        await db_instance.update_task_config(task_id, f"{config_type}.{key}", new_value)
+    # --- CORRECCIÓN DE LÓGICA ---
+    if config_type == "transcode":
+        if value == "remove_all":
+            await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$unset": {"processing_config.transcode": ""}})
+        else:
+            key, new_value = value.split("_", 1) # Ej: "resolution_1080p" -> ("resolution", "1080p")
+            await db_instance.update_task_config(task_id, f"transcode.{key}", new_value)
+    else:
+        # Lógica anterior para otros toggles y propiedades
+        config_updates = { "mute": ("mute_audio", not task.get('processing_config', {}).get('mute_audio', False)), "audioprop": (f"audio_{parts[3]}", parts[4]), "audioeffect": (parts[3], not task.get('processing_config', {}).get(parts[3], False)), "trackopt": (parts[3], not task.get('processing_config', {}).get(parts[3], False)) }
+        if config_type in config_updates:
+            key, new_value = config_updates[config_type]
+            await db_instance.update_task_config(task_id, key, new_value)
     
     task = await db_instance.get_task(task_id)
     config = task.get('processing_config', {})
     
-    # --- CORRECCIÓN ---
-    # Llamar a cada constructor de teclado con los argumentos correctos
-    if config_type == "audioeffect":
-        keyboard = build_audio_effects_menu(task_id, config)
-    elif config_type == "trackopt":
-        keyboard = build_tracks_menu(task_id, config)
-    elif config_type == "transcode":
-        keyboard = build_transcode_menu(task_id) # Esta era la línea del error
-    else:
-        keyboard = build_processing_menu(task_id, task['file_type'], task)
+    # --- CORRECCIÓN DE NAVEGACIÓN ---
+    # Decidir a qué menú volver después de la acción
+    if config_type == "audioeffect": keyboard = build_audio_effects_menu(task_id, config)
+    elif config_type == "trackopt": keyboard = build_tracks_menu(task_id, config)
+    elif config_type == "transcode": keyboard = build_transcode_menu(task_id) # Volver al menú de transcode
+    else: keyboard = build_processing_menu(task_id, task['file_type'], task)
         
     await query.message.edit_text("🛠️ Configuración actualizada.", reply_markup=keyboard)
 
