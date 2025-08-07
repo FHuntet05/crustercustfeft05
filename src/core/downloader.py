@@ -128,35 +128,43 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_track
 
 def get_best_audio_format(formats: list) -> str or None:
     """
-    Selecciona el mejor formato de audio disponible usando una estrategia de cascada inteligente.
+    Selecciona el mejor formato de audio disponible usando una estrategia defensiva en cascada.
     """
-    # --- LÓGICA DE SELECCIÓN DE AUDIO REESCRITA Y ROBUSTA ---
+    # --- LÓGICA DE SELECCIÓN DE AUDIO REESCRITA (VERSIÓN DEFINITIVA) ---
     if not formats:
-        logger.warning("No se proporcionaron formatos para seleccionar. Usando 'ba' como último recurso.")
-        return 'ba'
+        logger.warning("No se proporcionaron formatos. Usando el selector final 'bestaudio/best'.")
+        return 'bestaudio/best'
 
-    # Intento 1: Buscar el mejor formato de "solo audio" (el más eficiente).
-    audio_only_formats = [f for f in formats if f.get('vcodec') in ['none', None] and f.get('acodec') not in ['none', None] and f.get('abr')]
+    available_formats = [f for f in formats if f.get('format_id')]
+
+    # Estrategia 1: Mejor formato de SOLO AUDIO por bitrate ('abr').
+    audio_only_formats = [f for f in available_formats if f.get('vcodec') in ['none', None] and f.get('abr')]
     if audio_only_formats:
         best_format = sorted(audio_only_formats, key=lambda x: x.get('abr', 0), reverse=True)[0]
-        logger.info(f"Estrategia 1 (Éxito): Mejor formato de SOLO AUDIO seleccionado: ID {best_format.get('format_id')} con ABR {best_format.get('abr')}k")
-        return best_format.get('format_id')
-    
-    logger.warning("Estrategia 1 (Fallo): No se encontraron formatos de solo audio. Pasando a la estrategia 2.")
+        logger.info(f"Estrategia 1 (Éxito): Mejor formato de SOLO AUDIO seleccionado: ID {best_format['format_id']} con ABR {best_format['abr']}k")
+        return best_format['format_id']
+    logger.info("Estrategia 1 (Fallo): No se encontraron formatos de solo audio con 'abr'.")
 
-    # Intento 2: Buscar el formato con el mejor audio, incluso si tiene video.
-    # Filtramos para asegurarnos de que tengan un 'format_id' y bitrate de audio 'abr'.
-    formats_with_audio = [f for f in formats if f.get('format_id') and f.get('abr')]
-    if formats_with_audio:
-        best_format = sorted(formats_with_audio, key=lambda x: x.get('abr', 0), reverse=True)[0]
-        logger.info(f"Estrategia 2 (Éxito): Mejor formato CON AUDIO seleccionado: ID {best_format.get('format_id')} con ABR {best_format.get('abr')}k")
-        return best_format.get('format_id')
+    # Estrategia 2: Mejor formato MIXTO por bitrate de audio ('abr').
+    mixed_formats_with_abr = [f for f in available_formats if f.get('abr')]
+    if mixed_formats_with_abr:
+        best_format = sorted(mixed_formats_with_abr, key=lambda x: x.get('abr', 0), reverse=True)[0]
+        logger.info(f"Estrategia 2 (Éxito): Mejor formato MIXTO (por audio) seleccionado: ID {best_format['format_id']} con ABR {best_format['abr']}k")
+        return best_format['format_id']
+    logger.info("Estrategia 2 (Fallo): No se encontraron formatos mixtos con 'abr'.")
 
-    logger.warning("Estrategia 2 (Fallo): No se encontraron formatos con 'abr'. Pasando a la estrategia 3.")
-    
-    # Intento 3: Fallback final al selector genérico 'ba' (bestaudio).
-    logger.info("Estrategia 3 (Fallback): Usando el selector genérico 'ba' (bestaudio).")
-    return 'ba'
+    # Estrategia 3: Buscar IDs de audio conocidos y fiables en orden de calidad.
+    known_audio_ids = ['141', '251', '140', '250', '139', '249'] # m4a 256k, opus ~160k, m4a 128k, etc.
+    available_ids = {f['format_id'] for f in available_formats}
+    for audio_id in known_audio_ids:
+        if audio_id in available_ids:
+            logger.info(f"Estrategia 3 (Éxito): Encontrado ID de audio conocido y fiable: {audio_id}")
+            return audio_id
+    logger.info("Estrategia 3 (Fallo): No se encontraron IDs de audio conocidos.")
+
+    # Estrategia 4: Fallback final al selector compuesto más robusto.
+    logger.warning("Estrategia 4 (Fallback Final): Usando el selector genérico 'bestaudio/best'.")
+    return 'bestaudio/best'
 
 def get_lyrics(url: str) -> str or None:
     """Intenta descargar la letra (subtítulos) de una URL."""
