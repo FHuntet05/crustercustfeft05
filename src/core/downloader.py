@@ -1,178 +1,195 @@
 # src/core/downloader.py
 
-import os
 import yt_dlp
-import spotipy
-import requests
+import logging
 import asyncio
-from spotipy.oauth2 import SpotifyClientCredentials
-from lyricsgenius import Genius
-from src.db.mongo_manager import db
+import os
+import re
+import aiohttp
+import aiofiles
 
-# --- CONFIGURACIÓN ---
-SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
-SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
-GENIUS_ACCESS_TOKEN = os.getenv("GENIUS_ACCESS_TOKEN")
-DOWNLOAD_PATH = "downloads/"
-COOKIES_FILE_PATH = "youtube_cookies.txt"
+# Configuración del logger
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-os.makedirs(DOWNLOAD_PATH, exist_ok=True)
+# Opciones base para yt-dlp
+YDL_OPTS_BASE = {
+    'logger': logger,
+    'cookiefile': 'youtube_cookies.txt' if os.path.exists('youtube_cookies.txt') else None,
+    'nocheckcertificate': True,
+    'ignoreerrors': True,
+    'quiet': True,
+    'noplaylist': True,
+    'extract_flat': 'in_playlist', # Para manejar playlists de forma eficiente
+}
 
-class Downloader:
-    """
-    Clase que encapsula toda la lógica de búsqueda, obtención de información
-    y descarga de medios usando yt-dlp, spotipy y lyricsgenius.
-    """
-    def __init__(self):
-        self.spotify = None
-        if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
-            auth_manager = SpotifyClientCredentials(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET)
-            self.spotify = spotipy.Spotify(auth_manager=auth_manager)
-        
-        self.genius = Genius(GENIUS_ACCESS_TOKEN, verbose=False, remove_section_headers=True, timeout=15) if GENIUS_ACCESS_TOKEN else None
-
-    class DownloaderError(Exception):
-        """Excepción personalizada para errores de esta clase."""
-        pass
-
-    def get_url_info(self, url: str) -> dict:
-        """
-        Obtiene información de una URL usando yt-dlp.
-        Lanza DownloaderError si la información no se puede obtener.
-        """
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'skip_download': True,
-            'cookiefile': COOKIES_FILE_PATH,
-        }
-        
+async def search_music(query: str):
+    """Busca música en YouTube y devuelve una lista de resultados."""
+    loop = asyncio.get_event_loop()
+    opts = {
+        **YDL_OPTS_BASE,
+        'default_search': 'ytsearch10',  # Busca 10 resultados en YouTube
+        'format': 'bestaudio/best',
+    }
+    
+    with yt_dlp.YoutubeDL(opts) as ydl:
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+            search_result = await loop.run_in_executor(
+                None, 
+                lambda: ydl.extract_info(query, download=False)
+            )
             
-            if not info:
-                raise self.DownloaderError(
-                    "yt-dlp no devolvió información. Puede que las cookies hayan expirado o el contenido no esté disponible."
-                )
+            results = []
+            if 'entries' in search_result:
+                for entry in search_result['entries']:
+                    if entry:
+                        results.append({
+                            'id': entry.get('id'),
+                            'title': entry.get('title', 'Título desconocido'),
+                            'artist': entry.get('uploader', 'Artista desconocido'),
+                            'duration': format_time(entry.get('duration', 0)),
+                        })
+            return results
+        except Exception as e:
+            logger.error(f"Error al buscar música con yt-dlp: {e}")
+            return []
+
+async def get_media_info(url):
+    """Obtiene información detallada de un medio sin descargarlo."""
+    loop = asyncio.get_event_loop()
+    # Para obtener info detallada, no usamos 'extract_flat'
+    opts = {key: value for key, value in YDL_OPTS_BASE.items() if key != 'extract_flat'}
+    
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        try:
+            info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
             return info
-            
-        except yt_dlp.utils.DownloadError as e:
-            print(f"ERROR [yt-dlp]: No se pudo obtener info de {url}: {e}")
-            clean_error = str(e).split('ERROR: ')[-1].strip()
-            raise self.DownloaderError(clean_error)
-            
         except Exception as e:
-            print(f"ERROR [Downloader]: Error inesperado en get_url_info para {url}: {e}")
-            raise self.DownloaderError(f"Error inesperado al procesar la URL: {e}")
+            logger.error(f"yt-dlp no pudo obtener información de {url}: {e}")
+            return None
 
-    async def download_media(self, task: dict) -> str:
-        """
-        Descarga el medio especificado en una tarea de la base de datos.
-        Utiliza progress hooks para actualizar el estado en la DB.
-        """
-        task_id = task["_id"]
+async def download_media(url, format_id, output_path, progress_hook):
+    """Descarga un medio con el formato especificado."""
+    loop = asyncio.get_event_loop()
+    
+    directory = os.path.dirname(output_path)
+    if not os.path.exists(directory):
+        os.makedirs(directory)
 
-        async def progress_hook(d):
-            if d['status'] == 'downloading':
-                percentage = d.get('_percent_str', '0.0%').strip()
-                speed = d.get('_speed_str', 'N/A').strip()
-                eta = d.get('_eta_str', 'N/A').strip()
-                status_message = f"Descargando... {percentage} ({speed} - ETA: {eta})"
-                asyncio.create_task(db.update_task_status(task_id, "downloading", status_message))
+    # yt-dlp añade la extensión, así que se la quitamos a la plantilla
+    output_template = os.path.splitext(output_path)[0]
 
-        output_template = os.path.join(DOWNLOAD_PATH, f"{task_id}.%(ext)s")
-        
-        ydl_opts = {
-            'outtmpl': output_template,
-            'progress_hooks': [progress_hook],
-            'cookiefile': COOKIES_FILE_PATH,
-            'format': task['format_id'],
-            'postprocessors': []
-        }
-        
-        if task.get("is_audio_only", False):
-            ydl_opts['postprocessors'].append({'key': 'FFmpegExtractAudio', 'preferredcodec': 'm4a'})
-            ydl_opts['postprocessors'].append({'key': 'EmbedThumbnail'})
-            ydl_opts['writethumbnail'] = True
-
+    opts = {
+        **YDL_OPTS_BASE,
+        'format': format_id,
+        'outtmpl': f'{output_template}.%(ext)s',
+        'progress_hooks': [progress_hook],
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                meta = await asyncio.to_thread(ydl.extract_info, task['url'], download=True)
-                downloaded_file = ydl.prepare_filename(meta)
-                final_path = downloaded_file
-                if not os.path.exists(final_path):
-                    base, _ = os.path.splitext(downloaded_file)
-                    if os.path.exists(base + ".m4a"):
-                        final_path = base + ".m4a"
-                    else:
-                        raise self.DownloaderError("No se encontró el archivo descargado final.")
-                return final_path
+            info = await loop.run_in_executor(
+                None, 
+                lambda: ydl.extract_info(url, download=True)
+            )
+            # El nombre de archivo final está en la info devuelta
+            return info.get('requested_downloads')[0]['filepath']
         except Exception as e:
-            print(f"ERROR [Downloader]: Falló la descarga para la tarea {task_id}: {e}")
-            raise self.DownloaderError(f"Fallo en la descarga: {e}")
+            logger.error(f"yt-dlp falló al descargar {url}: {e}")
+            raise
 
-    def search_music(self, query: str, limit: int = 10):
-        """
-        Busca música usando yt-dlp. Prioriza la búsqueda como URL si es una.
-        """
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'skip_download': True,
-            'cookiefile': COOKIES_FILE_PATH,
-            'default_search': 'ytsearch',
-        }
-
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # yt-dlp maneja URLs directamente, si no, busca.
-                search_query = query if "http" in query else f"ytsearch{limit}:{query}"
-                result = ydl.extract_info(search_query, download=False)
-                
-                # extract_info puede devolver un solo video o una lista (playlist/búsqueda)
-                if 'entries' in result:
-                    return result['entries'] # Es una búsqueda o playlist
+async def download_thumbnail(thumbnail_url: str, output_path: str):
+    """Descarga una imagen desde una URL de forma asíncrona."""
+    logger.info(f"Descargando carátula desde {thumbnail_url}")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(thumbnail_url) as response:
+                if response.status == 200:
+                    async with aiofiles.open(output_path, 'wb') as f:
+                        await f.write(await response.read())
+                    logger.info(f"Carátula guardada en {output_path}")
+                    return output_path
                 else:
-                    return [result] # Es un solo video
+                    logger.error(f"No se pudo descargar la carátula. Status: {response.status}")
+                    return None
+    except Exception as e:
+        logger.error(f"Excepción al descargar la carátula: {e}")
+        return None
 
-        except Exception as e:
-            print(f"ERROR [Downloader]: Falló la búsqueda de música para '{query}': {e}")
-            raise self.DownloaderError(f"La búsqueda falló: {e}")
+async def get_lyrics(url: str, temp_dir: str = "downloads"):
+    """
+    Intenta descargar las letras (subtítulos) de un video de YouTube.
+    Devuelve el texto de la letra o None si no se encuentra.
+    """
+    logger.info(f"Intentando obtener letras para {url}")
+    loop = asyncio.get_event_loop()
+    
+    try:
+        # Extraemos el ID para un nombre de archivo único
+        ydl_temp = yt_dlp.YoutubeDL({'quiet': True, 'nocheckcertificate': True})
+        video_id = ydl_temp.extract_info(url, download=False).get('id', 'temp_lyrics')
+    except Exception as e:
+        logger.error(f"No se pudo extraer el ID del video para las letras: {e}")
+        video_id = "temp_lyrics" # Fallback
 
-    def download_cover_and_lyrics(self, title: str, artist: str) -> (str, str):
-        """
-        Intenta descargar la carátula y la letra de una canción.
-        """
-        cover_path = None
-        lyrics_text = None
+    lyrics_template = os.path.join(temp_dir, f'{video_id}_lyrics')
+    
+    opts = {
+        'logger': logger,
+        'nocheckcertificate': True,
+        'writeautomaticsub': True,
+        'subtitleslangs': ['es', 'en'],
+        'skip_download': True,
+        'outtmpl': lyrics_template,
+        'quiet': True,
+    }
+
+    sub_file_path = None
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            await loop.run_in_executor(None, lambda: ydl.download([url]))
         
-        # Lógica de carátula con Spotify (si está configurado)
-        if self.spotify:
-            try:
-                results = self.spotify.search(q=f'track:{title} artist:{artist}', type='track', limit=1)
-                if results['tracks']['items']:
-                    track = results['tracks']['items'][0]
-                    if track['album']['images']:
-                        cover_url = track['album']['images'][0]['url']
-                        response = requests.get(cover_url, timeout=10)
-                        if response.status_code == 200:
-                            safe_title = "".join([c for c in title if c.isalpha() or c.isdigit()]).rstrip()
-                            cover_path = os.path.join(DOWNLOAD_PATH, f"cover_{safe_title}.jpg")
-                            with open(cover_path, 'wb') as f:
-                                f.write(response.content)
-            except Exception as e:
-                print(f"WARN [Spotify]: No se pudo descargar la carátula: {e}")
+        # Buscar el archivo de subtítulos (.vtt) descargado
+        for lang in ['es', 'en']:
+            expected_path = f"{lyrics_template}.{lang}.vtt"
+            if os.path.exists(expected_path):
+                sub_file_path = expected_path
+                break
+        
+        if not sub_file_path:
+            logger.warning(f"No se encontraron subtítulos VTT para {url}")
+            return None
 
-        # Lógica de letras con Genius (si está configurado)
-        if self.genius:
-            try:
-                song = self.genius.search_song(title, artist)
-                if song:
-                    lyrics_text = song.lyrics
-            except Exception as e:
-                print(f"WARN [Genius]: No se pudieron descargar las letras: {e}")
-                
-        return cover_path, lyrics_text
+        # Leer y limpiar el archivo VTT
+        async with aiofiles.open(sub_file_path, mode='r', encoding='utf-8', errors='ignore') as f:
+            content = await f.read()
+        
+        # Limpieza del VTT para obtener solo el texto
+        lines = content.splitlines()
+        lyrics_text = []
+        # Expresión regular para limpiar timestamps y tags
+        clean_line_regex = re.compile(r'<[^>]+>|&nbsp;')
+        for line in lines:
+            if line.strip() and "-->" not in line and "WEBVTT" not in line and "Kind: captions" not in line and "Language: " not in line:
+                cleaned_line = clean_line_regex.sub('', line).strip()
+                if cleaned_line and (not lyrics_text or cleaned_line != lyrics_text[-1]):
+                    lyrics_text.append(cleaned_line)
+        
+        return "\n".join(lyrics_text) if lyrics_text else None
 
-downloader = Downloader()
+    except Exception as e:
+        logger.error(f"Error al obtener letras para {url}: {e}")
+        return None
+    finally:
+        # Limpiar archivo temporal de subtítulos
+        if sub_file_path and os.path.exists(sub_file_path):
+            os.remove(sub_file_path)
+
+def format_time(seconds):
+    """Formatea segundos en HH:MM:SS o MM:SS."""
+    if seconds is None:
+        return "N/A"
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
