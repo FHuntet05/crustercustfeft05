@@ -41,7 +41,7 @@ def build_processing_menu(task_id: str, file_type: str, task_data: dict, filenam
             [InlineKeyboardButton(mute_text, callback_data=f"set_mute_{task_id}_toggle")],
         ])
     elif file_type == 'audio':
-        bitrate = task_config.get('audio_bitrate', '128k')
+        bitrate = task_config.get('audio_bitrate', '192k')
         audio_format = task_config.get('audio_format', 'mp3')
         keyboard.extend([
             [InlineKeyboardButton(f"🔊 Convertir ({audio_format.upper()}, {bitrate})", callback_data=f"config_audioconvert_{task_id}")],
@@ -73,9 +73,6 @@ def build_detailed_format_menu(task_id: str, formats: list) -> InlineKeyboardMar
     """Construye el menú de calidades de descarga detallado, mostrando TODAS las calidades de video."""
     keyboard = []
     
-    # --- CORRECCIÓN DE LÓGICA DE FILTRADO FINAL Y DEFINITIVA ---
-    # Aceptar cualquier formato que tenga un códec de video y una resolución (height).
-    # Esto incluye los formatos de alta calidad (DASH, video-only) y los de baja calidad (video+audio).
     video_formats = sorted(
         [f for f in formats if f.get('vcodec') not in ['none', None] and f.get('height')],
         key=lambda x: (x.get('height', 0), x.get('fps', 0) or 0),
@@ -83,7 +80,6 @@ def build_detailed_format_menu(task_id: str, formats: list) -> InlineKeyboardMar
     )
     
     row = []
-    # Eliminar cualquier límite artificial para mostrar TODAS las calidades.
     for f in video_formats:
         format_id = f.get('format_id')
         if not format_id: continue

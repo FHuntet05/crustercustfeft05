@@ -35,6 +35,7 @@ def get_media_info(file_path: str) -> dict:
 def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnail_path: str = None) -> list:
     """
     Construye el comando FFmpeg de forma más segura, basándose en el tipo de archivo real.
+    Devuelve una lista de comandos para soportar procesos de múltiples pasos.
     """
     config = task.get('processing_config', {})
     file_type = task.get('file_type')
@@ -65,8 +66,6 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
         bitrate = config.get('audio_bitrate', '192k')
         codec_map = {'mp3': 'libmp3lame', 'flac': 'flac', 'opus': 'libopus'}
         
-        # --- OPTIMIZACIÓN DE RENDIMIENTO: Añadir -vn ---
-        # Ignora cualquier stream de video, acelerando la extracción de audio.
         codec_opts.append("-vn")
         
         codec_opts.append(f"-c:a {codec_map.get(fmt, 'libmp3lame')}")
@@ -103,13 +102,20 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
     return [final_command]
 
 def build_gif_command(config, input_path, output_path):
+    """Construye los dos comandos necesarios para un GIF de alta calidad."""
     gif_opts = config['gif_options']
     duration, fps = gif_opts['duration'], gif_opts['fps']
     palette_path = f"{output_path}.palette.png"
     filters = f"fps={fps},scale=480:-1:flags=lanczos"
-    cmd1 = (f"ffmpeg -y -i {shlex.quote(input_path)} -t {duration} -vf \"{filters},palettegen\" {shlex.quote(palette_path)}")
-    cmd2 = (f"ffmpeg -i {shlex.quote(input_path)} -i {shlex.quote(palette_path)} -t {duration} "
-            f"-lavfi \"{filters} [x]; [x][1:v] paletteuse\" {shlex.quote(output_path.replace('.mkv', '.gif').replace('.mp4', '.gif'))}")
+    
+    cmd1 = (f"ffmpeg -y -ss 0 -t {duration} -i {shlex.quote(input_path)} "
+            f"-vf \"{filters},palettegen\" {shlex.quote(palette_path)}")
+            
+    base_name, _ = os.path.splitext(output_path)
+    final_gif_path = f"{base_name}.gif"
+    cmd2 = (f"ffmpeg -ss 0 -t {duration} -i {shlex.quote(input_path)} -i {shlex.quote(palette_path)} "
+            f"-lavfi \"{filters} [x]; [x][1:v] paletteuse\" {shlex.quote(final_gif_path)}")
+            
     return [cmd1, cmd2]
 
 def build_split_command(config, input_path, output_path):

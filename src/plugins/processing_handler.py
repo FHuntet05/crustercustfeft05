@@ -97,7 +97,7 @@ async def show_config_menu(client: Client, query: CallbackQuery):
         "rename": f"✏️ <b>Renombrar Archivo</b>\n\n{greeting_prefix}envíeme el nuevo nombre para <code>{escape_html(original_filename)}</code>.\n<i>No incluya la extensión.</i>",
         "trim": f"✂️ <b>Cortar</b>\n\n{greeting_prefix}envíeme el tiempo de inicio y fin.\nFormatos: <code>HH:MM:SS-HH:MM:SS</code> o <code>MM:SS-MM:SS</code>.",
         "split": f"🧩 <b>Dividir Video</b>\n\n{greeting_prefix}envíeme el criterio de división por tiempo (ej. <code>300s</code>).",
-        "gif": f"🎞️ <b>Crear GIF</b>\n\n{greeting_prefix}envíeme la duración y los FPS.\nFormato: <code>[duración] [fps]</code> (ej: <code>5 15</code>).",
+        "gif": f"🎞️ <b>Crear GIF</b>\n\n{greeting_prefix}envíeme la duración y los FPS.\nFormato: <code>[duración en segundos] [fps]</code> (ej: <code>5 15</code>).",
         "audiotags": f"🖼️ <b>Editar Tags</b>\n\n{greeting_prefix}envíeme los nuevos metadatos.\nFormato: <code>Nuevo Título - Nuevo Artista</code>.",
     }
     
@@ -123,15 +123,12 @@ async def set_value_callback(client: Client, query: CallbackQuery):
         formats = url_info.get('formats', [])
         final_format_id = value
 
-        # --- LÓGICA DE FUSIÓN DE STREAMS (DASH) ---
-        if value.isdigit(): # Es un format_id específico de un botón de video
+        if value.isdigit():
             selected_format = next((f for f in formats if f.get('format_id') == value), None)
-            # Si el formato seleccionado NO tiene audio (es un stream de solo video)
             if selected_format and selected_format.get('acodec') in ['none', None]:
                 final_format_id = f"{value}+bestaudio/best"
                 logger.info(f"Formato de solo video detectado ({value}). Se fusionará con el mejor audio. Selector final: {final_format_id}")
 
-        # Manejar los botones de acción rápida
         elif value == "mp3":
             final_format_id = downloader.get_best_audio_format_id(formats)
             await db_instance.update_task(task_id, "file_type", "audio")
@@ -140,7 +137,6 @@ async def set_value_callback(client: Client, query: CallbackQuery):
             final_format_id = downloader.get_best_audio_format_id(formats)
             await db_instance.update_task(task_id, "file_type", "audio")
         elif value == "bestvideo":
-            # El selector 'bestvideo+bestaudio/best' le dice a yt-dlp que fusione el mejor video con el mejor audio
             final_format_id = "bestvideo+bestaudio/best"
         
         await db_instance.tasks.update_one(
@@ -154,7 +150,6 @@ async def set_value_callback(client: Client, query: CallbackQuery):
         await query.answer()
         return
 
-    # Lógica anterior para otros menús de configuración
     await query.answer()
     if config_type == "quality": await db_instance.update_task_config(task_id, "quality", value)
     elif config_type == "mute": current = task.get('processing_config', {}).get('mute_audio', False); await db_instance.update_task_config(task_id, "mute_audio", not current)
@@ -271,7 +266,7 @@ async def handle_text_input_for_config(client: Client, message: Message):
             feedback_message = f"✅ Nombre actualizado a <code>{escape_html(user_input)}</code>."
         
         elif menu_type == "trim":
-            time_regex = re.compile(r"^\s*(\d{1,2}:\d{2}(?::d{2})?)\s*-\s*(\d{1,2}:\d{2}(?::d{2})?)\s*$")
+            time_regex = re.compile(r"^\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*$")
             if not time_regex.match(user_input):
                 feedback_message = "❌ <b>Formato inválido.</b>\nPor favor, use <code>MM:SS-MM:SS</code> o <code>HH:MM:SS-HH:MM:SS</code>."
             else:
@@ -281,10 +276,15 @@ async def handle_text_input_for_config(client: Client, message: Message):
         elif menu_type == "split":
             await db_instance.update_task_config(task_id, "split_criteria", user_input)
             feedback_message = f"✅ Criterio de división guardado: <code>{escape_html(user_input)}</code>."
+        
         elif menu_type == "gif":
-            duration, fps = user_input.split()
+            parts = user_input.split()
+            if len(parts) != 2:
+                raise ValueError("Se requieren dos valores: duración y FPS.")
+            duration, fps = float(parts[0]), int(parts[1])
             await db_instance.update_task_config(task_id, "gif_options", {"duration": duration, "fps": fps})
             feedback_message = f"✅ GIF se creará con {duration}s a {fps}fps."
+        
         elif menu_type == "audiotags":
             title, artist = [part.strip() for part in user_input.split('-', 1)]
             await db_instance.update_task_config(task_id, "audio_tags", {"title": title, "artist": artist})
