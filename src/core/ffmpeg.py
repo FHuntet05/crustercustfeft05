@@ -38,13 +38,11 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
     config = task.get('processing_config', {})
     file_type = task.get('file_type')
     
-    # Comandos especiales
     if 'gif_options' in config: return build_gif_command(config, input_path, output_path)
     if 'split_criteria' in config: return [build_split_command(config, input_path, output_path)]
 
     command_parts = ["ffmpeg", "-y"]
     
-    # Opciones de entrada
     if 'trim_times' in config:
         start, _, end = config['trim_times'].partition('-')
         if start.strip(): command_parts.append(f"-ss {shlex.quote(start.strip())}")
@@ -54,11 +52,14 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
     if thumbnail_path:
         command_parts.append(f"-i {shlex.quote(thumbnail_path)}")
 
-    # Opciones de códecs y mapeo
     codec_opts = []
+    # Mapeo de streams: -map 0 para el archivo principal, -map 1 para la miniatura
     map_opts = ["-map 0"]
     if thumbnail_path:
         map_opts.append("-map 1")
+        # Corrección crítica: Re-codificar siempre la miniatura a un formato compatible
+        codec_opts.append("-c:v:1 mjpeg -disposition:v:1 attached_pic")
+
 
     if file_type == 'audio':
         fmt = config.get('audio_format', 'mp3')
@@ -66,26 +67,26 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
         codec_map = {'mp3': 'libmp3lame', 'flac': 'flac', 'opus': 'libopus'}
         codec_opts.append(f"-c:a {codec_map.get(fmt, 'libmp3lame')}")
         if fmt != 'flac': codec_opts.append(f"-b:a {bitrate}")
-        # Mapear audio del archivo principal, y el stream de video (carátula) del segundo.
-        map_opts = ["-map 0:a:0"]
-        if thumbnail_path:
-             map_opts.append("-map 1:v:0")
-             codec_opts.append("-c:v copy -disposition:v:0 attached_pic")
+        
+        # Mapear solo el stream de audio del archivo principal
+        map_opts[0] = "-map 0:a:0"
 
     elif file_type == 'video':
         if config.get('quality') and config['quality'] != 'Original':
             profile_map = {'1080p': '22', '720p': '24', '480p': '28', '360p': '32'}
             crf = profile_map.get(config.get('quality'), '24')
-            codec_opts.extend(["-c:v libx264", "-preset veryfast", f"-crf {crf}", "-pix_fmt yuv420p"])
-            codec_opts.extend(["-c:a aac", "-b:a 192k"]) # Recodificar audio también
+            codec_opts.extend(["-c:v:0 libx264", "-preset veryfast", f"-crf {crf}", "-pix_fmt yuv420p"])
+            codec_opts.extend(["-c:a copy"])
         else:
-            codec_opts.extend(["-c:v copy", "-c:a copy"])
+            # Si la calidad es original, copiar todos los streams del archivo principal
+            codec_opts.extend(["-c:v:0 copy", "-c:a copy", "-c:s copy"])
         
         output_ext = os.path.splitext(output_path)[1].lower()
-        codec_opts.append("-c:s mov_text" if output_ext == '.mp4' else "-c:s copy")
+        if output_ext == '.mp4':
+            codec_opts.append("-c:s mov_text") # Forzar formato de subtítulos para MP4
 
-    else: # Documentos u otros
-        return [] # No se necesita FFmpeg
+    else: # Documentos
+        return []
 
     if config.get('mute_audio'):
         codec_opts = [opt for opt in codec_opts if '-c:a' not in opt and '-b:a' not in opt]

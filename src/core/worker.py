@@ -115,37 +115,31 @@ async def process_task(bot, task: dict):
         progress_tracker[user_id].task = task
         config = task.get('processing_config', {})
 
-        # ---- LÓGICA DE TAREAS INTELIGENTE ----
         if config.get("task_type") == "audio_search":
             await _edit_status_message(user_id, "🔎 Buscando la mejor fuente de audio...", progress_tracker)
             info = await asyncio.to_thread(downloader.get_url_info, task['url'])
             if not info or not info.get('formats'):
                 raise Exception("No se pudo obtener información para descargar la canción.")
 
-            # Actualizar la tarea con la información real
             task['url'] = info['url']
             task['original_filename'] = sanitize_filename(info['title'])
             await db_instance.update_task(task_id, "url", info['url'])
             await db_instance.update_task(task_id, "original_filename", info['title'])
             
-            # Obtener formato, letra y carátula
-            best_audio_format = downloader.get_best_audio_format(info['formats'])
+            best_audio_format = downloader.get_best_audio_format(info['formats']) or 'bestaudio/best'
             lyrics = await asyncio.to_thread(downloader.get_lyrics, info['url'])
             
             await db_instance.update_task_config(task_id, "download_format_id", best_audio_format)
             await db_instance.update_task_config(task_id, "lyrics", lyrics)
             await db_instance.update_task_config(task_id, "thumbnail_url", info.get('thumbnail'))
             
-            # Recargar la tarea para tener todos los datos actualizados
             task = await db_instance.get_task(task_id)
             progress_tracker[user_id].task = task
             config = task.get('processing_config', {})
 
-
         base_filename = os.path.join(DOWNLOAD_DIR, task_id)
         actual_download_path = ""
 
-        # --- Flujo de Descarga ---
         if url := task.get('url'):
             format_id = config.get('download_format_id')
             if not format_id: raise Exception("La tarea no tiene 'download_format_id'.")
@@ -160,19 +154,13 @@ async def process_task(bot, task: dict):
 
         elif file_id := task.get('file_id'):
             actual_download_path = base_filename
-            await bot.download_media(
-                message=file_id, 
-                file_name=actual_download_path, 
-                progress=_progress_callback_pyrogram, 
-                progress_args=(user_id, "📥 Descargando...")
-            )
+            await bot.download_media(message=file_id, file_name=actual_download_path, progress=_progress_callback_pyrogram, progress_args=(user_id, "📥 Descargando..."))
         else:
             raise Exception("La tarea no tiene URL ni file_id.")
         
         files_to_clean.add(actual_download_path)
         logger.info(f"Descarga completada en: {actual_download_path}")
         
-        # --- Determinar Tipo de Archivo ---
         media_info = get_media_info(actual_download_path)
         streams = media_info.get('streams', [])
         file_type = 'document'
@@ -183,7 +171,6 @@ async def process_task(bot, task: dict):
         task['file_type'] = file_type
         await _edit_status_message(user_id, f"⚙️ Archivo ({file_type}) listo para procesar.", progress_tracker)
         
-        # --- Flujo de Procesamiento y Subida ---
         final_filename_base = sanitize_filename(config.get('final_filename', task.get('original_filename', task_id)))
         final_ext = f".{config.get('audio_format', 'mp3')}" if file_type == 'audio' else ".mp4"
         if 'gif_options' in config: final_ext = ".gif"
@@ -206,7 +193,6 @@ async def process_task(bot, task: dict):
         elif output_path != actual_download_path:
              os.rename(actual_download_path, output_path)
              processed_file = output_path
-
 
         caption = f"✅ <code>{escape_html(final_filename)}</code>"
         sent_message = None
