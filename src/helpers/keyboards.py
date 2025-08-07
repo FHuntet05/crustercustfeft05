@@ -73,16 +73,15 @@ def build_detailed_format_menu(task_id: str, formats: list) -> InlineKeyboardMar
     """Construye el menú de calidades de descarga detallado y enriquecido."""
     keyboard = []
     
-    # --- CORRECCIÓN DE LÓGICA DE FILTRADO ---
-    # Filtrar formatos de video que tengan al menos resolución (height).
     video_formats = sorted(
         [f for f in formats if f.get('vcodec') not in ['none', None] and f.get('height')],
-        key=lambda x: (x.get('height', 0), x.get('fps', 0) or 0), # Usar 0 si fps es None
+        key=lambda x: (x.get('height', 0), x.get('fps', 0) or 0),
         reverse=True
     )
     
     row = []
-    for f in video_formats[:10]: # Limitar a los 10 mejores formatos para no saturar
+    # --- CORRECCIÓN CRÍTICA: Eliminar la restricción artificial [:10] ---
+    for f in video_formats:
         format_id = f.get('format_id')
         if not format_id: continue
 
