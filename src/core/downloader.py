@@ -66,12 +66,10 @@ def get_common_ydl_opts():
     if ffmpeg_path:
         opts['ffmpeg_location'] = ffmpeg_path
     
-    # --- CAMBIO CRÍTICO: Comprobación dinámica de cookies ---
     cookies_file_path = "youtube_cookies.txt"
     if os.path.exists(cookies_file_path):
         opts['cookiefile'] = cookies_file_path
     else:
-        # Loguear una advertencia si las cookies no están presentes en el momento de la operación.
         logger.warning("ADVERTENCIA en tiempo de ejecución: No se encontró 'youtube_cookies.txt'. La fiabilidad de las descargas será muy baja.")
 
     return opts
@@ -112,7 +110,6 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_track
             logger.error(f"El reintento de descarga también falló: {retry_e}", exc_info=True)
             return None
     
-    # La AuthenticationError se propaga hacia arriba para ser manejada por el worker
     except AuthenticationError:
         raise
     
@@ -148,7 +145,8 @@ def get_lyrics(url: str) -> str or None:
         'writesubtitles': True,
         'subtitleslangs': ['es', 'en', 'es-419'],
         'skip_download': True,
-        'outtmpl': {'default': temp_lyrics_path}
+        'outtmpl': {'default': temp_lyrics_path},
+        'logger': YtdlpLogger(), # Asegurar que el logger también esté aquí
     })
     if 'forcejson' in ydl_opts: del ydl_opts['forcejson']
 
@@ -169,6 +167,8 @@ def get_lyrics(url: str) -> str or None:
                 with open(lyrics_filename, 'r', encoding='utf-8') as f:
                     lines = [line.strip() for line in f if not line.strip().isdigit() and '-->' not in line and line.strip() and "WEBVTT" not in line]
                     return "\n".join(lines)[:4000]
+    except AuthenticationError:
+        raise # Propagar error de autenticación
     except Exception as e:
         logger.warning(f"No se pudo obtener la letra para {url}: {e}")
     finally:
@@ -181,7 +181,11 @@ def get_lyrics(url: str) -> str or None:
 def get_url_info(url: str) -> dict or None:
     """Usa yt-dlp para obtener información detallada de una URL sin descargarla."""
     ydl_opts = get_common_ydl_opts()
-    ydl_opts['skip_download'] = True
+    ydl_opts.update({
+        'skip_download': True,
+        # --- CAMBIO CRÍTICO: Asegurar que YtdlpLogger se use aquí ---
+        'logger': YtdlpLogger(),
+    })
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -191,7 +195,6 @@ def get_url_info(url: str) -> dict or None:
                 logger.error(f"yt-dlp no devolvió información para {url}.")
                 return None
             
-            # Si es una lista, tomar el primer elemento. Si no, usar el diccionario directamente.
             entry = info.get('entries', [info])[0]
             if not entry: return None
 
@@ -214,10 +217,9 @@ def get_url_info(url: str) -> dict or None:
                 'uploader': entry.get('uploader', 'Uploader Desconocido'), 'duration': entry.get('duration'),
                 'thumbnail': entry.get('thumbnail'), 'is_video': is_video, 'formats': formats
             }
-    # --- CAMBIO CRÍTICO: Manejo de Excepciones para propagar AuthenticationError ---
     except AuthenticationError:
         logger.error(f"Error de autenticación al obtener info de {url}. Propagando excepción al worker.")
-        raise # Re-lanzar la excepción para que el worker la maneje correctamente.
+        raise
     except Exception as e:
         logger.error(f"Excepción genérica en get_url_info para {url}: {e}", exc_info=True)
         return None
@@ -241,7 +243,6 @@ def search_music(query: str, limit: int = 20) -> list:
     if not results:
         logger.info(f"No hay resultados en Spotify, usando YouTube.")
         try:
-            # Aquí se llamará a get_url_info, que ahora propaga el error correctamente.
             info = get_url_info(f"ytsearch{limit}:{query} official audio")
             if info and 'entries' in info:
                 for entry in info['entries']:
@@ -255,8 +256,6 @@ def search_music(query: str, limit: int = 20) -> list:
                     })
         except AuthenticationError:
             logger.critical("La búsqueda en YouTube falló por un problema de autenticación. Devolviendo lista vacía.")
-            # Se devuelve una lista vacía, el llamador (handler) informará al usuario.
-            # La excepción ya fue logueada en get_url_info.
             return []
         except Exception as e:
             logger.error(f"La búsqueda en YouTube falló por un error genérico: {e}")
