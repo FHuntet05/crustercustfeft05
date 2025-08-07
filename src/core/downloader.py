@@ -29,7 +29,6 @@ class YtdlpLogger:
     def info(self, msg): pass
     def warning(self, msg): pass
     def error(self, msg):
-        # El error de "Sign in" ya no debería ocurrir, pero se mantiene por si acaso.
         if "Sign in to confirm" in msg or "confirm you’re not a bot" in msg:
             raise AuthenticationError(msg)
         if "not supported between instances of 'NoneType' and 'int'" in msg:
@@ -52,8 +51,8 @@ if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
 
 def get_common_ydl_opts():
     """
-    Construye las opciones comunes para yt-dlp, usando una API interna de YouTube
-    para evitar bloqueos y la necesidad de cookies.
+    Construye las opciones comunes para yt-dlp, reincorporando el uso de cookies
+    como método de autenticación principal y más fiable.
     """
     opts = {
         'quiet': True, 'no_warnings': True, 'forcejson': True,
@@ -62,19 +61,18 @@ def get_common_ydl_opts():
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.5',
         },
-        # --- CAMBIO ESTRATÉGICO: USAR API INTERNA DE YOUTUBE ---
-        'extractor_args': {
-            'youtube': {
-                'client': 'android', # Simula ser la app de Android para evitar bloqueos
-            }
-        }
     }
     ffmpeg_path = shutil.which('ffmpeg')
     if ffmpeg_path:
         opts['ffmpeg_location'] = ffmpeg_path
     
-    # --- CAMBIO ESTRATÉGICO: ELIMINACIÓN DE LA LÓGICA DE COOKIES ---
-    # Ya no es necesario buscar o advertir sobre 'youtube_cookies.txt'.
+    # --- CAMBIO ESTRATÉGICO: REINSTAURACIÓN DE LA LÓGICA DE COOKIES ---
+    cookies_file_path = "youtube_cookies.txt"
+    if os.path.exists(cookies_file_path):
+        opts['cookiefile'] = cookies_file_path
+        logger.info("Archivo de cookies encontrado. Se utilizará para las solicitudes.")
+    else:
+        logger.warning("ADVERTENCIA: No se encontró 'youtube_cookies.txt'. La funcionalidad de descarga de YouTube será muy limitada o nula.")
     
     return opts
 
@@ -131,9 +129,6 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_track
     return None
 
 def get_best_audio_format_id(formats: list) -> str:
-    """
-    Selecciona el mejor formato de SÓLO AUDIO para una descarga rápida y eficiente.
-    """
     if not formats:
         logger.warning("No se proporcionaron formatos. Usando el selector final 'bestaudio/best'.")
         return 'bestaudio/best'
@@ -155,9 +150,6 @@ def get_best_audio_format_id(formats: list) -> str:
     return 'bestaudio/best'
 
 def get_best_video_format_id(formats: list) -> str:
-    """
-    Selecciona el mejor formato de VIDEO (con audio) disponible.
-    """
     if not formats:
         return 'bestvideo+bestaudio/best'
 
@@ -181,7 +173,6 @@ def get_best_video_format_id(formats: list) -> str:
     return 'bestvideo+bestaudio/best'
 
 def get_lyrics(url: str) -> str or None:
-    """Intenta descargar la letra (subtítulos) de una URL."""
     temp_lyrics_path = f"temp_lyrics_{os.urandom(4).hex()}"
     ydl_opts = get_common_ydl_opts()
     ydl_opts.update({
@@ -222,7 +213,6 @@ def get_lyrics(url: str) -> str or None:
     return None
 
 def get_url_info(url: str) -> dict or None:
-    """Usa yt-dlp para obtener información detallada y enriquecida de una URL."""
     ydl_opts = get_common_ydl_opts()
     ydl_opts.update({
         'skip_download': True,
@@ -270,7 +260,6 @@ def get_url_info(url: str) -> dict or None:
         return None
 
 def search_music(query: str, limit: int = 20) -> list:
-    """Busca música usando la API de Spotify y/o YouTube."""
     results = []
     if spotify_api:
         try:
@@ -308,7 +297,6 @@ def search_music(query: str, limit: int = 20) -> list:
     return results
 
 def download_file(url: str, output_path: str) -> bool:
-    """Descarga un archivo genérico (como una imagen) desde una URL."""
     try:
         with requests.get(url, stream=True) as r:
             r.raise_for_status()
