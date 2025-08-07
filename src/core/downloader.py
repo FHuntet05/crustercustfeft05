@@ -1,4 +1,4 @@
-# src/core/downloader.py
+# --- START OF FILE src/core/downloader.py ---
 
 import logging
 import yt_dlp
@@ -36,15 +36,9 @@ class YtdlpLogger:
         else:
             logger.error(f"yt-dlp internal error: {msg}")
 
-# --- Configuración de APIs y Cookies ---
+# --- Configuración de APIs ---
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
-YOUTUBE_COOKIES_FILE = "youtube_cookies.txt" if os.path.exists("youtube_cookies.txt") else None
-
-if YOUTUBE_COOKIES_FILE:
-    logger.info("Archivo de cookies de YouTube encontrado y listo para usar.")
-else:
-    logger.warning("ADVERTENCIA: No se encontró 'youtube_cookies.txt'. La fiabilidad de las descargas será muy baja.")
 
 spotify_api = None
 if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
@@ -56,6 +50,10 @@ if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
         logger.warning(f"No se pudo inicializar Spotify API: {e}.")
 
 def get_common_ydl_opts():
+    """
+    Construye las opciones comunes para yt-dlp.
+    La comprobación de cookies es ahora dinámica en cada llamada.
+    """
     opts = {
         'quiet': True, 'no_warnings': True, 'forcejson': True,
         'ignoreerrors': True, 'geo_bypass': True,
@@ -67,8 +65,15 @@ def get_common_ydl_opts():
     ffmpeg_path = shutil.which('ffmpeg')
     if ffmpeg_path:
         opts['ffmpeg_location'] = ffmpeg_path
-    if YOUTUBE_COOKIES_FILE:
-        opts['cookiefile'] = YOUTUBE_COOKIES_FILE
+    
+    # --- CAMBIO CRÍTICO: Comprobación dinámica de cookies ---
+    cookies_file_path = "youtube_cookies.txt"
+    if os.path.exists(cookies_file_path):
+        opts['cookiefile'] = cookies_file_path
+    else:
+        # Loguear una advertencia si las cookies no están presentes en el momento de la operación.
+        logger.warning("ADVERTENCIA en tiempo de ejecución: No se encontró 'youtube_cookies.txt'. La fiabilidad de las descargas será muy baja.")
+
     return opts
 
 def download_from_url(url: str, output_path: str, format_id: str, progress_tracker: dict = None, user_id: int = None) -> str or None:
@@ -209,8 +214,12 @@ def get_url_info(url: str) -> dict or None:
                 'uploader': entry.get('uploader', 'Uploader Desconocido'), 'duration': entry.get('duration'),
                 'thumbnail': entry.get('thumbnail'), 'is_video': is_video, 'formats': formats
             }
+    # --- CAMBIO CRÍTICO: Manejo de Excepciones para propagar AuthenticationError ---
+    except AuthenticationError:
+        logger.error(f"Error de autenticación al obtener info de {url}. Propagando excepción al worker.")
+        raise # Re-lanzar la excepción para que el worker la maneje correctamente.
     except Exception as e:
-        logger.error(f"Excepción en get_url_info para {url}: {e}", exc_info=True)
+        logger.error(f"Excepción genérica en get_url_info para {url}: {e}", exc_info=True)
         return None
 
 def search_music(query: str, limit: int = 20) -> list:
@@ -232,6 +241,7 @@ def search_music(query: str, limit: int = 20) -> list:
     if not results:
         logger.info(f"No hay resultados en Spotify, usando YouTube.")
         try:
+            # Aquí se llamará a get_url_info, que ahora propaga el error correctamente.
             info = get_url_info(f"ytsearch{limit}:{query} official audio")
             if info and 'entries' in info:
                 for entry in info['entries']:
@@ -243,8 +253,13 @@ def search_music(query: str, limit: int = 20) -> list:
                         'source': 'youtube', 'title': title.strip(), 'artist': artist.strip(),
                         'album': 'YouTube', 'duration': entry.get('duration'), 'url': entry.get('webpage_url'),
                     })
+        except AuthenticationError:
+            logger.critical("La búsqueda en YouTube falló por un problema de autenticación. Devolviendo lista vacía.")
+            # Se devuelve una lista vacía, el llamador (handler) informará al usuario.
+            # La excepción ya fue logueada en get_url_info.
+            return []
         except Exception as e:
-            logger.error(f"La búsqueda en YouTube falló: {e}")
+            logger.error(f"La búsqueda en YouTube falló por un error genérico: {e}")
             
     return results
 
@@ -260,3 +275,4 @@ def download_file(url: str, output_path: str) -> bool:
     except Exception as e:
         logger.error(f"No se pudo descargar {url}: {e}")
         return False
+# --- END OF FILE src/core/downloader.py ---
