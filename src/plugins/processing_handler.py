@@ -1,7 +1,8 @@
-# src/plugins/processing_handler.py
+# --- START OF FILE src/plugins/processing_handler.py ---
 
 import logging
 import asyncio
+import re  # Añadido para validación de formato
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery
 from pyrogram.enums import ParseMode
@@ -235,9 +236,17 @@ async def handle_text_input_for_config(client: Client, message: Message):
         if menu_type == "rename":
             await db_instance.update_task_config(task_id, "final_filename", user_input)
             feedback_message = f"✅ Nombre actualizado a <code>{escape_html(user_input)}</code>."
+        
         elif menu_type == "trim":
-            await db_instance.update_task_config(task_id, "trim_times", user_input)
-            feedback_message = f"✅ Tiempos de corte guardados: <code>{escape_html(user_input)}</code>."
+            # --- NUEVA LÓGICA DE CORTE (TRIM) ---
+            time_regex = re.compile(r"^\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*$")
+            if not time_regex.match(user_input):
+                feedback_message = "❌ <b>Formato inválido.</b>\nPor favor, use <code>MM:SS-MM:SS</code> o <code>HH:MM:SS-HH:MM:SS</code>."
+            else:
+                await db_instance.update_task_config(task_id, "trim_times", user_input)
+                feedback_message = f"✅ Tiempos de corte guardados: <code>{escape_html(user_input)}</code>."
+            # --- FIN DE LA LÓGICA ---
+
         elif menu_type == "split":
             await db_instance.update_task_config(task_id, "split_criteria", user_input)
             feedback_message = f"✅ Criterio de división guardado: <code>{escape_html(user_input)}</code>."
@@ -260,3 +269,4 @@ async def handle_text_input_for_config(client: Client, message: Message):
     if task:
         keyboard = build_processing_menu(task_id, task['file_type'], task, task.get('original_filename', ''))
         await message.reply("¿Algo más?", reply_markup=keyboard, parse_mode=ParseMode.HTML)
+# --- END OF FILE src/plugins/processing_handler.py ---
