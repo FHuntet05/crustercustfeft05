@@ -160,7 +160,8 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_track
         
     ydl_opts = get_common_ydl_opts()
     ydl_opts.update({
-        'format': format_id, 'outtmpl': {'default': output_path},
+        'format': format_id,
+        'outtmpl': {'default': output_path},
         'progress_hooks': [progress_hook] if progress_hook else [],
         'noplaylist': True, 'merge_output_format': 'mkv',
         'http_chunk_size': 10485760, 'retries': 5, 'fragment_retries': 5,
@@ -172,9 +173,11 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_track
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
     except ProgressError:
-        logger.warning("Fallo de progreso detectado por el logger. Reintentando sin progreso...")
+        logger.warning("Fallo de progreso detectado. Reintentando con estrategia 'best'...")
+        # --- CAMBIO CLAVE: Estrategia de reintento ---
+        ydl_opts['format'] = 'bestvideo+bestaudio/best' # Dejar que ytdlp elija la mejor combinación
         ydl_opts['progress_hooks'] = []
-        ydl_opts['logger'] = None # Usar el logger por defecto en el reintento
+        ydl_opts['logger'] = None # Usar logger por defecto en el reintento
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
