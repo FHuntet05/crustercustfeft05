@@ -13,6 +13,28 @@ from src.helpers.utils import _progress_hook_yt_dlp
 
 logger = logging.getLogger(__name__)
 
+# --- Clase de Excepción y Logger Personalizado para el Reintento ---
+
+class ProgressError(Exception):
+    """Excepción personalizada para señalar un fallo específico del progreso en yt-dlp."""
+    pass
+
+class YtdlpLogger:
+    """Logger personalizado para inyectar en yt-dlp y detectar errores específicos."""
+    def debug(self, msg):
+        pass
+    def info(self, msg):
+        pass
+    def warning(self, msg):
+        pass
+    def error(self, msg):
+        # Si detectamos el error de progreso, levantamos nuestra propia excepción
+        if "not supported between instances of 'NoneType' and 'int'" in msg:
+            raise ProgressError(msg)
+        else:
+            # Para otros errores, simplemente los logueamos
+            logger.error(f"yt-dlp internal error: {msg}")
+
 # --- Configuración de APIs y Cookies ---
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
@@ -33,7 +55,6 @@ if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
         logger.warning(f"No se pudo inicializar Spotify API: {e}. La búsqueda de música estará limitada.")
 
 def get_common_ydl_opts():
-    """Opciones comunes para yt-dlp, incluyendo cookies y User-Agent para evitar bloqueos."""
     opts = {
         'quiet': True,
         'no_warnings': True,
@@ -50,7 +71,6 @@ def get_common_ydl_opts():
     return opts
 
 def get_best_audio_format(formats: list) -> str:
-    """Selecciona el mejor formato de solo audio basado en el bitrate (abr)."""
     audio_formats = [f for f in formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none' and f.get('abr')]
     if not audio_formats:
         logger.warning("No se encontraron formatos de solo audio, se usará 'bestaudio/best'.")
@@ -61,7 +81,6 @@ def get_best_audio_format(formats: list) -> str:
     return best_format.get('format_id', 'bestaudio/best')
 
 def get_lyrics(url: str) -> str or None:
-    """Intenta descargar la letra (subtítulos) de una URL."""
     temp_lyrics_path = f"temp_lyrics_{os.urandom(4).hex()}"
     ydl_opts = get_common_ydl_opts()
     ydl_opts.update({
@@ -99,21 +118,16 @@ def get_lyrics(url: str) -> str or None:
     return None
 
 def get_url_info(url: str) -> dict or None:
-    """Usa yt-dlp para obtener información detallada de una URL sin descargarla."""
     ydl_opts = get_common_ydl_opts()
     ydl_opts['skip_download'] = True
-
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            
             if not info:
                 logger.error(f"yt-dlp no devolvió información para {url}.")
                 return None
-            
             entry = info.get('entries', [info])[0]
             if not entry: return None
-
             formats = []
             if entry.get('formats'):
                 for f in entry['formats']:
@@ -125,9 +139,7 @@ def get_url_info(url: str) -> dict or None:
                             'abr': f.get('abr'), 'acodec': f.get('acodec'), 'vcodec': f.get('vcodec'),
                             'height': f.get('height')
                         })
-            
             is_video = any(f.get('vcodec', 'none') != 'none' for f in formats)
-
             return {
                 'url': entry.get('webpage_url', url), 'title': entry.get('title', 'Título Desconocido'),
                 'uploader': entry.get('uploader', 'Uploader Desconocido'), 'duration': entry.get('duration'),
@@ -138,9 +150,6 @@ def get_url_info(url: str) -> dict or None:
         return None
 
 def download_from_url(url: str, output_path: str, format_id: str, progress_tracker: dict = None, user_id: int = None) -> str or None:
-    """
-    Descarga contenido con un mecanismo de reintento inteligente.
-    """
     if not format_id:
         logger.error("Se intentó descargar desde URL sin un format_id válido.")
         return None
@@ -155,25 +164,22 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_track
         'progress_hooks': [progress_hook] if progress_hook else [],
         'noplaylist': True, 'merge_output_format': 'mkv',
         'http_chunk_size': 10485760, 'retries': 5, 'fragment_retries': 5,
-        'nopart': True,
+        'nopart': True, 'logger': YtdlpLogger(),
     })
     if 'forcejson' in ydl_opts: del ydl_opts['forcejson']
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-    except yt_dlp.utils.DownloadError as e:
-        if "not supported between instances of 'NoneType' and 'int'" in str(e):
-            logger.warning("Fallo de descarga con progreso. Reintentando sin progreso...")
-            ydl_opts['progress_hooks'] = []
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([url])
-            except Exception as retry_e:
-                logger.error(f"El reintento de descarga también falló: {retry_e}")
-                return None
-        else:
-            logger.error(f"yt-dlp falló al descargar {url} con formato {format_id}: {e}")
+    except ProgressError:
+        logger.warning("Fallo de progreso detectado por el logger. Reintentando sin progreso...")
+        ydl_opts['progress_hooks'] = []
+        ydl_opts['logger'] = None # Usar el logger por defecto en el reintento
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+        except Exception as retry_e:
+            logger.error(f"El reintento de descarga también falló: {retry_e}")
             return None
     except Exception as e:
         logger.error(f"Error inesperado durante la descarga de yt-dlp: {e}")
@@ -189,7 +195,6 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_track
     return None
 
 def search_music(query: str, limit: int = 20) -> list:
-    """Busca música usando la API de Spotify y/o YouTube."""
     results = []
     if spotify_api:
         try:
@@ -224,7 +229,6 @@ def search_music(query: str, limit: int = 20) -> list:
     return results
 
 def download_file(url: str, output_path: str) -> bool:
-    """Descarga un archivo genérico (como una imagen) desde una URL."""
     try:
         with requests.get(url, stream=True) as r:
             r.raise_for_status()
