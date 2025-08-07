@@ -32,10 +32,9 @@ def get_media_info(file_path: str) -> dict:
         logger.error(f"No se pudo obtener info de {file_path} (JSON o genérico): {e}")
         return {}
 
-def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnail_path: str = None) -> list:
+def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnail_path: str = None, watermark_path: str = None) -> list:
     """
-    Construye el comando FFmpeg de forma más segura, basándose en el tipo de archivo real.
-    Devuelve una lista de comandos para soportar procesos de múltiples pasos.
+    Construye el comando FFmpeg, ahora con soporte para marcas de agua dinámicas.
     """
     config = task.get('processing_config', {})
     file_type = task.get('file_type')
@@ -51,60 +50,89 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
         if end.strip(): command_parts.append(f"-to {shlex.quote(end.strip())}")
     
     command_parts.append(f"-i {shlex.quote(input_path)}")
+    input_count = 1
+    
+    if watermark_path:
+        command_parts.append(f"-i {shlex.quote(watermark_path)}")
+        watermark_map_idx = input_count
+        input_count += 1
+
     if thumbnail_path:
         command_parts.append(f"-i {shlex.quote(thumbnail_path)}")
+        thumb_map_idx = input_count
+        input_count += 1
 
     codec_opts = []
-    map_opts = ["-map 0"]
-    if thumbnail_path:
-        map_opts.append("-map 1")
-        codec_opts.append("-c:v:1 mjpeg -disposition:v:1 attached_pic")
+    map_opts = []
+    
+    watermark_config = config.get('watermark')
+    filter_complex_parts = []
+    
+    # Manejo de Marca de Agua
+    if file_type == 'video' and watermark_config:
+        position = watermark_config.get('position', 'top_right')
+        
+        if watermark_config.get('type') == 'text':
+            text = watermark_config.get('text', '').replace("'", "’").replace(':', r'\:')
+            pos_map = {
+                'top_left': 'x=10:y=10',
+                'top_right': 'x=w-text_w-10:y=10',
+                'bottom_left': 'x=10:y=h-text_h-10',
+                'bottom_right': 'x=w-text_w-10:y=h-text_h-10'
+            }
+            drawtext_filter = f"drawtext=text='{text}':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.5:boxborderw=5:{pos_map.get(position)}"
+            filter_complex_parts.append(f"[0:v]{drawtext_filter}[outv]")
+        
+        elif watermark_config.get('type') == 'image' and watermark_path:
+            pos_map = {
+                'top_left': '10:10',
+                'top_right': 'W-w-10:10',
+                'bottom_left': '10:H-h-10',
+                'bottom_right': 'W-w-10:H-h-10'
+            }
+            overlay_filter = f"[0:v][{watermark_map_idx}:v]overlay={pos_map.get(position)}[outv]"
+            filter_complex_parts.append(overlay_filter)
+    
+    if filter_complex_parts:
+        command_parts.append(f'-filter_complex "{";".join(filter_complex_parts)}"')
+        map_opts.append("-map [outv]")
+    else:
+        map_opts.append("-map 0:v?")
 
-
+    # Manejo de Audio y Códecs
     if file_type == 'audio':
         fmt = config.get('audio_format', 'mp3')
         bitrate = config.get('audio_bitrate', '192k')
         codec_map = {'mp3': 'libmp3lame', 'flac': 'flac', 'opus': 'libopus'}
         
-        # --- NUEVA LÓGICA DE EFECTOS DE AUDIO ---
         audio_filters = []
-        if config.get('slowed'):
-            audio_filters.append("atempo=0.8")
-        if config.get('reverb'):
-            # Formato: aecho=in_gain:out_gain:delays:decays
-            audio_filters.append("aecho=0.8:0.9:1000:0.3")
+        if config.get('slowed'): audio_filters.append("atempo=0.8")
+        if config.get('reverb'): audio_filters.append("aecho=0.8:0.9:1000:0.3")
 
         if audio_filters:
-            filter_string = ",".join(audio_filters)
-            codec_opts.append(f"-af {shlex.quote(filter_string)}")
-        # --- FIN DE LA NUEVA LÓGICA ---
+            codec_opts.append(f"-af {shlex.quote(','.join(audio_filters))}")
         
         codec_opts.append("-vn")
-        
         codec_opts.append(f"-c:a {codec_map.get(fmt, 'libmp3lame')}")
         if fmt != 'flac': codec_opts.append(f"-b:a {bitrate}")
-        
-        map_opts[0] = "-map 0:a:0"
-
+        map_opts.append("-map 0:a:0")
+    
     elif file_type == 'video':
-        if config.get('quality') and config['quality'] != 'Original':
-            profile_map = {'1080p': '22', '720p': '24', '480p': '28', '360p': '32'}
-            crf = profile_map.get(config.get('quality'), '24')
-            codec_opts.extend(["-c:v:0 libx264", "-preset veryfast", f"-crf {crf}", "-pix_fmt yuv420p"])
-            codec_opts.extend(["-c:a copy"])
-        else:
-            codec_opts.extend(["-c:v:0 copy", "-c:a copy", "-c:s copy"])
-        
-        output_ext = os.path.splitext(output_path)[1].lower()
-        if output_ext == '.mp4':
-            codec_opts.append("-c:s mov_text")
-
-    else: # Documentos
-        return []
+        # Para video, siempre copiar el audio, ya que los filtros de video no lo afectan.
+        codec_opts.append("-c:a copy")
+        map_opts.append("-map 0:a?")
 
     if config.get('mute_audio'):
         codec_opts = [opt for opt in codec_opts if '-c:a' not in opt and '-b:a' not in opt]
+        map_opts = [opt for opt in map_opts if '-map 0:a' not in opt]
         codec_opts.append("-an")
+
+    if thumbnail_path:
+        # Añadir la miniatura como un stream separado
+        map_opts.append(f"-map {thumb_map_idx}")
+        codec_opts.append("-c:s mov_text") # Para compatibilidad de subtítulos
+        codec_opts.append("-disposition:s:0 0") # Asegurar que este stream sea el de la miniatura
+        codec_opts.append("-c:v:1 mjpeg -disposition:v:1 attached_pic") # Codificar la miniatura
 
     command_parts.extend(codec_opts)
     command_parts.extend(map_opts)
@@ -115,7 +143,6 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
     return [final_command]
 
 def build_gif_command(config, input_path, output_path):
-    """Construye los dos comandos necesarios para un GIF de alta calidad."""
     gif_opts = config['gif_options']
     duration, fps = gif_opts['duration'], gif_opts['fps']
     palette_path = f"{output_path}.palette.png"
