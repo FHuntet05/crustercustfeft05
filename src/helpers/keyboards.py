@@ -70,9 +70,12 @@ def build_quality_menu(task_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
     
 def build_detailed_format_menu(task_id: str, formats: list) -> InlineKeyboardMarkup:
-    """Construye el menú de calidades de descarga detallado y enriquecido."""
+    """Construye el menú de calidades de descarga detallado, mostrando TODAS las calidades de video."""
     keyboard = []
     
+    # --- CORRECCIÓN DE LÓGICA DE FILTRADO FINAL Y DEFINITIVA ---
+    # Aceptar cualquier formato que tenga un códec de video y una resolución (height).
+    # Esto incluye los formatos de alta calidad (DASH, video-only) y los de baja calidad (video+audio).
     video_formats = sorted(
         [f for f in formats if f.get('vcodec') not in ['none', None] and f.get('height')],
         key=lambda x: (x.get('height', 0), x.get('fps', 0) or 0),
@@ -80,7 +83,7 @@ def build_detailed_format_menu(task_id: str, formats: list) -> InlineKeyboardMar
     )
     
     row = []
-    # --- CORRECCIÓN CRÍTICA: Eliminar la restricción artificial [:10] ---
+    # Eliminar cualquier límite artificial para mostrar TODAS las calidades.
     for f in video_formats:
         format_id = f.get('format_id')
         if not format_id: continue
@@ -90,8 +93,8 @@ def build_detailed_format_menu(task_id: str, formats: list) -> InlineKeyboardMar
         ext = f.get('ext')
         filesize = f.get('filesize')
         
-        fps_str = f"{fps}" if fps > 0 else ""
-        label = f"🎬 {height}p{fps_str} {ext.upper()}"
+        fps_str = f"p{fps}" if fps > 0 else "p"
+        label = f"🎬 {height}{fps_str} {ext.upper()}"
         if filesize:
             label += f" ({format_bytes(filesize)})"
         
