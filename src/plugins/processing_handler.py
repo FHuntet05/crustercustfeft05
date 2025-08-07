@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 @Client.on_callback_query(filters.regex(r"^p_open_"))
 async def open_task_menu_from_p(client: Client, query: CallbackQuery):
-    """Manejador para volver al menú principal de una tarea desde un submenú."""
     await query.answer()
     task_id = query.data.split("_")[2]
     task = await db_instance.get_task(task_id)
@@ -47,15 +46,11 @@ async def handle_task_actions(client: Client, query: CallbackQuery):
         await query.message.edit_text(f"✅ Tarea añadida al panel. Use `/p {count}` para configurarla.")
 
     elif action == "queuesingle":
-        # --- SOLUCIÓN AL PROGRESO VISUAL ---
-        # 1. Guardar el ID del mensaje actual para que el worker lo edite.
-        await db_instance.update_task_config(task_id, "status_message_id", query.message.id)
-        
-        # 2. Editar el mensaje a un estado de "En cola".
-        await query.message.edit_text("🔥 Tarea enviada a la forja. El procesamiento comenzará en breve.")
-        
-        # 3. Poner la tarea en la cola para que el worker la procese.
+        # Guardar el ID del mensaje actual para que el worker lo edite.
+        await db_instance.update_task_config(task_id, "initial_message_id", query.message.id)
+        # Poner la tarea en la cola
         await db_instance.update_task(task_id, "status", "queued")
+        await query.message.edit_text("🔥 Tarea enviada a la forja...", parse_mode=ParseMode.HTML)
 
     elif action == "delete":
         await db_instance.delete_task_by_id(task_id)
@@ -75,14 +70,14 @@ async def handle_profile_and_panel_actions(client: Client, query: CallbackQuery)
             if not (preset := await db_instance.get_preset_by_id(preset_id)):
                 return await query.message.edit_text("❌ El perfil seleccionado ya no existe.")
             
-            # --- SOLUCIÓN AL PROGRESO VISUAL (PARA PERFILES) ---
-            await db_instance.update_task_config(task_id, "status_message_id", query.message.id)
+            # Guardar el ID del mensaje actual para que el worker lo edite.
+            await db_instance.update_task_config(task_id, "initial_message_id", query.message.id)
             
             await db_instance.tasks.update_one(
                 {"_id": ObjectId(task_id)},
                 {"$set": {"processing_config": preset.get('config_data', {}), "status": "queued"}}
             )
-            await query.message.edit_text(f"✅ Perfil '<b>{preset['preset_name'].capitalize()}</b>' aplicado. La tarea ha sido enviada a la forja.", parse_mode=ParseMode.HTML)
+            await query.message.edit_text(f"✅ Perfil '<b>{preset['preset_name'].capitalize()}</b>' aplicado. La tarea ha sido enviada a la forja...", parse_mode=ParseMode.HTML)
         
         elif action == "save" and parts[2] == "request":
             task_id = parts[3]
