@@ -86,8 +86,10 @@ async def any_file_handler(client: Client, message: Message):
     else:
         await message.reply(f"❌ {greeting_prefix}Hubo un error al registrar la tarea en la base de datos.", parse_mode=ParseMode.HTML)
 
-# --- CORRECCIÓN DE SINTAXIS CRÍTICA ---
-@Client.on_message(filters.text & ~filters.command())
+# --- CORRECCIÓN DE LÓGICA DE FILTROS ---
+# Este manejador capturará cualquier mensaje de texto que NO sea un comando,
+# porque los manejadores de comando tienen mayor prioridad y se evalúan primero.
+@Client.on_message(filters.text)
 async def text_handler(client: Client, message: Message):
     """
     Dispatcher de texto:
@@ -98,6 +100,9 @@ async def text_handler(client: Client, message: Message):
     user = message.from_user
     text = message.text.strip()
     greeting_prefix = get_greeting(user.id)
+
+    # El filtro de comando ya no es necesario aquí por el orden de precedencia de los handlers
+    # Pyrogram probará los @Client.on_message(filters.command(...)) primero.
 
     url_match = re.search(URL_REGEX, text)
     if url_match:
