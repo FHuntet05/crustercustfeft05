@@ -145,54 +145,54 @@ async def set_value_callback(client: Client, query: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^song_select_"))
 async def on_song_select(client: Client, query: CallbackQuery):
-    # --- ARQUITECTURA DE RENDIMIENTO REESCRITA ---
+    # --- ARQUITECTURA "HYPER-SPEED" ---
     result_id = query.data.split("_")[2]
     user = query.from_user
 
     search_result = await db_instance.search_results.find_one_and_delete({"_id": ObjectId(result_id), "user_id": user.id})
     if not search_result:
         await query.answer("Esta búsqueda ha expirado.", show_alert=True)
-        return await query.message.delete()
+        try: await query.message.delete()
+        except: pass
+        return
     
-    # Limpiar el resto de los resultados de esta búsqueda para no dejar basura en la DB
     if search_id := search_result.get('search_id'):
         await db_instance.search_results.delete_many({"search_id": search_id})
         await db_instance.search_sessions.delete_one({"_id": ObjectId(search_id)})
     
-    await query.message.edit_text(f"🔥 Procesando: <b>{escape_html(search_result.get('title'))}</b>...", parse_mode=ParseMode.HTML)
+    # 1. Editar mensaje original a "Procesando..." para una respuesta instantánea.
+    status_message = await query.message.edit_text(f"🔥 Procesando: <b>{escape_html(search_result.get('title'))}</b>...", parse_mode=ParseMode.HTML)
     await query.answer()
 
-    # 1. Hidratación inmediata de la tarea: obtener toda la info AHORA.
+    # 2. Obtener información de la URL de forma asíncrona.
     search_term_or_url = search_result.get('url') or f"ytsearch1:{search_result.get('search_term')}"
-    
     info = await asyncio.to_thread(downloader.get_url_info, search_term_or_url)
+    
     if not info or not info.get('formats'):
-        return await query.message.edit_text("❌ No se pudo obtener información del video. Puede que haya sido eliminado.")
+        return await status_message.edit("❌ No se pudo obtener información del video. Puede que haya sido eliminado.")
 
-    # 2. Crear una tarea COMPLETA y lista para el worker.
+    # 3. Crear tarea COMPLETA con toda la información necesaria.
     best_audio_format = downloader.get_best_audio_format(info['formats'])
-    lyrics = await asyncio.to_thread(downloader.get_lyrics, info['url'])
-
+    
     processing_config = {
         "download_format_id": best_audio_format,
-        "lyrics": lyrics,
-        "thumbnail_url": info.get('thumbnail')
+        "suppress_progress": True, # Nueva bandera para una ejecución silenciosa
+        "status_message_id": status_message.id # Guardar ID para borrarlo al final
     }
     
     task_id = await db_instance.add_task(
         user_id=user.id,
-        file_type='audio', # Forzar el tipo de archivo desde el inicio.
+        file_type='audio',
         url=info['url'],
         file_name=sanitize_filename(info['title']), 
         processing_config=processing_config,
-        status="queued" # Encolar directamente para que el worker la tome de inmediato.
+        status="queued"
     )
 
     if not task_id:
-        return await query.message.edit_text("❌ Error al crear la tarea en la base de datos.")
+        return await status_message.edit("❌ Error al crear la tarea en la base de datos.")
     
-    # 3. Respuesta al usuario optimizada. El mensaje ya fue editado. El worker se encargará del resto.
-    logger.info(f"Tarea de audio {task_id} creada e hidratada. El worker se encargará.")
+    logger.info(f"Tarea de audio {task_id} creada para ejecución silenciosa y rápida.")
 
 @Client.on_callback_query(filters.regex(r"^search_page_"))
 async def on_search_page(client: Client, query: CallbackQuery):

@@ -59,6 +59,16 @@ async def _progress_callback_pyrogram(current, total, user_id, operation):
     await _edit_status_message(user_id, text, progress_tracker)
 
 async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
+    # Si la tarea no tiene progreso, ejecutar el comando sin monitorear.
+    if user_id not in progress_tracker:
+        process = await asyncio.create_subprocess_shell(cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            error_message = stderr.decode('utf-8', 'ignore')
+            logger.error(f"FFmpeg falló (sin progreso). Código: {process.returncode}\nError: {error_message}")
+            raise Exception(f"El proceso de FFmpeg falló: {error_message[-500:]}")
+        return
+
     duration_info = get_media_info(input_path)
     total_duration_sec = float(duration_info.get('format', {}).get('duration', 0))
     if total_duration_sec == 0: logger.warning("No se pudo obtener la duración.")
@@ -104,23 +114,21 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
 
 async def process_task(bot, task: dict):
     task_id, user_id = str(task['_id']), task['user_id']
-    # El mensaje de estado ahora es creado por el worker para asegurar que el progreso se muestre siempre.
-    status_message = await bot.send_message(user_id, f"Iniciando: <code>{escape_html(task.get('original_filename') or task.get('url', 'Tarea'))}</code>", parse_mode=ParseMode.HTML)
+    config = task.get('processing_config', {})
     
-    global progress_tracker
-    progress_tracker[user_id] = ProgressContext(bot, status_message, task, asyncio.get_running_loop())
+    # --- ARQUITECTURA "HYPER-SPEED": Ejecución silenciosa ---
+    status_message = None
+    if not config.get('suppress_progress'):
+        status_message = await bot.send_message(user_id, f"Iniciando: <code>{escape_html(task.get('original_filename') or task.get('url', 'Tarea'))}</code>", parse_mode=ParseMode.HTML)
+        global progress_tracker
+        progress_tracker[user_id] = ProgressContext(bot, status_message, task, asyncio.get_running_loop())
     
     files_to_clean = set()
     output_path = ""
     try:
         task = await db_instance.get_task(task_id)
         if not task: raise Exception("Tarea no encontrada.")
-        progress_tracker[user_id].task = task
-        config = task.get('processing_config', {})
-
-        # --- ARQUITECTURA DE RENDIMIENTO: ELIMINACIÓN DEL BLOQUE 'audio_search' ---
-        # La lógica de búsqueda ahora se maneja en el `processing_handler` antes de crear la tarea.
-        # El worker recibe una tarea "lista para procesar".
+        if status_message: progress_tracker[user_id].task = task
 
         base_filename = os.path.join(DOWNLOAD_DIR, task_id)
         actual_download_path = ""
@@ -129,9 +137,9 @@ async def process_task(bot, task: dict):
             format_id = config.get('download_format_id')
             if not format_id: raise Exception("La tarea no tiene 'download_format_id'.")
             
+            progress_args = {'progress_tracker': progress_tracker, 'user_id': user_id} if not config.get('suppress_progress') else {}
             actual_download_path = await asyncio.to_thread(
-                downloader.download_from_url, url, base_filename, format_id, 
-                progress_tracker=progress_tracker, user_id=user_id
+                downloader.download_from_url, url, base_filename, format_id, **progress_args
             )
 
             if not actual_download_path:
@@ -139,29 +147,16 @@ async def process_task(bot, task: dict):
 
         elif file_id := task.get('file_id'):
             actual_download_path = base_filename
-            await bot.download_media(message=file_id, file_name=actual_download_path, progress=_progress_callback_pyrogram, progress_args=(user_id, "📥 Descargando..."))
+            progress_args = {'progress': _progress_callback_pyrogram, 'progress_args': (user_id, "📥 Descargando...")} if not config.get('suppress_progress') else {}
+            await bot.download_media(message=file_id, file_name=actual_download_path, **progress_args)
         else:
             raise Exception("La tarea no tiene URL ni file_id.")
         
         files_to_clean.add(actual_download_path)
         logger.info(f"Descarga completada en: {actual_download_path}")
         
-        # --- LÓGICA DE TIPO DE ARCHIVO CORREGIDA ---
-        # Respetar la intención original del usuario. Si la tarea se creó como 'audio', se procesa como audio.
         file_type = task.get('file_type', 'document')
-        
-        # Si no es un tipo de archivo forzado, inspeccionar el contenido real
-        if file_type not in ['audio', 'video']:
-            media_info = get_media_info(actual_download_path)
-            streams = media_info.get('streams', [])
-            if any(s.get('codec_type') == 'video' for s in streams): file_type = 'video'
-            elif any(s.get('codec_type') == 'audio' for s in streams): file_type = 'audio'
-        
-        # Actualizar en la DB por si es necesario para el comando ffmpeg
-        await db_instance.update_task(task_id, 'file_type', file_type)
-        task['file_type'] = file_type 
-        
-        await _edit_status_message(user_id, f"⚙️ Archivo ({file_type}) listo para procesar.", progress_tracker)
+        if status_message: await _edit_status_message(user_id, f"⚙️ Archivo ({file_type}) listo para procesar.", progress_tracker)
         
         final_filename_base = sanitize_filename(config.get('final_filename', task.get('original_filename', task_id)))
         final_ext = f".{config.get('audio_format', 'mp3')}" if file_type == 'audio' else ".mp4"
@@ -171,13 +166,7 @@ async def process_task(bot, task: dict):
         output_path = os.path.join(OUTPUT_DIR, final_filename)
         files_to_clean.add(output_path)
         
-        thumb_path = os.path.join(DOWNLOAD_DIR, f"{task_id}.jpg")
-        thumb_to_use = None
-        if config.get('thumbnail_url') and await asyncio.to_thread(downloader.download_file, config['thumbnail_url'], thumb_path):
-            thumb_to_use = thumb_path
-            files_to_clean.add(thumb_path)
-
-        commands = ffmpeg.build_ffmpeg_command(task, actual_download_path, output_path, thumb_to_use)
+        commands = ffmpeg.build_ffmpeg_command(task, actual_download_path, output_path, None) # Thumb se maneja en el envío
         processed_file = actual_download_path
         if commands and commands[0]:
             await _run_ffmpeg_with_progress(user_id, commands[0], actual_download_path)
@@ -185,39 +174,31 @@ async def process_task(bot, task: dict):
         elif output_path != actual_download_path:
              os.rename(actual_download_path, output_path)
              processed_file = output_path
-
-        caption = f"✅ <code>{escape_html(final_filename)}</code>"
-        sent_message = None
         
-        if file_type == 'video':
-            sent_message = await bot.send_video(user_id, video=processed_file, thumb=thumb_to_use, caption=caption, parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
-        elif file_type == 'audio':
-            sent_message = await bot.send_audio(user_id, audio=processed_file, thumb=thumb_to_use, caption=caption, parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
+        progress_args_upload = {'progress': _progress_callback_pyrogram, 'progress_args': (user_id, "⬆️ Subiendo...")} if not config.get('suppress_progress') else {}
+        
+        if file_type == 'audio':
+            await bot.send_audio(user_id, audio=processed_file, caption=f"✅ <code>{escape_html(final_filename)}</code>", parse_mode=ParseMode.HTML, **progress_args_upload)
         else:
-            sent_message = await bot.send_document(user_id, document=processed_file, caption=caption, parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=(user_id, "⬆️ Subiendo..."))
-        
-        if sent_message and (lyrics := config.get('lyrics')):
-            await bot.send_message(user_id, text=f"📜 <b>Letra</b>\n\n{escape_html(lyrics)}", reply_to_message_id=sent_message.id, parse_mode=ParseMode.HTML)
+            await bot.send_video(user_id, video=processed_file, caption=f"✅ <code>{escape_html(final_filename)}</code>", parse_mode=ParseMode.HTML, **progress_args_upload)
 
         await db_instance.update_task(task_id, "status", "done")
-        await status_message.delete()
-
-    except AuthenticationError as e:
-        logger.critical(f"Error de autenticación de YouTube: {e}")
-        error_msg = "YouTube me está bloqueando. Necesito nuevas cookies para funcionar."
-        await db_instance.update_task(task_id, "status", "error")
-        await db_instance.update_task(task_id, "last_error", error_msg)
-        await _edit_status_message(user_id, f"❌ <b>Error de Autenticación</b>\n\n<code>{escape_html(error_msg)}</code>", progress_tracker)
-        if ADMIN_USER_ID:
-            await bot.send_message(ADMIN_USER_ID, "⚠️ <b>¡Alerta de Mantenimiento, Jefe!</b>\n\nMis cookies de YouTube han expirado o han sido invalidadas. Por favor, genere un nuevo archivo <code>youtube_cookies.txt</code> y súbalo al servidor para restaurar la funcionalidad de descarga.", parse_mode=ParseMode.HTML)
+        if status_message: await status_message.delete()
 
     except Exception as e:
         logger.critical(f"Error al procesar la tarea {task_id}: {e}", exc_info=True)
         await db_instance.update_task(task_id, "status", "error")
         await db_instance.update_task(task_id, "last_error", str(e))
-        await _edit_status_message(user_id, f"❌ <b>Error Grave</b>\n\n<code>{escape_html(str(e))}</code>", progress_tracker)
+        if status_message:
+            await _edit_status_message(user_id, f"❌ <b>Error Grave</b>\n\n<code>{escape_html(str(e))}</code>", progress_tracker)
+        else:
+            await bot.send_message(user_id, f"❌ Error al procesar <code>{escape_html(task.get('original_filename'))}</code>: {escape_html(str(e))}", parse_mode=ParseMode.HTML)
     finally:
         if user_id in progress_tracker: del progress_tracker[user_id]
+        if status_message_id_to_delete := config.get("status_message_id"):
+            try: await bot.delete_messages(user_id, status_message_id_to_delete)
+            except Exception as e: logger.warning(f"No se pudo borrar el mensaje de estado {status_message_id_to_delete}: {e}")
+        
         for fpath in files_to_clean:
             if os.path.exists(fpath): 
                 try: os.remove(fpath)
@@ -229,8 +210,9 @@ async def worker_loop(bot_instance):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     while True:
         try:
+            active_users = list(progress_tracker.keys())
             task = await db_instance.tasks.find_one_and_update(
-                {"status": "queued", "user_id": {"$nin": list(progress_tracker.keys())}},
+                {"status": "queued", "user_id": {"$nin": active_users}},
                 {"$set": {"status": "processing", "processed_at": datetime.utcnow()}},
                 sort=[('created_at', 1)]
             )
@@ -238,8 +220,8 @@ async def worker_loop(bot_instance):
                 logger.info(f"Iniciando procesamiento de la tarea {task['_id']} para el usuario {task['user_id']}")
                 asyncio.create_task(process_task(bot_instance, task))
             else:
-                await asyncio.sleep(2) # Reducido el tiempo de espera para mayor reactividad
+                await asyncio.sleep(1)
         except Exception as e:
             logger.critical(f"[WORKER] Bucle del worker falló críticamente: {e}", exc_info=True)
-            await asyncio.sleep(15) # Reducido el tiempo de espera en caso de error
+            await asyncio.sleep(10)
 # --- END OF FILE src/core/worker.py ---

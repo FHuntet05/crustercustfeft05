@@ -126,44 +126,12 @@ def download_from_url(url: str, output_path: str, format_id: str, progress_track
     logger.error(f"yt-dlp finalizó pero no se encontró un archivo final válido en {output_path}.*")
     return None
 
-def get_best_audio_format(formats: list) -> str or None:
+def get_best_audio_format(formats: list) -> str:
     """
-    Selecciona el mejor formato de audio disponible usando una estrategia defensiva en cascada.
+    Devuelve el selector de formato más robusto y rápido para yt-dlp,
+    delegando la lógica de selección para máxima velocidad.
     """
-    # --- LÓGICA DE SELECCIÓN DE AUDIO REESCRITA (VERSIÓN DEFINITIVA) ---
-    if not formats:
-        logger.warning("No se proporcionaron formatos. Usando el selector final 'bestaudio/best'.")
-        return 'bestaudio/best'
-
-    available_formats = [f for f in formats if f.get('format_id')]
-
-    # Estrategia 1: Mejor formato de SOLO AUDIO por bitrate ('abr').
-    audio_only_formats = [f for f in available_formats if f.get('vcodec') in ['none', None] and f.get('abr')]
-    if audio_only_formats:
-        best_format = sorted(audio_only_formats, key=lambda x: x.get('abr', 0), reverse=True)[0]
-        logger.info(f"Estrategia 1 (Éxito): Mejor formato de SOLO AUDIO seleccionado: ID {best_format['format_id']} con ABR {best_format['abr']}k")
-        return best_format['format_id']
-    logger.info("Estrategia 1 (Fallo): No se encontraron formatos de solo audio con 'abr'.")
-
-    # Estrategia 2: Mejor formato MIXTO por bitrate de audio ('abr').
-    mixed_formats_with_abr = [f for f in available_formats if f.get('abr')]
-    if mixed_formats_with_abr:
-        best_format = sorted(mixed_formats_with_abr, key=lambda x: x.get('abr', 0), reverse=True)[0]
-        logger.info(f"Estrategia 2 (Éxito): Mejor formato MIXTO (por audio) seleccionado: ID {best_format['format_id']} con ABR {best_format['abr']}k")
-        return best_format['format_id']
-    logger.info("Estrategia 2 (Fallo): No se encontraron formatos mixtos con 'abr'.")
-
-    # Estrategia 3: Buscar IDs de audio conocidos y fiables en orden de calidad.
-    known_audio_ids = ['141', '251', '140', '250', '139', '249'] # m4a 256k, opus ~160k, m4a 128k, etc.
-    available_ids = {f['format_id'] for f in available_formats}
-    for audio_id in known_audio_ids:
-        if audio_id in available_ids:
-            logger.info(f"Estrategia 3 (Éxito): Encontrado ID de audio conocido y fiable: {audio_id}")
-            return audio_id
-    logger.info("Estrategia 3 (Fallo): No se encontraron IDs de audio conocidos.")
-
-    # Estrategia 4: Fallback final al selector compuesto más robusto.
-    logger.warning("Estrategia 4 (Fallback Final): Usando el selector genérico 'bestaudio/best'.")
+    # --- LÓGICA "HYPER-SPEED" ---
     return 'bestaudio/best'
 
 def get_lyrics(url: str) -> str or None:
