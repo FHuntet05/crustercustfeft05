@@ -7,6 +7,7 @@ from spotipy.oauth2 import SpotifyClientCredentials
 import os
 import requests
 import glob
+import shutil # Importado para encontrar la ruta de ffmpeg
 
 # Se importa la función de progreso desde utils para evitar dependencia circular
 from src.helpers.utils import _progress_hook_yt_dlp
@@ -22,17 +23,17 @@ class ProgressError(Exception):
 class YtdlpLogger:
     """Logger personalizado para inyectar en yt-dlp y detectar errores específicos."""
     def debug(self, msg):
-        pass
+        # Imprimir mensajes de debug de yt-dlp puede ser útil a veces
+        if 'ffmpeg' in msg.lower():
+            logger.debug(f"YTDLP-FFMPEG: {msg}")
     def info(self, msg):
         pass
     def warning(self, msg):
         pass
     def error(self, msg):
-        # Si detectamos el error de progreso, levantamos nuestra propia excepción
         if "not supported between instances of 'NoneType' and 'int'" in msg:
             raise ProgressError(msg)
         else:
-            # Para otros errores, simplemente los logueamos
             logger.error(f"yt-dlp internal error: {msg}")
 
 # --- Configuración de APIs y Cookies ---
@@ -66,6 +67,14 @@ def get_common_ydl_opts():
             'Accept-Language': 'en-US,en;q=0.5',
         },
     }
+    # Solución definitiva: decirle a ytdlp dónde está ffmpeg
+    ffmpeg_path = shutil.which('ffmpeg')
+    if ffmpeg_path:
+        logger.info(f"FFmpeg encontrado en: {ffmpeg_path}. Proporcionando ruta a yt-dlp.")
+        opts['ffmpeg_location'] = ffmpeg_path
+    else:
+        logger.warning("FFmpeg no se encontró en el PATH del sistema. Las fusiones de yt-dlp podrían fallar.")
+        
     if YOUTUBE_COOKIES_FILE:
         opts['cookiefile'] = YOUTUBE_COOKIES_FILE
     return opts
@@ -80,6 +89,78 @@ def get_best_audio_format(formats: list) -> str:
     logger.info(f"Mejor formato de audio seleccionado: ID {best_format.get('format_id')} con ABR {best_format.get('abr')}k")
     return best_format.get('format_id', 'bestaudio/best')
 
+def get_lyrics(url: str) -> str or None:
+    # (código sin cambios)
+    pass
+
+def get_url_info(url: str) -> dict or None:
+    # (código sin cambios)
+    pass
+
+def download_from_url(url: str, output_path: str, format_id: str, progress_tracker: dict = None, user_id: int = None) -> str or None:
+    if not format_id:
+        logger.error("Se intentó descargar desde URL sin un format_id válido.")
+        return None
+    
+    progress_hook = None
+    if user_id and progress_tracker:
+        progress_hook = lambda d: _progress_hook_yt_dlp({**d, 'user_id': user_id}, progress_tracker)
+        
+    ydl_opts = get_common_ydl_opts()
+    ydl_opts.update({
+        'format': format_id,
+        'outtmpl': {'default': output_path},
+        'progress_hooks': [progress_hook] if progress_hook else [],
+        'noplaylist': True, 'merge_output_format': 'mkv',
+        'http_chunk_size': 10485760, 'retries': 5, 'fragment_retries': 5,
+        'nopart': True, 'logger': YtdlpLogger(),
+    })
+    if 'forcejson' in ydl_opts: del ydl_opts['forcejson']
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except ProgressError:
+        logger.warning("Fallo de progreso detectado. Reintentando con estrategia 'best' y logs detallados...")
+        
+        # --- Estrategia de reintento con diagnóstico ---
+        ydl_opts.update({
+            'format': 'bestvideo+bestaudio/best',
+            'progress_hooks': [],
+            'logger': None, # Usar el logger por defecto para ver todo
+            'quiet': False, # Desactivar modo silencioso para diagnóstico
+            'no_warnings': False
+        })
+        
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+        except Exception as retry_e:
+            logger.error(f"El reintento de descarga también falló: {retry_e}", exc_info=True)
+            return None
+    except Exception as e:
+        logger.error(f"Error inesperado durante la descarga de yt-dlp: {e}", exc_info=True)
+        return None
+
+    found_files = glob.glob(f"{output_path}.*")
+    for f in found_files:
+        if not f.endswith(".part"):
+            logger.info(f"Descarga de yt-dlp completada. Archivo final: {f}")
+            return f
+
+    logger.error(f"yt-dlp finalizó pero no se encontró un archivo final válido en {output_path}.*")
+    return None
+
+def search_music(query: str, limit: int = 20) -> list:
+    # (código sin cambios)
+    pass
+
+def download_file(url: str, output_path: str) -> bool:
+    # (código sin cambios)
+    pass
+
+# Resto de las funciones get_lyrics, get_url_info, etc. se omiten por brevedad pero están presentes
+# Re-añado las funciones omitidas para mantener la integridad del archivo
 def get_lyrics(url: str) -> str or None:
     temp_lyrics_path = f"temp_lyrics_{os.urandom(4).hex()}"
     ydl_opts = get_common_ydl_opts()
@@ -148,54 +229,6 @@ def get_url_info(url: str) -> dict or None:
     except Exception as e:
         logger.error(f"Excepción en get_url_info para {url}: {e}", exc_info=True)
         return None
-
-def download_from_url(url: str, output_path: str, format_id: str, progress_tracker: dict = None, user_id: int = None) -> str or None:
-    if not format_id:
-        logger.error("Se intentó descargar desde URL sin un format_id válido.")
-        return None
-    
-    progress_hook = None
-    if user_id and progress_tracker:
-        progress_hook = lambda d: _progress_hook_yt_dlp({**d, 'user_id': user_id}, progress_tracker)
-        
-    ydl_opts = get_common_ydl_opts()
-    ydl_opts.update({
-        'format': format_id,
-        'outtmpl': {'default': output_path},
-        'progress_hooks': [progress_hook] if progress_hook else [],
-        'noplaylist': True, 'merge_output_format': 'mkv',
-        'http_chunk_size': 10485760, 'retries': 5, 'fragment_retries': 5,
-        'nopart': True, 'logger': YtdlpLogger(),
-    })
-    if 'forcejson' in ydl_opts: del ydl_opts['forcejson']
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-    except ProgressError:
-        logger.warning("Fallo de progreso detectado. Reintentando con estrategia 'best'...")
-        # --- CAMBIO CLAVE: Estrategia de reintento ---
-        ydl_opts['format'] = 'bestvideo+bestaudio/best' # Dejar que ytdlp elija la mejor combinación
-        ydl_opts['progress_hooks'] = []
-        ydl_opts['logger'] = None # Usar logger por defecto en el reintento
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-        except Exception as retry_e:
-            logger.error(f"El reintento de descarga también falló: {retry_e}")
-            return None
-    except Exception as e:
-        logger.error(f"Error inesperado durante la descarga de yt-dlp: {e}")
-        return None
-
-    found_files = glob.glob(f"{output_path}.*")
-    for f in found_files:
-        if not f.endswith(".part"):
-            logger.info(f"Descarga de yt-dlp completada. Archivo final: {f}")
-            return f
-
-    logger.error(f"yt-dlp finalizó pero no se encontró un archivo final válido en {output_path}.*")
-    return None
 
 def search_music(query: str, limit: int = 20) -> list:
     results = []
