@@ -71,25 +71,39 @@ def sanitize_filename(filename: str) -> str:
     return " ".join(sanitized.split())[:200]
 
 async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
-    if user_id not in progress_tracker: return
-    ctx = progress_tracker[user_id]
+    """
+    Función asíncrona simplificada. Su única responsabilidad es editar el mensaje.
+    El throttling ya ha sido manejado por el llamador.
+    """
+    ctx = progress_tracker.get(user_id)
+    if not ctx: return
     
-    if text == ctx.last_update_text: return
+    # Prevenir la edición si el texto es idéntico al último enviado.
+    if text == ctx.last_update_text:
+        return
     ctx.last_update_text = text
     
-    current_time = time.time()
-    if current_time - ctx.last_edit_time > 1.5:
-        try:
-            await ctx.bot.edit_message_text(chat_id=ctx.message.chat.id, message_id=ctx.message.id, text=text, parse_mode=ParseMode.HTML)
-            ctx.last_edit_time = current_time
-        except Exception as e:
-            logger.warning(f"No se pudo editar el mensaje de estado {ctx.message.id} para el usuario {user_id}: {e}")
+    try:
+        await ctx.bot.edit_message_text(
+            chat_id=ctx.message.chat.id,
+            message_id=ctx.message.id,
+            text=text,
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.warning(f"No se pudo editar el mensaje de estado {ctx.message.id} para el usuario {user_id}: {e}")
 
 def _progress_hook_yt_dlp(d, progress_tracker: dict):
     user_id = d.get('user_id')
     if not user_id or user_id not in progress_tracker: return
     ctx = progress_tracker[user_id]
     
+    # La lógica de throttling se mueve aquí también para consistencia.
+    current_time = time.time()
+    if current_time - ctx.last_update_time < 1.5:
+        return
+    ctx.last_update_time = current_time
+
     try:
         if d['status'] == 'downloading':
             total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
@@ -100,7 +114,10 @@ def _progress_hook_yt_dlp(d, progress_tracker: dict):
                 text = format_status_message(operation="📥 Descargando...", filename=ctx.task.get('original_filename', 'archivo'), percentage=percentage, 
                                            processed_bytes=downloaded_bytes, total_bytes=total_bytes, speed=speed, eta=eta, 
                                            engine="yt-dlp", user_id=user_id, user_mention=user_mention)
-                asyncio.run_coroutine_threadsafe(_edit_status_message(user_id, text, progress_tracker), ctx.loop)
+                
+                coro = _edit_status_message(user_id, text, progress_tracker)
+                asyncio.run_coroutine_threadsafe(coro, ctx.loop)
+
     except Exception as e:
         logger.warning(f"Error menor en el hook de progreso de yt-dlp (ignorado): {e}")
 
@@ -110,10 +127,6 @@ def format_status_message(
     eta: float, engine: str, user_id: int, user_mention: str,
     is_processing: bool = False, file_size: int = None
 ) -> str:
-    """
-    Construye el mensaje de estado con el formato visual solicitado.
-    Ahora es inequívoco sobre el tiempo vs. el tamaño.
-    """
     bar = _create_text_bar(percentage, 20)
     short_filename = (filename[:35] + '…') if len(filename) > 38 else filename
     greeting = get_greeting(user_id)
@@ -126,9 +139,7 @@ def format_status_message(
         f"┣❯ <b>Archivo:</b> <code>{escape_html(short_filename)}</code>",
     ]
     
-    # --- LÓGICA DE VISUALIZACIÓN CORREGIDA ---
     if is_processing:
-        # Durante el procesamiento, mostrar el tamaño del archivo y el progreso en tiempo.
         if file_size:
             lines.append(f"┣❯ <b>Tamaño:</b> {format_bytes(file_size)}")
         
@@ -142,7 +153,6 @@ def format_status_message(
             f"┣❯ <b>Velocidad:</b> {speed_text}",
         ])
     else:
-        # Durante descarga/subida, mostrar el progreso en bytes.
         processed_text = format_bytes(processed_bytes)
         total_text = format_bytes(total_bytes)
         speed_text = f"{format_bytes(speed)}/s" if speed > 0 else "N/A"
@@ -162,11 +172,9 @@ def format_status_message(
 
 
 def generate_summary_caption(task: dict, initial_size: int, final_size: int, final_filename: str) -> str:
-    """Genera un resumen detallado de las operaciones realizadas en una tarea."""
     config = task.get('processing_config', {})
     ops = []
 
-    # Detección de operaciones
     if config.get('final_filename'): ops.append(f"✍️ Renombrado")
     if config.get('transcode'): ops.append(f"📉 Transcodificado a {config['transcode'].get('resolution', 'N/A')}")
     if config.get('trim_times'): ops.append(f"✂️ Cortado")
@@ -189,7 +197,6 @@ def generate_summary_caption(task: dict, initial_size: int, final_size: int, fin
         if config.get('audio_tags'): ops.append(f"✍️ Metadatos editados")
         if config.get('thumbnail_file_id'): ops.append(f"🖼️ Carátula cambiada")
 
-    # Construcción del caption
     caption_parts = [f"✅ <b>Proceso Completado</b>"]
     
     size_reduction_str = ""

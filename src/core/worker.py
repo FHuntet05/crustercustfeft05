@@ -31,36 +31,35 @@ class ProgressContext:
         self.message = message
         self.task = task
         self.start_time = time.time()
-        self.last_edit_time = 0
+        self.last_update_time = 0  # Movido aquí para throttling
         self.last_update_text = ""
         self.loop = loop
 
 progress_tracker = {}
 
-# --- ARQUITECTURA DEL CALLBACK CORREGIDA ---
-# La función de progreso de Pyrogram se ejecuta en un hilo síncrono.
-# Por lo tanto, debe ser una función `def`, no `async def`.
-# Para interactuar con el bucle de eventos principal (asíncrono), debe usar
-# `asyncio.run_coroutine_threadsafe`.
-
 def _progress_callback_pyrogram(current, total, user_id, operation, filename=""):
     """
-    Callback síncrono para el progreso de descarga/subida de Pyrogram.
+    Callback síncrono para el progreso. La lógica de throttling se realiza aquí
+    para garantizar la seguridad entre hilos (thread-safety).
     """
-    if user_id not in progress_tracker or not total or total <= 0:
+    ctx = progress_tracker.get(user_id)
+    if not ctx: return
+
+    current_time = time.time()
+    # --- LÓGICA DE THROTTLING CORREGIDA Y REUBICADA ---
+    # Se comprueba el tiempo aquí, en el hilo síncrono, antes de hacer cualquier cosa.
+    if current_time - ctx.last_update_time < 1.5:
         return
-        
-    ctx = progress_tracker[user_id]
+    # Se actualiza la marca de tiempo inmediatamente para evitar condiciones de carrera.
+    ctx.last_update_time = current_time
+
+    if not total or total <= 0: return
     
-    # Prevenir divisiones por cero y calcular métricas
-    elapsed = time.time() - ctx.start_time
-    if elapsed == 0: return # Evitar division by zero en el primer tick
-    
-    speed = current / elapsed
+    elapsed = current_time - ctx.start_time
+    speed = current / elapsed if elapsed > 0 else 0
     eta = (total - current) / speed if speed > 0 else 0
     percentage = (current / total) * 100
     
-    # Construir el texto del mensaje de estado
     user_mention = "Usuario"
     if hasattr(ctx.message, 'from_user') and ctx.message.from_user:
         user_mention = ctx.message.from_user.mention
@@ -78,8 +77,6 @@ def _progress_callback_pyrogram(current, total, user_id, operation, filename="")
         user_mention=user_mention
     )
     
-    # Programar la corrutina `_edit_status_message` en el bucle de eventos principal
-    # de forma segura desde este hilo. Esta es la única manera correcta de hacerlo.
     coro = _edit_status_message(user_id, text, progress_tracker)
     asyncio.run_coroutine_threadsafe(coro, ctx.loop)
 
@@ -119,6 +116,8 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str, ini
             all_stderr_lines.append(line.strip())
             if match := time_pattern.search(line):
                 if total_duration_sec > 0 and ctx:
+                    # El throttling para FFmpeg es natural debido a la frecuencia de sus logs.
+                    # No es necesario añadir un `if time - last_time` aquí.
                     h, m, s, ms = map(int, match.groups())
                     processed_sec = h * 3600 + m * 60 + s + ms / 100
                     percentage = (processed_sec / total_duration_sec) * 100
@@ -130,18 +129,11 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str, ini
                     if hasattr(ctx.message, 'from_user') and ctx.message.from_user: user_mention = ctx.message.from_user.mention
                     
                     text = format_status_message(
-                        operation="⚙️ Procesando...", 
-                        filename=ctx.task.get('original_filename', 'archivo'),
-                        percentage=percentage, 
-                        processed_bytes=processed_sec,
-                        total_bytes=total_duration_sec,
-                        speed=speed_factor, 
-                        eta=eta, 
-                        engine="FFmpeg", 
-                        user_id=user_id,
-                        user_mention=user_mention,
-                        is_processing=True,
-                        file_size=initial_file_size
+                        operation="⚙️ Procesando...", filename=ctx.task.get('original_filename', 'archivo'),
+                        percentage=percentage, processed_bytes=processed_sec,
+                        total_bytes=total_duration_sec, speed=speed_factor, eta=eta, engine="FFmpeg", 
+                        user_id=user_id, user_mention=user_mention,
+                        is_processing=True, file_size=initial_file_size
                     )
                     await _edit_status_message(user_id, text, progress_tracker)
 
