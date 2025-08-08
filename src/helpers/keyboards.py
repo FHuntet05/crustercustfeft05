@@ -22,9 +22,6 @@ def build_processing_menu(task_id: str, file_type: str, task_data: dict) -> Inli
     keyboard = []
     task_config = task_data.get('processing_config', {})
     
-    if task_data.get('url_info') and not task_config.get('download_format_id'):
-         keyboard.append([InlineKeyboardButton("💿 Elegir Calidad de Descarga", callback_data=f"config_dlquality_{task_id}")])
-
     if file_type == 'video':
         mute_text = "🔇 Silenciar" if not task_config.get('mute_audio') else "🔊 Desilenciar"
         transcode_res = task_config.get('transcode', {}).get('resolution', 'No')
@@ -102,12 +99,12 @@ def build_detailed_format_menu(task_id: str, formats: list) -> InlineKeyboardMar
         filesize = f.get('filesize')
         
         fps_str = f" @ {int(fps)}fps" if fps and int(fps) > 30 else ""
-        label = f"🎬 {height}p{fps_str}"
+        label = f"🎬 {height}p{fps_str} ({ext.upper()})"
         
         if label in processed_labels: continue
         processed_labels.add(label)
         
-        full_label = label + (f" ({format_bytes(filesize)})" if filesize else "")
+        full_label = label + (f" - {format_bytes(filesize)}" if filesize else "")
         
         row.append(InlineKeyboardButton(full_label, callback_data=f"set_dlformat_{task_id}_{format_id}"))
         if len(row) == 2:
@@ -120,7 +117,7 @@ def build_detailed_format_menu(task_id: str, formats: list) -> InlineKeyboardMar
         [InlineKeyboardButton("🎵 MP3 (Mejor Calidad)", callback_data=f"set_dlformat_{task_id}_mp3")],
         [InlineKeyboardButton("🔊 Solo Audio (Mejor)", callback_data=f"set_dlformat_{task_id}_bestaudio")],
         [InlineKeyboardButton("🏆 Mejor Video (Auto)", callback_data=f"set_dlformat_{task_id}_bestvideo")],
-        [InlineKeyboardButton("❌ Cancelar Tarea", callback_data=f"task_delete_{task_id}")]
+        [InlineKeyboardButton("❌ Cancelar", callback_data=f"task_delete_{task_id}")]
     ])
     return InlineKeyboardMarkup(keyboard)
 
@@ -175,7 +172,7 @@ def build_watermark_menu(task_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🖼️ Añadir Imagen", callback_data=f"config_watermark_image_{task_id}")],
         [InlineKeyboardButton("✏️ Añadir Texto", callback_data=f"config_watermark_text_{task_id}")],
-        [InlineKeyboardButton("❌ Quitar Marca de Agua", callback_data=f"set_watermark_{task_id}_remove_remove")],
+        [InlineKeyboardButton("❌ Quitar Marca de Agua", callback_data=f"set_watermark_{task_id}_remove")],
         [InlineKeyboardButton("🔙 Volver", callback_data=f"p_open_{task_id}")]
     ])
 
@@ -219,22 +216,14 @@ def build_batch_profiles_keyboard(presets: list) -> InlineKeyboardMarkup:
 
 def build_join_selection_keyboard(tasks: list, selected_ids: list) -> InlineKeyboardMarkup:
     keyboard = []
-    row = []
     for task in tasks:
         task_id = str(task['_id'])
         filename = task.get('original_filename', 'Video sin nombre')
         short_name = (filename[:50] + '...') if len(filename) > 53 else filename
-        
         prefix = "✅ " if task_id in selected_ids else "🎬 "
         button_text = f"{prefix}{escape_html(short_name)}"
-        
-        row.append(InlineKeyboardButton(button_text, callback_data=f"join_select_{task_id}"))
-        if len(row) == 1:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-        
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"join_select_{task_id}")])
+
     action_row = []
     if selected_ids:
         action_row.append(InlineKeyboardButton("✅ Unir Videos Seleccionados", callback_data="join_confirm"))
@@ -245,25 +234,16 @@ def build_join_selection_keyboard(tasks: list, selected_ids: list) -> InlineKeyb
 
 def build_zip_selection_keyboard(tasks: list, selected_ids: list) -> InlineKeyboardMarkup:
     keyboard = []
-    row = []
-    
     emoji_map = {'video': '🎬', 'audio': '🎵', 'document': '📄', 'join_operation': '🔗'}
 
     for task in tasks:
         task_id = str(task['_id'])
         filename = task.get('original_filename', 'Tarea sin nombre')
         short_name = (filename[:45] + '...') if len(filename) > 48 else filename
-        
         emoji = emoji_map.get(task.get('file_type'), '📦')
         prefix = "✅ " if task_id in selected_ids else f"{emoji} "
         button_text = f"{prefix}{escape_html(short_name)}"
-        
-        row.append(InlineKeyboardButton(button_text, callback_data=f"zip_select_{task_id}"))
-        if len(row) == 1:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"zip_select_{task_id}")])
         
     action_row = []
     if selected_ids:

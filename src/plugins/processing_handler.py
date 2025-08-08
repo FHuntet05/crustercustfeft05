@@ -25,29 +25,28 @@ async def open_task_menu_from_p(client: Client, message: Message, task_id: str):
     if not task:
         return await message.reply("❌ Error: La tarea ya no existe.")
 
+    text_content = f"🛠️ Configurando Tarea:\n<code>{escape_html(task.get('original_filename', '...'))}</code>"
+    markup = build_processing_menu(task_id, task['file_type'], task)
+    
     if hasattr(message, 'photo') and message.photo:
         await message.delete()
         await client.send_message(
             chat_id=message.chat.id,
-            text=f"🛠️ Configurando Tarea:\n<code>{escape_html(task.get('original_filename', '...'))}</code>",
-            reply_markup=build_processing_menu(task_id, task['file_type'], task),
+            text=text_content,
+            reply_markup=markup,
             parse_mode=ParseMode.HTML
         )
     else:
         try:
-            await message.edit_text(
-                f"🛠️ Configurando Tarea:\n<code>{escape_html(task.get('original_filename', '...'))}</code>",
-                reply_markup=build_processing_menu(task_id, task['file_type'], task),
-                parse_mode=ParseMode.HTML
-            )
+            if message.from_user.is_bot: # Si el mensaje es del bot (un callback)
+                 await message.edit_text(text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
+            else: # Si es un comando del usuario
+                 await message.reply(text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
         except MessageNotModified:
             pass
         except Exception:
-             await message.reply(
-                f"🛠️ Configurando Tarea:\n<code>{escape_html(task.get('original_filename', '...'))}</code>",
-                reply_markup=build_processing_menu(task_id, task['file_type'], task),
-                parse_mode=ParseMode.HTML
-            )
+             await message.reply(text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
+
 
 @Client.on_callback_query(filters.regex(r"^p_open_"))
 async def open_task_menu_callback(client: Client, query: CallbackQuery):
@@ -70,6 +69,12 @@ async def handle_task_actions(client: Client, query: CallbackQuery):
         await query.message.edit_text("⏳ <b>En Cola...</b>\nSu tarea será procesada en breve.", parse_mode=ParseMode.HTML)
 
     elif action == "delete":
+        if task_id == "url_selection":
+            await query.answer("Operación cancelada.")
+            await query.message.delete()
+            await db_instance.set_user_state(query.from_user.id, "idle")
+            return
+
         await query.answer("Tarea eliminada.")
         await db_instance.delete_task_by_id(task_id)
         await query.message.edit_text("🗑️ Tarea cancelada y eliminada del panel.")
@@ -158,7 +163,11 @@ async def show_config_menu(client: Client, query: CallbackQuery):
     if menu_type in keyboards:
         if query.message.photo: await query.message.delete()
         target_func = client.send_message if query.message.photo else query.message.edit_text
-        await target_func(query.message.chat.id, menu_messages[menu_type], reply_markup=keyboards[menu_type])
+        await target_func(
+            chat_id=query.message.chat.id,
+            text=menu_messages[menu_type],
+            reply_markup=keyboards[menu_type]
+        )
         return
 
     if not hasattr(client, 'user_data'): client.user_data = {}
@@ -167,7 +176,7 @@ async def show_config_menu(client: Client, query: CallbackQuery):
     greeting_prefix = get_greeting(query.from_user.id)
     menu_texts = {
         "rename": f"✏️ <b>Renombrar Archivo</b>\n\n{greeting_prefix}, envíeme el nuevo nombre para <code>{escape_html(task.get('original_filename', 'archivo'))}</code>.\n<i>No incluya la extensión.</i>",
-        "trim": f"✂️ <b>Cortar Video</b>\n\n{greeting_prefix}, envíeme el tiempo de inicio y fin.\nFormatos: <code>HH:MM:SS-HH:MM:SS</code> o <code>MM:SS-MM:SS</code>.\n\nPara múltiples cortes, separe los rangos con comas:\n<code>MM:SS-MM:SS,MM:SS-MM:SS</code>",
+        "trim": f"✂️ <b>Cortar Video</b>\n\n{greeting_prefix}, envíeme el tiempo de inicio y fin.\nFormatos: <code>HH:MM:SS-HH:MM:SS</code> o <code>MM:SS-MM:SS</code>.\n\nPara múltiples cortes, separe los rangos con comas:\n<code>MM:SS-MM:SS<b>,</b>MM:SS-MM:SS</code>",
         "split": f"🧩 <b>Dividir Video</b>\n\n{greeting_prefix}, envíeme el criterio de división por tiempo (ej. <code>300s</code>).",
         "gif": f"🎞️ <b>Crear GIF</b>\n\n{greeting_prefix}, envíeme la duración y los FPS.\nFormato: <code>[segundos] [fps]</code> (ej: <code>5 15</code>).",
         "audiotags": f"✍️ <b>Editar Tags</b>\n\n{greeting_prefix}, envíeme los nuevos metadatos. Formato:\n\n<code>Título: [Nuevo Título]\nArtista: [Nuevo Artista]\nÁlbum: [Nuevo Álbum]</code>",
@@ -183,7 +192,6 @@ async def show_config_menu(client: Client, query: CallbackQuery):
                        "thumbnail_add": "config_thumbnail_", "replace_audio": "config_tracks_", "watermark_text": "config_watermark_"}
     back_button_cb = f"{back_callbacks.get(menu_type, 'p_open_')}{task_id}"
     await query.message.edit_text(text, reply_markup=build_back_button(back_button_cb), parse_mode=ParseMode.HTML)
-
 
 @Client.on_message((filters.photo | filters.document | filters.audio) & filters.private, group=0)
 async def handle_media_input(client: Client, message: Message):
@@ -488,29 +496,30 @@ async def handle_playlist_action(client: Client, query: CallbackQuery):
     await query.answer()
     user = query.from_user
     parts = query.data.split("_")
-    action = parts[2]
-    
+    action, playlist_id = parts[2], parts[3]
+
     user_state = await db_instance.get_user_state(user.id)
     if user_state.get("status") != "awaiting_playlist_action":
         return await query.message.edit_text("❌ Esta selección de playlist ha expirado.")
+    
+    playlist_info = user_state.get("data", {}).get("playlist_info", {})
+    if playlist_info.get("id") != playlist_id:
+        return await query.message.edit_text("❌ Error: La información de la playlist no coincide.")
 
-    playlist_info = user_state.get("data", {}).get("playlist_info")
-    if not playlist_info: return await query.message.edit_text("❌ Error: No se encontró la info de la playlist.")
+    if action == "process" and parts[3] == "first":
+        await query.message.delete()
+        first_video_info = playlist_info.get("entries", [{}])[0]
+        if not first_video_info:
+            return await client.send_message(user.id, "❌ Error: La playlist parece estar vacía.")
 
-    if action == "process":
-        sub_action = parts[3]
-        if sub_action == "first":
-            await query.message.delete()
-            first_video_info = playlist_info.get("entries", [{}])[0]
-            await db_instance.set_user_state(user.id, "awaiting_quality_selection", {"url_info": first_video_info})
-            
-            caption_parts = [ f"<b>📝 Nombre:</b> {escape_html(first_video_info['title'])}",
-                              f"<b>🕓 Duración:</b> {format_time(first_video_info.get('duration'))}",
-                              "\nElija la calidad para la descarga:" ]
-            caption = "\n".join(caption_parts)
-            keyboard = build_detailed_format_menu("url_selection", first_video_info['formats'])
-            
-            if first_video_info.get('thumbnail'):
-                await client.send_photo(chat_id=user.id, photo=first_video_info['thumbnail'], caption=caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
-            else:
-                await client.send_message(chat_id=user.id, text=caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        await db_instance.set_user_state(user.id, "awaiting_quality_selection", {"url_info": first_video_info})
+        
+        caption = (f"<b>📝 Nombre:</b> {escape_html(first_video_info['title'])}\n"
+                   f"<b>🕓 Duración:</b> {format_time(first_video_info.get('duration'))}\n\n"
+                   "Elija la calidad para la descarga:")
+        keyboard = build_detailed_format_menu("url_selection", first_video_info.get('formats', []))
+        
+        if first_video_info.get('thumbnail'):
+            await client.send_photo(user.id, photo=first_video_info['thumbnail'], caption=caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        else:
+            await client.send_message(user.id, text=caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
