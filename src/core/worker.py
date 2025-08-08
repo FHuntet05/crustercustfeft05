@@ -37,15 +37,30 @@ class ProgressContext:
 
 progress_tracker = {}
 
-async def _progress_callback_pyrogram(current, total, user_id, operation, filename=""):
-    if user_id not in progress_tracker or not total or total <= 0: return
+# --- ARQUITECTURA DEL CALLBACK CORREGIDA ---
+# La función de progreso de Pyrogram se ejecuta en un hilo síncrono.
+# Por lo tanto, debe ser una función `def`, no `async def`.
+# Para interactuar con el bucle de eventos principal (asíncrono), debe usar
+# `asyncio.run_coroutine_threadsafe`.
+
+def _progress_callback_pyrogram(current, total, user_id, operation, filename=""):
+    """
+    Callback síncrono para el progreso de descarga/subida de Pyrogram.
+    """
+    if user_id not in progress_tracker or not total or total <= 0:
+        return
+        
     ctx = progress_tracker[user_id]
     
+    # Prevenir divisiones por cero y calcular métricas
     elapsed = time.time() - ctx.start_time
-    speed = current / elapsed if elapsed > 0 else 0
+    if elapsed == 0: return # Evitar division by zero en el primer tick
+    
+    speed = current / elapsed
     eta = (total - current) / speed if speed > 0 else 0
     percentage = (current / total) * 100
     
+    # Construir el texto del mensaje de estado
     user_mention = "Usuario"
     if hasattr(ctx.message, 'from_user') and ctx.message.from_user:
         user_mention = ctx.message.from_user.mention
@@ -63,7 +78,11 @@ async def _progress_callback_pyrogram(current, total, user_id, operation, filena
         user_mention=user_mention
     )
     
-    await _edit_status_message(user_id, text, progress_tracker)
+    # Programar la corrutina `_edit_status_message` en el bucle de eventos principal
+    # de forma segura desde este hilo. Esta es la única manera correcta de hacerlo.
+    coro = _edit_status_message(user_id, text, progress_tracker)
+    asyncio.run_coroutine_threadsafe(coro, ctx.loop)
+
 
 async def _run_ffmpeg_process(cmd: str):
     process = await asyncio.create_subprocess_shell(cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -166,8 +185,6 @@ async def process_task(bot, task: dict):
         if status_message:
             progress_tracker[user_id] = ProgressContext(bot, status_message, task, asyncio.get_running_loop())
         
-        # --- Lógica de Meta-Tareas (sin cambios significativos, se omite por brevedad) ---
-
         actual_download_path = ""
         if url := task.get('url'):
             format_id = config.get('download_format_id')
@@ -194,25 +211,20 @@ async def process_task(bot, task: dict):
         base_name_from_config = config.get('final_filename', task.get('original_filename', task_id))
         final_filename_base = os.path.splitext(sanitize_filename(base_name_from_config))[0]
         
-        # Esta es ahora una ruta base, la extensión final la decidirá el módulo ffmpeg.
         output_path_base = os.path.join(OUTPUT_DIR, f"{final_filename_base}.mp4")
-
         files_to_clean.add(output_path_base)
         
         watermark_path, thumb_to_use, subs_to_use, new_audio_path = None, None, None, None
-        # (Lógica para descargar assets como marcas de agua, etc. se omite por brevedad)
 
         if status_message: await _edit_status_message(user_id, f"⚙️ Archivo listo para procesar.", progress_tracker)
         
-        # --- LÓGICA CORREGIDA ---
-        # Ahora desempaquetamos la tupla: (comandos, ruta_final_definitiva)
         commands, definitive_output_path = ffmpeg.build_ffmpeg_command(
             task, actual_download_path, output_path_base, 
             thumb_to_use, watermark_path, subs_to_use, new_audio_path
         )
         
         for i, cmd in enumerate(commands):
-            if not cmd: continue # Ignorar comandos vacíos
+            if not cmd: continue
             if i == len(commands) - 1:
                 if status_message:
                     await _run_ffmpeg_with_progress(user_id, cmd, actual_download_path, initial_size)
@@ -221,22 +233,14 @@ async def process_task(bot, task: dict):
             else:
                 await _run_ffmpeg_process(cmd)
 
-        # --- LÓGICA CORREGIDA ---
-        # Ya no se usa glob. Se busca el archivo o patrón exacto devuelto por ffmpeg.
-        if "*" in definitive_output_path: # Manejar casos como 'split' que devuelven un patrón
+        if "*" in definitive_output_path:
             found_files = glob.glob(definitive_output_path)
             if not found_files: raise Exception(f"FFmpeg (split) finalizó pero no se encontró ningún archivo con el patrón {definitive_output_path}")
-            # Para split, enviamos como un álbum
-            media_group = [InputMediaVideo(f) for f in found_files]
-            await bot.send_media_group(user_id, media_group)
-            final_output_path_for_cleanup = [os.path.dirname(definitive_output_path)]
         elif os.path.exists(definitive_output_path):
             found_files = [definitive_output_path]
-            final_output_path_for_cleanup = found_files
         else:
             raise Exception(f"FFmpeg finalizó pero no se encontró el archivo de salida definitivo en {definitive_output_path}")
 
-        # Enviar los archivos encontrados
         for final_path in found_files:
             files_to_clean.add(final_path)
             final_size = os.path.getsize(final_path)
