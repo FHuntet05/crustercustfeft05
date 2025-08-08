@@ -1,13 +1,8 @@
-# src/helpers/keyboards.py
-
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from .utils import escape_html, format_bytes, format_time
 import math
 
-# Nota: Los objetos de teclado se construyen directamente creando listas de listas de botones.
-
 def build_profiles_keyboard(task_id: str, presets: list) -> InlineKeyboardMarkup:
-    """Construye el teclado para seleccionar un perfil o ir a configuración manual."""
     keyboard = []
     row = []
     for preset in presets:
@@ -20,11 +15,10 @@ def build_profiles_keyboard(task_id: str, presets: list) -> InlineKeyboardMarkup
     if row:
         keyboard.append(row)
     
-    keyboard.append([InlineKeyboardButton("🛠️ Configuración Manual", callback_data=f"task_manual_config_{task_id}")])
+    keyboard.append([InlineKeyboardButton("🛠️ Abrir Panel de Tarea", callback_data=f"p_open_{task_id}")])
     return InlineKeyboardMarkup(keyboard)
 
 def build_processing_menu(task_id: str, file_type: str, task_data: dict) -> InlineKeyboardMarkup:
-    """Construye el menú principal de procesamiento para una tarea."""
     keyboard = []
     task_config = task_data.get('processing_config', {})
     
@@ -33,7 +27,8 @@ def build_processing_menu(task_id: str, file_type: str, task_data: dict) -> Inli
 
     if file_type == 'video':
         mute_text = "🔇 Silenciar" if not task_config.get('mute_audio') else "🔊 Desilenciar"
-        transcode_text = f"📉 Transcodificar ({task_config.get('transcode', {}).get('resolution', 'No')})"
+        transcode_res = task_config.get('transcode', {}).get('resolution', 'No')
+        transcode_text = f"📉 Transcodificar ({transcode_res})"
         keyboard.extend([
             [InlineKeyboardButton(transcode_text, callback_data=f"config_transcode_{task_id}")],
             [InlineKeyboardButton("✂️ Cortar", callback_data=f"config_trim_{task_id}"), InlineKeyboardButton("🧩 Dividir", callback_data=f"config_split_{task_id}")],
@@ -55,13 +50,12 @@ def build_processing_menu(task_id: str, file_type: str, task_data: dict) -> Inli
     keyboard.extend([
         [InlineKeyboardButton("✏️ Renombrar", callback_data=f"config_rename_{task_id}")],
         [InlineKeyboardButton("💾 Guardar como Perfil", callback_data=f"profile_save_request_{task_id}")],
-        [InlineKeyboardButton("🔙 Volver al Panel", callback_data="panel_show_text"), InlineKeyboardButton("🔥 Procesar Ahora", callback_data=f"task_queuesingle_{task_id}")]
+        [InlineKeyboardButton("🗑️ Descartar Tarea", callback_data=f"task_delete_{task_id}"), InlineKeyboardButton("🔥 Procesar Ahora", callback_data=f"task_queuesingle_{task_id}")]
     ])
     
     return InlineKeyboardMarkup(keyboard)
 
 def build_transcode_menu(task_id: str) -> InlineKeyboardMarkup:
-    """Construye el menú para seleccionar la resolución de transcodificación."""
     keyboard = [
         [
             InlineKeyboardButton("1080p", callback_data=f"set_transcode_{task_id}_resolution_1080p"),
@@ -81,7 +75,6 @@ def build_transcode_menu(task_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 def build_tracks_menu(task_id: str, config: dict) -> InlineKeyboardMarkup:
-    """Construye el menú para manipular pistas de audio y subtítulos."""
     remove_subs_text = "✅ Quitar Subtítulos" if config.get('remove_subtitles') else "❌ Quitar Subtítulos"
     keyboard = [
         [InlineKeyboardButton(remove_subs_text, callback_data=f"set_trackopt_{task_id}_remove_subtitles_toggle")],
@@ -93,29 +86,30 @@ def build_tracks_menu(task_id: str, config: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 def build_detailed_format_menu(task_id: str, formats: list) -> InlineKeyboardMarkup:
-    """
-    Construye el teclado para seleccionar el formato de descarga, mostrando todas
-    las calidades de video disponibles.
-    """
     keyboard, row = [], []
     
-    # --- LÓGICA CORREGIDA ---
-    # Filtrar formatos que tengan códec de video y resolución (altura).
-    # Esto incluye streams de "video-only" que yt-dlp puede fusionar.
     video_formats = sorted(
-        [f for f in formats if f.get('vcodec') not in ['none', None] and f.get('height')],
+        [f for f in formats if f.get('vcodec') not in ['none', None] and f.get('height') and f.get('height') >= 144],
         key=lambda x: (x.get('height', 0), x.get('fps', 0) or 0),
         reverse=True
     )
     
+    processed_labels = set()
     for f in video_formats:
         if not (format_id := f.get('format_id')): continue
         
-        height, fps, ext, filesize = f.get('height'), int(f.get('fps', 0)), f.get('ext'), f.get('filesize')
-        fps_str = f"p{fps}" if fps > 0 else "p"
-        label = f"🎬 {height}{fps_str} {ext.upper()}" + (f" ({format_bytes(filesize)})" if filesize else "")
+        height, fps, ext = f.get('height'), f.get('fps'), f.get('ext')
+        filesize = f.get('filesize')
         
-        row.append(InlineKeyboardButton(label, callback_data=f"set_dlformat_{task_id}_{format_id}"))
+        fps_str = f" @ {int(fps)}fps" if fps and int(fps) > 30 else ""
+        label = f"🎬 {height}p{fps_str}"
+        
+        if label in processed_labels: continue
+        processed_labels.add(label)
+        
+        full_label = label + (f" ({format_bytes(filesize)})" if filesize else "")
+        
+        row.append(InlineKeyboardButton(full_label, callback_data=f"set_dlformat_{task_id}_{format_id}"))
         if len(row) == 2:
             keyboard.append(row)
             row = []
@@ -124,10 +118,12 @@ def build_detailed_format_menu(task_id: str, formats: list) -> InlineKeyboardMar
             
     keyboard.extend([
         [InlineKeyboardButton("🎵 MP3 (Mejor Calidad)", callback_data=f"set_dlformat_{task_id}_mp3")],
-        [InlineKeyboardButton("🔊 Solo Audio (Mejor Calidad)", callback_data=f"set_dlformat_{task_id}_bestaudio")],
-        [InlineKeyboardButton("🏆 Mejor Video (Auto)", callback_data=f"set_dlformat_{task_id}_bestvideo"), InlineKeyboardButton("❌ Cancelar", callback_data=f"task_delete_{task_id}")]
+        [InlineKeyboardButton("🔊 Solo Audio (Mejor)", callback_data=f"set_dlformat_{task_id}_bestaudio")],
+        [InlineKeyboardButton("🏆 Mejor Video (Auto)", callback_data=f"set_dlformat_{task_id}_bestvideo")],
+        [InlineKeyboardButton("❌ Cancelar Tarea", callback_data=f"task_delete_{task_id}")]
     ])
     return InlineKeyboardMarkup(keyboard)
+
 
 def build_search_results_keyboard(all_results: list, search_id: str, page: int = 1, page_size: int = 5) -> InlineKeyboardMarkup:
     keyboard = []
@@ -177,23 +173,22 @@ def build_audio_metadata_menu(task_id: str) -> InlineKeyboardMarkup:
 
 def build_watermark_menu(task_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🖼️ Añadir Imagen", callback_data=f"set_watermark_image_{task_id}")],
-        [InlineKeyboardButton("✏️ Añadir Texto", callback_data=f"set_watermark_text_{task_id}")],
-        [InlineKeyboardButton("❌ Quitar Marca de Agua", callback_data=f"set_watermark_remove_{task_id}")],
+        [InlineKeyboardButton("🖼️ Añadir Imagen", callback_data=f"config_watermark_image_{task_id}")],
+        [InlineKeyboardButton("✏️ Añadir Texto", callback_data=f"config_watermark_text_{task_id}")],
+        [InlineKeyboardButton("❌ Quitar Marca de Agua", callback_data=f"set_watermark_{task_id}_remove_remove")],
         [InlineKeyboardButton("🔙 Volver", callback_data=f"p_open_{task_id}")]
     ])
 
 def build_position_menu(task_id: str, origin_menu: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("↖️ Sup. Izq.", callback_data=f"set_watermark_position_{task_id}_top_left")],
-        [InlineKeyboardButton("↗️ Sup. Der.", callback_data=f"set_watermark_position_{task_id}_top_right")],
-        [InlineKeyboardButton("↙️ Inf. Izq.", callback_data=f"set_watermark_position_{task_id}_bottom_left")],
-        [InlineKeyboardButton("↘️ Inf. Der.", callback_data=f"set_watermark_position_{task_id}_bottom_right")],
+        [InlineKeyboardButton("↖️ Sup. Izq.", callback_data=f"set_watermark_{task_id}_position_top-left")],
+        [InlineKeyboardButton("↗️ Sup. Der.", callback_data=f"set_watermark_{task_id}_position_top-right")],
+        [InlineKeyboardButton("↙️ Inf. Izq.", callback_data=f"set_watermark_{task_id}_position_bottom-left")],
+        [InlineKeyboardButton("↘️ Inf. Der.", callback_data=f"set_watermark_{task_id}_position_bottom-right")],
         [InlineKeyboardButton("🔙 Volver", callback_data=f"{origin_menu}_{task_id}")]
     ])
     
 def build_thumbnail_menu(task_id: str, config: dict) -> InlineKeyboardMarkup:
-    """Construye el menú para gestionar la miniatura de un video."""
     extract_text = "✅ Extraer Miniatura" if config.get('extract_thumbnail') else "❌ Extraer Miniatura"
     remove_text = "✅ Quitar Miniatura" if config.get('remove_thumbnail') else "❌ Quitar Miniatura"
     
@@ -206,13 +201,12 @@ def build_thumbnail_menu(task_id: str, config: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 def build_batch_profiles_keyboard(presets: list) -> InlineKeyboardMarkup:
-    """Construye el teclado para seleccionar un perfil para una acción en lote."""
     keyboard = []
     row = []
     for preset in presets:
         preset_id = str(preset['_id'])
         preset_name = preset.get('preset_name', 'Perfil sin nombre').capitalize()
-        row.append(InlineKeyboardButton(f" профиль: {preset_name}", callback_data=f"batch_apply_profile_{preset_id}"))
+        row.append(InlineKeyboardButton(f"⚙️ {preset_name}", callback_data=f"batch_apply_{preset_id}"))
         if len(row) == 2:
             keyboard.append(row)
             row = []
@@ -224,7 +218,6 @@ def build_batch_profiles_keyboard(presets: list) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 def build_join_selection_keyboard(tasks: list, selected_ids: list) -> InlineKeyboardMarkup:
-    """Construye el teclado interactivo para seleccionar videos a unir."""
     keyboard = []
     row = []
     for task in tasks:
@@ -251,7 +244,6 @@ def build_join_selection_keyboard(tasks: list, selected_ids: list) -> InlineKeyb
     return InlineKeyboardMarkup(keyboard)
 
 def build_zip_selection_keyboard(tasks: list, selected_ids: list) -> InlineKeyboardMarkup:
-    """Construye el teclado interactivo para seleccionar tareas a comprimir."""
     keyboard = []
     row = []
     
@@ -281,9 +273,7 @@ def build_zip_selection_keyboard(tasks: list, selected_ids: list) -> InlineKeybo
 
     return InlineKeyboardMarkup(keyboard)
 
-
 def build_confirmation_keyboard(action_callback: str, cancel_callback: str) -> InlineKeyboardMarkup:
-    """Crea un teclado de confirmación genérico (Sí/No)."""
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Sí, proceder", callback_data=action_callback),

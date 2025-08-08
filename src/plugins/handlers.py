@@ -1,13 +1,13 @@
-# src/plugins/handlers.py
-
 import logging
 import re
 from datetime import datetime
 import asyncio
+import os
 
 from pyrogram import Client, filters
-from pyrogram.types import Message, CallbackQuery
+from pyrogram.types import Message, CallbackQuery, InputMediaPhoto
 from pyrogram.enums import ParseMode
+from pyrogram.errors import MessageNotModified
 from bson.objectid import ObjectId
 
 from src.db.mongo_manager import db_instance
@@ -16,31 +16,14 @@ from src.helpers.keyboards import (build_processing_menu, build_search_results_k
                                    build_confirmation_keyboard, build_batch_profiles_keyboard,
                                    build_join_selection_keyboard, build_zip_selection_keyboard)
 from src.helpers.utils import (get_greeting, escape_html, sanitize_filename,
-                               format_time, format_view_count, format_upload_date)
+                               format_time, format_task_details_rich)
 from src.core import downloader
-from . import processing_handler # Importamos el módulo completo
+from src.core.ffmpeg import get_media_info
+from . import processing_handler
 
 logger = logging.getLogger(__name__)
 
 URL_REGEX = r'(https?://[^\s]+)'
-
-def get_config_summary(config: dict) -> str:
-    """Genera un resumen legible de la configuración de una tarea."""
-    parts = []
-    if config.get('transcode'): parts.append(f"📉 {config['transcode'].get('resolution', '...')}")
-    if config.get('trim_times'): parts.append("✂️ Cortado")
-    if config.get('gif_options'): parts.append("🎞️ GIF")
-    if config.get('watermark'): parts.append("💧 Watermark")
-    if config.get('mute_audio'): parts.append("🔇 Muted")
-    if config.get('remove_subtitles'): parts.append("📜 No Subs")
-    if config.get('subs_file_id'): parts.append("📜 New Subs")
-    if config.get('remove_thumbnail'): parts.append("🖼️ No Thumb")
-    if config.get('extract_thumbnail'): parts.append("🖼️ Extract Thumb")
-    if config.get('thumbnail_file_id'): parts.append("🖼️ New Thumb")
-    if config.get('extract_audio'): parts.append(f"🎵 Audio extraído")
-    if config.get('replace_audio_file_id'): parts.append(f"🎼 Audio reemplazado")
-    if not parts: return "<i>(Default)</i>"
-    return ", ".join(parts)
 
 @Client.on_message(filters.command("start") & filters.private)
 async def start_command(client: Client, message: Message):
@@ -48,17 +31,17 @@ async def start_command(client: Client, message: Message):
     greeting_prefix = get_greeting(user.id)
     await db_instance.get_user_settings(user.id)
     start_message = (
-        f"A sus órdenes, {greeting_prefix}, bienvenido a la <b>Suite de Medios v2.6</b>.\n\n"
-        "He corregido y mejorado los flujos de trabajo.\n\n"
+        f"A sus órdenes, {greeting_prefix}, bienvenido a la <b>Suite de Medios v12.1</b>.\n\n"
+        "Esta versión se enfoca en la <b>estabilidad y corrección de errores</b>.\n\n"
         "<b>Comandos Principales:</b>\n"
-        "• /panel - Muestra su mesa de trabajo.\n"
+        "• /panel - Muestra su mesa de trabajo con detalles.\n"
         "• /p <code>[ID]</code> - Abre el menú de una tarea.\n"
         "• /p clean <code>[ID]</code> - Elimina una tarea específica.\n"
         "• /join - Une videos del panel.\n"
         "• /zip - Comprime tareas del panel en un ZIP.\n"
         "• /p_all - Procesa todas las tareas del panel a la vez.\n"
         "• /profiles - Gestiona sus perfiles.\n\n"
-        "Envíe un archivo, una búsqueda o un enlace para comenzar."
+        "Envíe un archivo, un enlace de YouTube, o un texto para buscar música."
     )
     await message.reply(start_message, parse_mode=ParseMode.HTML)
 
@@ -72,25 +55,15 @@ async def panel_command(client: Client, message: Message):
         text = f"✅ ¡{greeting_prefix}, su mesa de trabajo está vacía!"
         return await message.reply(text, parse_mode=ParseMode.HTML)
     
-    response_lines = [f"📋 <b>{greeting_prefix}, su mesa de trabajo actual:</b>\n"]
+    response_lines = [f"📋 <b>{greeting_prefix}, su mesa de trabajo actual:</b>"]
     for i, task in enumerate(pending_tasks):
-        idx = i + 1
-        file_type = task.get('file_type', 'document')
-        emoji_map = {'video': '🎬', 'audio': '🎵', 'document': '📄'}
-        emoji = emoji_map.get(file_type, '📁')
-        display_name = task.get('original_filename') or task.get('url', 'Tarea de URL')
-        short_name = (display_name[:50] + '...') if len(display_name) > 53 else display_name
-        config_summary = get_config_summary(task.get('processing_config', {}))
-        
-        response_lines.append(f"<b>{idx}.</b> {emoji} <code>{escape_html(short_name)}</code>")
-        response_lines.append(f"   └ ⚙️ {config_summary}\n")
+        response_lines.append(format_task_details_rich(task, i + 1))
 
-    response_lines.append(f"Use /p <code>[ID]</code> para configurar una tarea (ej: <code>/p 1</code>).")
-    response_lines.append(f"Use /join para unir videos del panel.")
-    response_lines.append(f"Use /zip para comprimir tareas.")
+    response_lines.append(f"\nUse /p <code>[ID]</code> para configurar una tarea (ej: <code>/p 1</code>).")
+    response_lines.append(f"Use /join para unir videos o /zip para comprimir.")
     response_lines.append(f"Use /p_all para procesar todo el panel.")
     response_lines.append(f"Use /p clean para limpiar todas las tareas.")
-    await message.reply("\n".join(response_lines), parse_mode=ParseMode.HTML)
+    await message.reply("\n".join(response_lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 @Client.on_message(filters.command("p") & filters.private)
 async def process_command(client: Client, message: Message):
@@ -125,105 +98,16 @@ async def process_command(client: Client, message: Message):
 
     if 0 <= task_index < len(pending_tasks):
         task = pending_tasks[task_index]
-        task_id = str(task['_id'])
-        filename = task.get('original_filename', '...')
-        keyboard = build_processing_menu(task_id, task['file_type'], task)
-        await message.reply(f"🛠️ Configurando Tarea <b>#{task_index+1}</b>:\n<code>{escape_html(filename)}</code>", reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        await processing_handler.open_task_menu_from_p(client, message, str(task['_id']))
     else:
         await message.reply(f"❌ ID inválido. Tiene {len(pending_tasks)} tareas en su panel. Use un número entre 1 y {len(pending_tasks)}.")
 
-@Client.on_message(filters.command("p_all") & filters.private)
-async def process_all_command(client: Client, message: Message):
-    user = message.from_user
-    pending_tasks_count = await db_instance.tasks.count_documents({"user_id": user.id, "status": "pending_processing"})
-
-    if pending_tasks_count == 0:
-        return await message.reply("✅ Su panel ya está vacío. No hay nada que procesar.")
-
-    user_presets = await db_instance.get_user_presets(user.id)
-    keyboard = build_batch_profiles_keyboard(user_presets)
-    await message.reply(
-        f" va a procesar <b>{pending_tasks_count}</b> tareas.\n\n"
-        "Seleccione un perfil para aplicar a todas las tareas o use la configuración por defecto.",
-        reply_markup=keyboard,
-        parse_mode=ParseMode.HTML
-    )
-
-@Client.on_message(filters.command("join") & filters.private)
-async def join_videos_command(client: Client, message: Message):
-    user = message.from_user
-    video_tasks = await db_instance.tasks.find({
-        "user_id": user.id, "status": "pending_processing", "file_type": "video"
-    }).to_list(length=100)
-
-    if len(video_tasks) < 2:
-        return await message.reply("Necesita al menos 2 videos en su panel para unirlos.")
-
-    if not hasattr(client, 'user_data'): client.user_data = {}
-    client.user_data[user.id] = { "join_mode": { "available_tasks": video_tasks, "selected_ids": [] } }
-
-    keyboard = build_join_selection_keyboard(video_tasks, [])
-    await message.reply(
-        "🎬 <b>Modo de Unión de Videos</b>\n\nSeleccione los videos que desea unir en el orden deseado.",
-        reply_markup=keyboard, parse_mode=ParseMode.HTML
-    )
-
-@Client.on_message(filters.command("zip") & filters.private)
-async def zip_files_command(client: Client, message: Message):
-    user = message.from_user
-    all_tasks = await db_instance.get_pending_tasks(user.id)
-
-    if not all_tasks:
-        return await message.reply("No hay tareas en su panel para comprimir.")
-
-    if not hasattr(client, 'user_data'): client.user_data = {}
-    client.user_data[user.id] = { "zip_mode": { "available_tasks": all_tasks, "selected_ids": [] } }
-
-    keyboard = build_zip_selection_keyboard(all_tasks, [])
-    await message.reply(
-        "📦 <b>Modo de Compresión ZIP</b>\n\nSeleccione las tareas que desea añadir al archivo ZIP.",
-        reply_markup=keyboard, parse_mode=ParseMode.HTML
-    )
-
-
-@Client.on_message(filters.command(["profiles", "pr"]) & filters.private)
-async def profiles_command(client: Client, message: Message):
-    user = message.from_user
-    presets = await db_instance.get_user_presets(user.id)
-    
-    if not presets:
-        text = "No tiene perfiles guardados. Para crear uno:\n1. Configure una tarea con `/p [ID]`.\n2. Pulse 'Guardar como Perfil'."
-        return await message.reply(text)
-
-    response_lines = ["💾 <b>Sus Perfiles Guardados:</b>\n"]
-    for preset in presets:
-        preset_name = preset.get('preset_name', 'N/A').capitalize()
-        config_summary = get_config_summary(preset.get('config_data', {}))
-        response_lines.append(f"• <b>{preset_name}</b>: {config_summary}")
-    
-    response_lines.append("\nUse `/pr_delete [Nombre]` para eliminar un perfil.")
-    await message.reply("\n".join(response_lines), parse_mode=ParseMode.HTML)
-
-@Client.on_message(filters.command("pr_delete") & filters.private)
-async def pr_delete_command(client: Client, message: Message):
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        return await message.reply("Uso: `/pr_delete [Nombre del Perfil]`")
-    
-    preset_name = parts[1].lower()
-    await message.reply(
-        f"¿Seguro que desea eliminar el perfil '<b>{escape_html(preset_name.capitalize())}</b>'?",
-        reply_markup=build_confirmation_keyboard(f"profile_delete_confirm_{preset_name}", "profile_delete_cancel"),
-        parse_mode=ParseMode.HTML
-    )
-
-# --- ARQUITECTURA CORREGIDA: GATEKEEPER PARA MEDIA ---
 @Client.on_message(filters.media & filters.private, group=1)
 async def any_file_handler(client: Client, message: Message):
     user = message.from_user
-    # Este manejador solo debe actuar si el usuario NO está en un modo de configuración activa.
-    # Si lo está, detenemos la propagación para permitir que el manejador de `processing_handler` actúe.
-    if hasattr(client, 'user_data') and user.id in client.user_data and client.user_data[user.id].get("active_config"):
+    
+    if hasattr(client, 'user_data') and client.user_data.get(user.id, {}).get("active_config"):
+        logger.info(f"Media Gatekeeper: Petición de media detectada para el usuario {user.id} en modo config. Cediendo el control.")
         message.stop_propagation()
         return
 
@@ -234,7 +118,7 @@ async def any_file_handler(client: Client, message: Message):
     
     if not original_media_object: return
 
-    final_file_name = sanitize_filename(getattr(original_media_object, 'file_name', "Archivo Sin Nombre"))
+    final_file_name = sanitize_filename(getattr(original_media_object, 'file_name', f"Archivo_{file_type}_{int(datetime.utcnow().timestamp())}"))
     
     task_id = await db_instance.add_task(
         user_id=user.id, file_type=file_type, file_name=final_file_name,
@@ -242,50 +126,81 @@ async def any_file_handler(client: Client, message: Message):
     )
 
     if task_id:
+        status_msg = await message.reply("🔧 Analizando metadatos del archivo...")
+        temp_path = None
+        try:
+            temp_path = await message.download(in_memory=True)
+            media_info = get_media_info(temp_path.name)
+            if media_info:
+                stream = next((s for s in media_info.get('streams', []) if s.get('codec_type') == 'video'),
+                              next((s for s in media_info.get('streams', []) if s.get('codec_type') == 'audio'), {}))
+                duration = float(stream.get('duration', 0)) or float(media_info.get('format', {}).get('duration', 0))
+                resolution = f"{stream.get('width')}x{stream.get('height')}" if stream.get('width') else None
+                await db_instance.tasks.update_one(
+                    {"_id": task_id},
+                    {"$set": {
+                        "file_metadata.duration": duration,
+                        "file_metadata.resolution": resolution
+                    }}
+                )
+        except Exception as e:
+            logger.warning(f"No se pudieron extraer metadatos para la nueva tarea {task_id}: {e}")
+        finally:
+            if temp_path and os.path.exists(temp_path.name):
+                os.remove(temp_path.name)
+        
         user_presets = await db_instance.get_user_presets(user.id)
         if user_presets:
             keyboard = build_profiles_keyboard(str(task_id), user_presets)
-            await message.reply("✅ Archivo recibido y añadido al panel. ¿Desea aplicar un perfil?", reply_markup=keyboard)
+            await status_msg.edit("✅ Archivo recibido y añadido al panel. ¿Desea aplicar un perfil?", reply_markup=keyboard)
         else:
             count = await db_instance.tasks.count_documents({'user_id': user.id, 'status': 'pending_processing'})
-            await message.reply(f"✅ Archivo recibido y añadido al panel.\nUse `/p {count}` para configurarlo.")
+            await status_msg.edit(f"✅ Archivo recibido y añadido al panel como tarea <b>#{count}</b>.\nUse `/p {count}` para configurarlo.", parse_mode=ParseMode.HTML)
     else:
-        await message.reply(f"❌ Hubo un error al registrar la tarea en la base de datos.")
+        await message.reply("❌ Hubo un error al registrar la tarea en la base de datos.")
 
 async def handle_url_input(client: Client, message: Message, url: str):
     user = message.from_user
-    status_message = await message.reply(f"🔎 Analizando enlace...", parse_mode=ParseMode.HTML)
+    await db_instance.set_user_state(user.id, "busy")
+    status_message = await message.reply("🔎 Analizando enlace de YouTube...", parse_mode=ParseMode.HTML)
     
     try:
         info = await asyncio.to_thread(downloader.get_url_info, url)
         if not info or not info.get('formats'):
-            return await status_message.edit_text("❌ No pude obtener información de ese enlace.")
+            await db_instance.set_user_state(user.id, "idle")
+            return await status_message.edit_text("❌ No pude obtener información de ese enlace. Puede que sea privado o esté restringido.")
 
-        task_id = await db_instance.add_task(
-            user_id=user.id, file_type='video' if info['is_video'] else 'audio',
-            url=info['url'], file_name=sanitize_filename(info['title']), url_info=info
-        )
-        if not task_id: return await status_message.edit_text("❌ Error al crear la tarea en la DB.")
+        await db_instance.set_user_state(user.id, "awaiting_quality_selection", {"url_info": info})
         
-        caption_parts = [ f"<b>📝 Nombre:</b> {escape_html(info['title'])}", f"<b>🕓 Duración:</b> {format_time(info.get('duration'))}", f"<b>📢 Canal:</b> {escape_html(info.get('uploader'))}" ]
-        caption_parts.append("\nElija la calidad para la descarga:")
+        caption_parts = [
+            f"<b>📝 Nombre:</b> {escape_html(info['title'])}",
+            f"<b>🕓 Duración:</b> {format_time(info.get('duration'))}",
+            f"<b>📢 Canal:</b> {escape_html(info.get('uploader'))}",
+            "\nElija la calidad para la descarga:"
+        ]
         caption = "\n".join(caption_parts)
         
-        keyboard = build_detailed_format_menu(str(task_id), info['formats'])
+        temp_task_id_for_menu = "url_selection"
+        keyboard = build_detailed_format_menu(temp_task_id_for_menu, info['formats'])
         
-        await status_message.delete()
-        
-        if info.get('thumbnail'):
-            await client.send_photo(chat_id=user.id, photo=info['thumbnail'], caption=caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
-        else:
-            await client.send_message(chat_id=user.id, text=caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        try:
+            if info.get('thumbnail'):
+                await status_message.delete()
+                await client.send_photo(chat_id=user.id, photo=info['thumbnail'], caption=caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+            else:
+                await status_message.edit_text(caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            logger.error(f"Error enviando menú de calidad: {e}. Enviando como texto.")
+            await status_message.edit_text(caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
     except Exception as e:
+        await db_instance.set_user_state(user.id, "idle")
         logger.error(f"Error procesando URL {url}: {e}")
         await status_message.edit_text(f"❌ Ocurrió un error al procesar el enlace: <code>{escape_html(str(e))}</code>")
 
 async def handle_music_search(client: Client, message: Message, query: str):
     user = message.from_user
-    status_message = await message.reply(f"🔎 Buscando <code>{escape_html(query)}</code>...", parse_mode=ParseMode.HTML)
+    status_message = await message.reply(f"🔎 Buscando música: <code>{escape_html(query)}</code>...", parse_mode=ParseMode.HTML)
     
     search_results = await asyncio.to_thread(downloader.search_music, query, limit=20)
     
@@ -302,19 +217,39 @@ async def handle_music_search(client: Client, message: Message, query: str):
     
     await status_message.edit_text("✅ He encontrado esto. Seleccione una para descargar:", reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
-@Client.on_message(filters.text & filters.private)
+@Client.on_message(filters.text & filters.private, group=2)
 async def text_gatekeeper_handler(client: Client, message: Message):
     user = message.from_user
     text = message.text.strip()
     
-    if text.startswith('/'):
-        return
+    if text.startswith('/'): return
 
-    if hasattr(client, 'user_data') and user.id in client.user_data and client.user_data[user.id].get("active_config"):
+    if hasattr(client, 'user_data') and client.user_data.get(user.id, {}).get("active_config"):
         return await processing_handler.handle_text_input(client, message)
+
+    user_state = await db_instance.get_user_state(user.id)
+    if user_state.get("status") != "idle":
+        await message.reply("Estoy esperando que complete una acción anterior. Por favor, use los botones del menú o cancele la operación.")
+        return
 
     url_match = re.search(URL_REGEX, text)
     if url_match:
         return await handle_url_input(client, message, url_match.group(0))
 
     await handle_music_search(client, message, text)
+
+@Client.on_callback_query(filters.regex(r"^(join_|zip_|batch_|song_|search_|cancel_search_)"))
+async def combined_utility_callbacks(client: Client, query: CallbackQuery):
+    data = query.data
+    if data.startswith("join_"):
+        await processing_handler.handle_join_actions(client, query)
+    elif data.startswith("zip_"):
+        await processing_handler.handle_zip_actions(client, query)
+    elif data.startswith("batch_"):
+        await processing_handler.handle_batch_actions(client, query)
+    elif data.startswith("song_select_"):
+        await processing_handler.select_song_from_search(client, query)
+    elif data.startswith("search_page_"):
+        await processing_handler.handle_search_pagination(client, query)
+    elif data.startswith("cancel_search_"):
+        await processing_handler.cancel_search_session(client, query)

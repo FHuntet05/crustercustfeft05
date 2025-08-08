@@ -1,5 +1,3 @@
-# src/helpers/utils.py
-
 import os
 import time
 import asyncio
@@ -16,11 +14,9 @@ except (TypeError, ValueError):
     ADMIN_USER_ID = None 
 
 def get_greeting(user_id: int) -> str:
-    """Devuelve un saludo personalizado si el usuario es el administrador."""
     return "Jefe" if user_id == ADMIN_USER_ID else "Usuario"
 
 def format_bytes(size_in_bytes) -> str:
-    """Formatea un tamaño en bytes a un formato legible (KB, MB, GB)."""
     if size_in_bytes is None or not isinstance(size_in_bytes, (int, float)): return "N/A"
     try:
         size = float(size_in_bytes)
@@ -34,7 +30,7 @@ def format_bytes(size_in_bytes) -> str:
             n += 1
         return f"{size:.2f} {power_labels[n]}"
     except (ValueError, TypeError):
-        return "Tamaño inválido"
+        return "N/A"
 
 def format_view_count(count) -> str:
     if count is None: return "N/A"
@@ -54,7 +50,7 @@ def escape_html(text: str) -> str:
     if not isinstance(text, str): return ""
     return escape(text, quote=False)
 
-def _create_text_bar(percentage: float, length: int = 20, fill_char: str = '▓', empty_char: str = '░') -> str:
+def _create_text_bar(percentage: float, length: int = 12, fill_char: str = '■', empty_char: str = '□') -> str:
     if not 0 <= percentage <= 100: percentage = max(0, min(100, percentage))
     filled_len = int(length * percentage / 100)
     return fill_char * filled_len + empty_char * (length - filled_len)
@@ -62,7 +58,14 @@ def _create_text_bar(percentage: float, length: int = 20, fill_char: str = '▓'
 def format_time(seconds: float) -> str:
     if seconds is None or not isinstance(seconds, (int, float)) or seconds < 0 or seconds == float('inf'):
         return "∞"
-    return str(timedelta(seconds=int(seconds)))
+    td = timedelta(seconds=int(seconds))
+    hours, remainder = divmod(td.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if td.days > 0:
+        return f"{td.days}d {hours:02}:{minutes:02}:{seconds:02}"
+    if hours > 0:
+        return f"{hours:02}:{minutes:02}:{seconds:02}"
+    return f"{minutes:02}:{seconds:02}"
 
 def sanitize_filename(filename: str) -> str:
     if not isinstance(filename, str): return "archivo_invalido"
@@ -70,85 +73,34 @@ def sanitize_filename(filename: str) -> str:
     sanitized = "".join(c if c not in invalid_chars else '_' for c in filename)
     return " ".join(sanitized.split())[:200]
 
-async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
-    """
-    Función asíncrona simplificada. Su única responsabilidad es editar el mensaje.
-    El throttling ya ha sido manejado por el llamador.
-    """
-    ctx = progress_tracker.get(user_id)
-    if not ctx: return
-    
-    # Prevenir la edición si el texto es idéntico al último enviado.
-    if text == ctx.last_update_text:
-        return
-    ctx.last_update_text = text
-    
-    try:
-        await ctx.bot.edit_message_text(
-            chat_id=ctx.message.chat.id,
-            message_id=ctx.message.id,
-            text=text,
-            parse_mode=ParseMode.HTML
-        )
-    except Exception as e:
-        logger.warning(f"No se pudo editar el mensaje de estado {ctx.message.id} para el usuario {user_id}: {e}")
-
-def _progress_hook_yt_dlp(d, progress_tracker: dict):
-    user_id = d.get('user_id')
-    if not user_id or user_id not in progress_tracker: return
-    ctx = progress_tracker[user_id]
-    
-    # La lógica de throttling se mueve aquí también para consistencia.
-    current_time = time.time()
-    if current_time - ctx.last_update_time < 1.5:
-        return
-    ctx.last_update_time = current_time
-
-    try:
-        if d['status'] == 'downloading':
-            total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-            if total_bytes > 0:
-                downloaded_bytes = d.get('downloaded_bytes', 0)
-                speed, eta, percentage = d.get('speed', 0), d.get('eta', 0), (downloaded_bytes / total_bytes) * 100
-                user_mention = ctx.message.from_user.mention if hasattr(ctx.message, 'from_user') and ctx.message.from_user else "Usuario"
-                text = format_status_message(operation="📥 Descargando...", filename=ctx.task.get('original_filename', 'archivo'), percentage=percentage, 
-                                           processed_bytes=downloaded_bytes, total_bytes=total_bytes, speed=speed, eta=eta, 
-                                           engine="yt-dlp", user_id=user_id, user_mention=user_mention)
-                
-                coro = _edit_status_message(user_id, text, progress_tracker)
-                asyncio.run_coroutine_threadsafe(coro, ctx.loop)
-
-    except Exception as e:
-        logger.warning(f"Error menor en el hook de progreso de yt-dlp (ignorado): {e}")
-
 def format_status_message(
     operation: str, filename: str, percentage: float, 
     processed_bytes: float, total_bytes: float, speed: float, 
     eta: float, engine: str, user_id: int, user_mention: str,
     is_processing: bool = False, file_size: int = None
 ) -> str:
-    bar = _create_text_bar(percentage, 20)
+    bar = _create_text_bar(percentage, 12)
     short_filename = (filename[:35] + '…') if len(filename) > 38 else filename
     greeting = get_greeting(user_id)
     
     op_text = operation.replace('...', '').strip()
-    header = f"╭─( <b>{greeting}</b> {op_text} )─"
+    header = f"╭─( <b>{greeting}</b> | {op_text} )─"
 
     lines = [
         header,
         f"┣❯ <b>Archivo:</b> <code>{escape_html(short_filename)}</code>",
+        f"┣❯ <b>Progreso:</b> [{bar}] {percentage:.1f}%",
     ]
     
     if is_processing:
         if file_size:
-            lines.append(f"┣❯ <b>Tamaño:</b> {format_bytes(file_size)}")
+            lines.append(f"┣❯ <b>Tamaño Total:</b> {format_bytes(file_size)}")
         
         processed_time_str = format_time(processed_bytes)
         total_time_str = format_time(total_bytes)
         speed_text = f"{speed:.2f}x" if speed > 0 else "N/A"
 
         lines.extend([
-            f"┣❯ <b>Progreso:</b> [{bar}] {percentage:.1f}%",
             f"┣❯ <b>Tiempo:</b> {processed_time_str} / {total_time_str}",
             f"┣❯ <b>Velocidad:</b> {speed_text}",
         ])
@@ -158,18 +110,55 @@ def format_status_message(
         speed_text = f"{format_bytes(speed)}/s" if speed > 0 else "N/A"
 
         lines.extend([
-            f"┣❯ <b>Progreso:</b> [{bar}] {percentage:.1f}%",
-            f"┣❯ <b>Tamaño:</b> {processed_text} de {total_text}",
+            f"┣❯ <b>Transferido:</b> {processed_text} de {total_text}",
             f"┣❯ <b>Velocidad:</b> {speed_text}",
         ])
-
+    
+    elapsed_time = time.time() - getattr(time, 'start_time_for_task', time.time())
+    
     lines.extend([
         f"┣❯ <b>ETA:</b> {format_time(eta)}",
-        f"╰───────────> motor: {engine}"
+        f"┣❯ <b>Transcurrido:</b> {format_time(elapsed_time)}",
+        f"╰─> <b>Motor:</b> {engine}"
     ])
     
     return "\n".join(lines)
 
+
+def format_task_details_rich(task: dict, index: int) -> str:
+    file_type = task.get('file_type', 'document')
+    emoji_map = {'video': '🎬', 'audio': '🎵', 'document': '📄', 'join_operation': '🔗', 'zip_operation': '📦'}
+    emoji = emoji_map.get(file_type, '📁')
+    
+    display_name = task.get('original_filename') or task.get('url', 'Tarea de URL')
+    short_name = (display_name[:50] + '...') if len(display_name) > 53 else display_name
+    
+    config = task.get('processing_config', {})
+    config_parts = []
+    if config.get('transcode'): config_parts.append(f"📉 {config['transcode'].get('resolution', '...')}")
+    if config.get('trim_times'): config_parts.append("✂️ Cortado")
+    if config.get('gif_options'): config_parts.append("🎞️ GIF")
+    if config.get('watermark'): config_parts.append("💧 Marca")
+    if config.get('mute_audio'): config_parts.append("🔇 Mudo")
+    if config.get('extract_audio'): config_parts.append(f"🎵 Audio")
+    
+    config_summary = ", ".join(config_parts) if config_parts else "<i>(Default)</i>"
+
+    metadata = task.get('file_metadata', {})
+    meta_parts = []
+    if size := metadata.get('size'): meta_parts.append(f"📦 {format_bytes(size)}")
+    if duration := metadata.get('duration'): meta_parts.append(f"⏱️ {format_time(duration)}")
+    if resolution := metadata.get('resolution'): meta_parts.append(f"🖥️ {resolution}")
+    meta_summary = " | ".join(meta_parts)
+
+    lines = [
+        f"<b>{index}.</b> {emoji} <code>{escape_html(short_name)}</code>",
+        f"   └ ⚙️ {config_summary}"
+    ]
+    if meta_summary:
+        lines.append(f"   └ 📊 {meta_summary}")
+    
+    return "\n".join(lines)
 
 def generate_summary_caption(task: dict, initial_size: int, final_size: int, final_filename: str) -> str:
     config = task.get('processing_config', {})
