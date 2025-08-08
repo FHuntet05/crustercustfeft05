@@ -83,8 +83,6 @@ async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
             await ctx.bot.edit_message_text(chat_id=ctx.message.chat.id, message_id=ctx.message.id, text=text, parse_mode=ParseMode.HTML)
             ctx.last_edit_time = current_time
         except Exception as e:
-            # --- LÓGICA CORREGIDA ---
-            # Registrar el error en lugar de ignorarlo silenciosamente.
             logger.warning(f"No se pudo editar el mensaje de estado {ctx.message.id} para el usuario {user_id}: {e}")
 
 def _progress_hook_yt_dlp(d, progress_tracker: dict):
@@ -109,40 +107,59 @@ def _progress_hook_yt_dlp(d, progress_tracker: dict):
 def format_status_message(
     operation: str, filename: str, percentage: float, 
     processed_bytes: float, total_bytes: float, speed: float, 
-    eta: float, engine: str, user_id: int, user_mention: str
+    eta: float, engine: str, user_id: int, user_mention: str,
+    is_processing: bool = False, file_size: int = None
 ) -> str:
     """
     Construye el mensaje de estado con el formato visual solicitado.
+    Ahora es inequívoco sobre el tiempo vs. el tamaño.
     """
     bar = _create_text_bar(percentage, 20)
     short_filename = (filename[:35] + '…') if len(filename) > 38 else filename
     greeting = get_greeting(user_id)
     
     op_text = operation.replace('...', '').strip()
-    header = f"╭─( <b>{greeting}</b> ⚙️ {op_text} )─"
-
-    is_processing = "Procesando" in operation
-    
-    if is_processing:
-        processed_text = format_time(processed_bytes)
-        total_text = format_time(total_bytes)
-        speed_text = f"{speed:.2f}x" if speed > 0 else "N/A"
-    else: # Descargando o Subiendo
-        processed_text = format_bytes(processed_bytes)
-        total_text = format_bytes(total_bytes)
-        speed_text = f"{format_bytes(speed)}/s" if speed > 0 else "N/A"
+    header = f"╭─( <b>{greeting}</b> {op_text} )─"
 
     lines = [
         header,
         f"┣❯ <b>Archivo:</b> <code>{escape_html(short_filename)}</code>",
-        f"┣❯ <b>Progreso:</b> [{bar}] {percentage:.1f}%",
-        f"┣❯ <b>Tamaño:</b> {processed_text} de {total_text}",
-        f"┣❯ <b>Velocidad:</b> {speed_text}",
-        f"┣❯ <b>ETA:</b> {format_time(eta)}",
-        f"╰───────────> motor: {engine}"
     ]
     
+    # --- LÓGICA DE VISUALIZACIÓN CORREGIDA ---
+    if is_processing:
+        # Durante el procesamiento, mostrar el tamaño del archivo y el progreso en tiempo.
+        if file_size:
+            lines.append(f"┣❯ <b>Tamaño:</b> {format_bytes(file_size)}")
+        
+        processed_time_str = format_time(processed_bytes)
+        total_time_str = format_time(total_bytes)
+        speed_text = f"{speed:.2f}x" if speed > 0 else "N/A"
+
+        lines.extend([
+            f"┣❯ <b>Progreso:</b> [{bar}] {percentage:.1f}%",
+            f"┣❯ <b>Tiempo:</b> {processed_time_str} / {total_time_str}",
+            f"┣❯ <b>Velocidad:</b> {speed_text}",
+        ])
+    else:
+        # Durante descarga/subida, mostrar el progreso en bytes.
+        processed_text = format_bytes(processed_bytes)
+        total_text = format_bytes(total_bytes)
+        speed_text = f"{format_bytes(speed)}/s" if speed > 0 else "N/A"
+
+        lines.extend([
+            f"┣❯ <b>Progreso:</b> [{bar}] {percentage:.1f}%",
+            f"┣❯ <b>Tamaño:</b> {processed_text} de {total_text}",
+            f"┣❯ <b>Velocidad:</b> {speed_text}",
+        ])
+
+    lines.extend([
+        f"┣❯ <b>ETA:</b> {format_time(eta)}",
+        f"╰───────────> motor: {engine}"
+    ])
+    
     return "\n".join(lines)
+
 
 def generate_summary_caption(task: dict, initial_size: int, final_size: int, final_filename: str) -> str:
     """Genera un resumen detallado de las operaciones realizadas en una tarea."""
