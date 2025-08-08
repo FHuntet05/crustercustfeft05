@@ -50,7 +50,7 @@ def escape_html(text: str) -> str:
     if not isinstance(text, str): return ""
     return escape(text, quote=False)
 
-def _create_text_bar(percentage: float, length: int = 12, fill_char: str = '■', empty_char: str = '□') -> str:
+def _create_text_bar(percentage: float, length: int = 10, fill_char: str = '█', empty_char: str = '░') -> str:
     if not 0 <= percentage <= 100: percentage = max(0, min(100, percentage))
     filled_len = int(length * percentage / 100)
     return fill_char * filled_len + empty_char * (length - filled_len)
@@ -74,54 +74,54 @@ def sanitize_filename(filename: str) -> str:
     return " ".join(sanitized.split())[:200]
 
 def format_status_message(
-    operation: str, filename: str, percentage: float, 
-    processed_bytes: float, total_bytes: float, speed: float, 
-    eta: float, engine: str, user_id: int, user_mention: str,
-    is_processing: bool = False, file_size: int = None
+    operation: str,
+    filename: str,
+    percentage: float,
+    processed_bytes: float,
+    total_bytes: float,
+    speed: float,
+    eta: float,
+    is_processing: bool = False
 ) -> str:
-    bar = _create_text_bar(percentage, 12)
-    short_filename = (filename[:35] + '…') if len(filename) > 38 else filename
-    greeting = get_greeting(user_id)
+    """
+    Formatea el mensaje de estado con un diseño mejorado y una lógica corregida.
+    Esta función es ahora "pura": solo formatea datos, no realiza cálculos.
+    """
+    bar = _create_text_bar(percentage)
+    short_filename = (filename[:40] + '…') if len(filename) > 43 else filename
     
-    op_text = operation.replace('...', '').strip()
-    header = f"╭─( <b>{greeting}</b> | {op_text} )─"
+    op_map = {
+        "📥 Descargando": ("📥 <b>Descargando...</b>", "yt-dlp"),
+        "⚙️ Procesando": ("⚙️ <b>Procesando...</b>", "FFmpeg"),
+        "⬆️ Subiendo": ("⬆️ <b>Subiendo a Telegram...</b>", "Pyrogram")
+    }
+    # Obtener el título de la operación, si no, usar el texto original
+    op_title = op_map.get(operation.strip().replace("...", ""), (operation, "N/A"))[0]
 
     lines = [
-        header,
-        f"┣❯ <b>Archivo:</b> <code>{escape_html(short_filename)}</code>",
-        f"┣❯ <b>Progreso:</b> [{bar}] {percentage:.1f}%",
+        op_title,
+        f"<code>{escape_html(short_filename)}</code>\n",
+        f"<b>{bar}</b>  {percentage:.1f}%",
     ]
-    
+
     if is_processing:
-        if file_size:
-            lines.append(f"┣❯ <b>Tamaño Total:</b> {format_bytes(file_size)}")
-        
-        processed_time_str = format_time(processed_bytes)
-        total_time_str = format_time(total_bytes)
-        speed_text = f"{speed:.2f}x" if speed > 0 else "N/A"
-
-        lines.extend([
-            f"┣❯ <b>Tiempo:</b> {processed_time_str} / {total_time_str}",
-            f"┣❯ <b>Velocidad:</b> {speed_text}",
-        ])
+        # Lógica para FFmpeg (basado en tiempo)
+        processed_str = format_time(processed_bytes)
+        total_str = format_time(total_bytes)
+        speed_str = f"{speed:.2f}x" if speed > 0 else "N/A"
+        lines.append(f"↳ {processed_str} de {total_str}")
     else:
-        processed_text = format_bytes(processed_bytes)
-        total_text = format_bytes(total_bytes)
-        speed_text = f"{format_bytes(speed)}/s" if speed > 0 else "N/A"
+        # Lógica para transferencias (basado en bytes)
+        processed_str = format_bytes(processed_bytes)
+        total_str = format_bytes(total_bytes)
+        speed_str = f"{format_bytes(speed)}/s" if speed > 0 else "N/A"
+        lines.append(f"↳ {processed_str} de {total_str}")
 
-        lines.extend([
-            f"┣❯ <b>Transferido:</b> {processed_text} de {total_text}",
-            f"┣❯ <b>Velocidad:</b> {speed_text}",
-        ])
-    
-    elapsed_time = time.time() - getattr(time, 'start_time_for_task', time.time())
-    
     lines.extend([
-        f"┣❯ <b>ETA:</b> {format_time(eta)}",
-        f"┣❯ <b>Transcurrido:</b> {format_time(elapsed_time)}",
-        f"╰─> <b>Motor:</b> {engine}"
+        f"\n⚡️ <b>Velocidad:</b> {speed_str}",
+        f"⏳ <b>ETA:</b> {format_time(eta)}"
     ])
-    
+
     return "\n".join(lines)
 
 

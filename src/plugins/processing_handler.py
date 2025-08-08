@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import re
+import os
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery
 from pyrogram.enums import ParseMode
@@ -14,10 +15,12 @@ from src.helpers.keyboards import (build_back_button, build_processing_menu,
                                    build_watermark_menu, build_position_menu,
                                    build_audio_metadata_menu, build_tracks_menu,
                                    build_transcode_menu, build_thumbnail_menu,
-                                   build_confirmation_keyboard, build_search_results_keyboard)
+                                   build_confirmation_keyboard, build_search_results_keyboard,
+                                   build_detailed_format_menu) # Añadido build_detailed_format_menu
 from src.helpers.utils import get_greeting, escape_html, sanitize_filename, format_time
 
 logger = logging.getLogger(__name__)
+TEMP_DIR = os.path.join(os.getcwd(), "temp_lyrics")
 
 async def open_task_menu_from_p(client: Client, message: Message, task_id: str):
     task = await db_instance.get_task(task_id)
@@ -451,20 +454,63 @@ async def handle_batch_actions(client: Client, query: CallbackQuery):
 async def select_song_from_search(client: Client, query: CallbackQuery):
     await query.answer()
     user, res_id = query.from_user, query.data.split("_")[2]
-    await query.message.delete()
-    status_message = await client.send_message(user.id, "🔎 Obteniendo información de la canción...")
+    
+    status_message = await query.message.edit_text("🎤 <i>Canción seleccionada...</i>", parse_mode=ParseMode.HTML)
+    
     try:
         search_result = await db_instance.search_results.find_one({"_id": ObjectId(res_id)})
-        if not search_result: return await status_message.edit_text("❌ Error: Resultado de búsqueda ha expirado.")
-        url = search_result.get('url') or f"ytsearch:{search_result.get('search_term')}"
-        info = await asyncio.to_thread(downloader.get_url_info, url)
-        if not info or not info.get('formats'): return await status_message.edit_text("❌ No pude obtener información de ese enlace.")
-        best_audio_id = downloader.get_best_audio_format_id(info.get('formats', []))
-        processing_config = {"download_format_id": best_audio_id, "audio_format": "mp3"}
-        if not await db_instance.add_task(user_id=user.id, file_type='audio', url=info['url'], file_name=sanitize_filename(info['title']),
-                                          url_info=info, processing_config=processing_config, status="queued"):
-            return await status_message.edit_text("❌ Error al crear la tarea.")
-        await status_message.edit_text(f"✅ Canción '<b>{escape_html(info['title'])}</b>' enviada a la forja.", parse_mode=ParseMode.HTML)
+        if not search_result:
+            return await status_message.edit_text("❌ Error: Resultado de búsqueda ha expirado.")
+
+        # 1. Obtener la fuente de audio de YouTube
+        await status_message.edit_text("🔎 <i>Buscando fuente de audio en YouTube...</i>", parse_mode=ParseMode.HTML)
+        audio_source_info = await asyncio.to_thread(downloader.get_url_info, f"ytsearch1:{search_result['search_term']}")
+        if not audio_source_info or not audio_source_info.get('url'):
+            return await status_message.edit_text("❌ No pude encontrar una fuente de audio válida en YouTube.")
+
+        # 2. Descargar la carátula de Spotify
+        thumbnail_path = None
+        if thumbnail_url := search_result.get('thumbnail'):
+            await status_message.edit_text("🖼️ <i>Descargando carátula de alta calidad...</i>", parse_mode=ParseMode.HTML)
+            filename = f"cover_{res_id}.jpg"
+            thumbnail_path = await asyncio.to_thread(downloader.download_thumbnail, thumbnail_url, os.path.join(TEMP_DIR, filename))
+
+        # 3. Crear la tarea enriquecida
+        await status_message.edit_text("⚙️ <i>Preparando tarea para la forja...</i>", parse_mode=ParseMode.HTML)
+        processing_config = {
+            "download_format_id": downloader.get_best_audio_format_id(audio_source_info.get('formats', [])),
+            "audio_format": "mp3",
+            "audio_bitrate": "320k", # Calidad alta por defecto para música
+            "audio_tags": {
+                "title": search_result.get('title'),
+                "artist": search_result.get('artist'),
+                "album": search_result.get('album'),
+            },
+        }
+        if thumbnail_path:
+            processing_config["thumbnail_path"] = thumbnail_path
+
+        status_message_ref = {"chat_id": status_message.chat.id, "message_id": status_message.id}
+        
+        task_id = await db_instance.add_task(
+            user_id=user.id,
+            file_type='audio',
+            url=audio_source_info['url'],
+            file_name=sanitize_filename(f"{search_result['artist']} - {search_result['title']}"),
+            url_info=audio_source_info,
+            processing_config=processing_config,
+            status="queued",
+            custom_fields={"status_message_ref": status_message_ref}
+        )
+
+        if not task_id:
+            return await status_message.edit_text("❌ Error crítico al crear la tarea en la base de datos.")
+
+        await status_message.edit_text(
+            f"✅ Canción '<b>{escape_html(search_result['title'])}</b>' enviada a la forja con metadatos y carátula.\n⏳ <b>En Cola...</b>",
+            parse_mode=ParseMode.HTML
+        )
+
     except Exception as e:
         logger.error(f"Error en select_song_from_search: {e}", exc_info=True)
         await status_message.edit_text(f"❌ Ocurrió un error inesperado: <code>{escape_html(str(e))}</code>")

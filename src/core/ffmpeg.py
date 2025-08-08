@@ -62,8 +62,11 @@ def build_multi_trim_command(trim_times_str: str, input_path: str, output_path: 
     logger.info(f"Comando FFmpeg de multi-corte construido: {final_command_str}")
     return [final_command_str], output_path
 
-def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnail_path: str = None, watermark_path: str = None, subs_path: str = None, new_audio_path: str = None) -> tuple[list[str], str]:
+def build_ffmpeg_command(task: dict, input_path: str, output_path: str, watermark_path: str = None, subs_path: str = None, new_audio_path: str = None) -> tuple[list[str], str]:
     config = task.get('processing_config', {})
+    
+    # Manejo de thumbnail_path que ahora es proporcionado por el worker.
+    thumbnail_path = config.get('thumbnail_path')
 
     if config.get('extract_audio'):
         return build_extract_audio_command(input_path, output_path, get_media_info(input_path))
@@ -88,6 +91,7 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
     command_parts.extend(["-i", shlex.quote(input_path)])
     input_count = 1
     
+    # Manejo de múltiples entradas
     if thumbnail_path: command_parts.extend(["-i", shlex.quote(thumbnail_path)]); thumb_map_idx = input_count; input_count += 1
     if watermark_path: command_parts.extend(["-i", shlex.quote(watermark_path)]); watermark_map_idx = input_count; input_count += 1
     if subs_path: command_parts.extend(["-i", shlex.quote(subs_path)]); subs_map_idx = input_count; input_count += 1
@@ -130,27 +134,44 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
     if filter_complex_parts:
         command_parts.extend(['-filter_complex', ";".join(filter_complex_parts)])
 
-    command_parts.extend(["-map", video_chain if video_chain.startswith("[") else "0:v:0?"])
-    command_parts.extend(["-map", audio_chain if audio_chain.startswith("[") else "0:a:0?"])
-    
+    # --- LÓGICA DE MAPEO Y CODIFICACIÓN ---
     if task.get('file_type') == 'video':
+        command_parts.extend(["-map", video_chain if video_chain.startswith("[") else "0:v:0?"])
+        command_parts.extend(["-map", audio_chain if audio_chain.startswith("[") else "0:a:0?"])
+        
         if config.get('transcode'):
             command_parts.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-c:a", "aac", "-b:a", "128k"])
         else:
             command_parts.extend(["-c:v", "copy"])
             if audio_chain == "[0:a]": command_parts.extend(["-c:a", "copy"])
-    
+        # Añadir carátula a video si se especifica
+        if thumbnail_path:
+            command_parts.extend(["-map", f"{thumb_map_idx}:v", "-c:v:1", "copy", "-disposition:v:1", "attached_pic"])
+
     elif task.get('file_type') == 'audio':
         fmt, bitrate = config.get('audio_format', 'mp3'), config.get('audio_bitrate', '192k')
         codec_map = {'mp3': 'libmp3lame', 'flac': 'flac', 'opus': 'libopus'}
-        command_parts.extend(["-vn", "-c:a", codec_map.get(fmt, 'libmp3lame')])
-        if fmt != 'flac': command_parts.extend(["-b:a", bitrate])
         
+        # Mapa de extensiones para asegurar que el archivo de salida sea correcto
+        ext_map = {'mp3': '.mp3', 'flac': '.flac', 'opus': '.opus'}
+        output_path = f"{os.path.splitext(output_path)[0]}{ext_map.get(fmt, '.mp3')}"
+
+        command_parts.extend(["-map", "0:a"])
+        command_parts.extend(["-c:a", codec_map.get(fmt, 'libmp3lame')])
+        if fmt != 'flac': command_parts.extend(["-b:a", bitrate])
+
+        # NUEVA LÓGICA: Incrustar carátula en el audio
+        if thumbnail_path and os.path.exists(thumbnail_path):
+            command_parts.extend(["-map", f"{thumb_map_idx}:v"])
+            command_parts.extend(["-c:v", "copy", "-disposition:v", "attached_pic"])
+        else:
+            command_parts.extend(["-vn"]) # Si no hay carátula, asegurar que no haya video
+
         if 'audio_tags' in config:
             tags = config['audio_tags']
-            if tags.get('title'): command_parts.extend(["-metadata", f"title={tags['title']}"])
-            if tags.get('artist'): command_parts.extend(["-metadata", f"artist={tags['artist']}"])
-            if tags.get('album'): command_parts.extend(["-metadata", f"album={tags['album']}"])
+            if tags.get('title'): command_parts.extend(["-metadata", f"title={shlex.quote(str(tags['title']))}"])
+            if tags.get('artist'): command_parts.extend(["-metadata", f"artist={shlex.quote(str(tags['artist']))}"])
+            if tags.get('album'): command_parts.extend(["-metadata", f"album={shlex.quote(str(tags['album']))}"])
 
     if config.get('mute_audio'):
         command_parts = [p for p in command_parts if p not in ["-c:a", "copy", "aac"] and not p.startswith("-b:a")]

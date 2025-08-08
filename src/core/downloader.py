@@ -12,19 +12,22 @@ import asyncio
 from src.core.exceptions import AuthenticationError
 
 if TYPE_CHECKING:
-    from src.core.worker import ProgressContext
+    from src.core.worker import ProgressTracker
 
 logger = logging.getLogger(__name__)
 
-class YtdlpLogger:
+# Este logger personalizado se mantiene solo para capturar el error de autenticación específico.
+class YtdlpAuthLogger:
     def debug(self, msg):
+        # Ignorar mensajes de depuración
         pass
     def info(self, msg):
+        # Ignorar mensajes de información
         pass
     def warning(self, msg):
         pass
     def error(self, msg):
-        if "Sign in to confirm" in msg or "confirm you’re not a bot" in msg:
+        if "Sign in to confirm" in msg or "confirm you’re not a bot" in msg or "authentication" in msg:
             raise AuthenticationError("YouTube", "Las cookies de autenticación son inválidas o han expirado.")
         else:
             logger.error(f"yt-dlp internal error: {msg}")
@@ -62,48 +65,20 @@ def get_common_ydl_opts():
     
     return opts
 
-def ytdlp_progress_hook(d, context: 'ProgressContext'):
-    if not context or d['status'] != 'downloading':
-        return
-
-    from src.helpers.utils import format_status_message
-    
-    total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-    if total_bytes <= 0: return
-
-    downloaded_bytes = d.get('downloaded_bytes', 0)
-    speed = d.get('speed', 0)
-    eta = d.get('eta', 0)
-    percentage = (downloaded_bytes / total_bytes) * 100
-
-    text = format_status_message(
-        operation="📥 Descargando...",
-        filename=context.task.get('original_filename', 'archivo'),
-        percentage=percentage,
-        processed_bytes=downloaded_bytes,
-        total_bytes=total_bytes,
-        speed=speed,
-        eta=eta,
-        engine="yt-dlp",
-        user_id=context.user_id,
-        user_mention=context.message.from_user.mention
-    )
-    
-    asyncio.run_coroutine_threadsafe(context.edit_message(text), context.bot.loop)
-
-def download_from_url(url: str, output_path: str, format_id: str, context: 'ProgressContext' = None) -> str or None:
+def download_from_url(url: str, output_path: str, format_id: str, tracker: 'ProgressTracker' = None) -> str or None:
     ydl_opts = get_common_ydl_opts()
     ydl_opts.update({
         'format': format_id,
         'outtmpl': {'default': f'{output_path}.%(ext)s'},
         'noplaylist': True, 'merge_output_format': 'mkv',
         'http_chunk_size': 10485760, 'retries': 5, 'fragment_retries': 5,
-        'nopart': True, 'logger': YtdlpLogger(),
+        'nopart': True, 'logger': YtdlpAuthLogger(),
     })
+    # 'forcejson' no es necesario para la descarga real.
     if 'forcejson' in ydl_opts: del ydl_opts['forcejson']
 
-    if context:
-        ydl_opts['progress_hooks'] = [lambda d: ytdlp_progress_hook(d, context)]
+    if tracker:
+        ydl_opts['progress_hooks'] = [tracker.ytdlp_hook]
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -116,6 +91,7 @@ def download_from_url(url: str, output_path: str, format_id: str, context: 'Prog
 
     found_files = glob.glob(f"{output_path}.*")
     for f in found_files:
+        # Excluir archivos temporales que yt-dlp podría dejar atrás
         if not f.endswith((".part", ".ytdl")):
             logger.info(f"Descarga de yt-dlp completada. Archivo final: {f}")
             return f
@@ -125,19 +101,24 @@ def download_from_url(url: str, output_path: str, format_id: str, context: 'Prog
 
 def get_best_audio_format_id(formats: list) -> str:
     if not formats: return 'bestaudio/best'
+    # Priorizar formatos de solo audio (vcodec=none)
     audio_only = [f for f in formats if f.get('vcodec') in ['none', None] and f.get('acodec') not in ['none', None]]
     if audio_only:
+        # Ordenar por bitrate de audio (abr) descendente
         best = sorted(audio_only, key=lambda x: x.get('abr', 0), reverse=True)[0]
         return best.get('format_id')
+    # Si no hay de solo audio, yt-dlp elegirá el mejor stream de audio de un archivo de video.
     return 'bestaudio/best'
 
 def get_best_video_format_id(formats: list) -> str:
+    # Dejar que yt-dlp elija la mejor combinación de video y audio.
     return 'bestvideo+bestaudio/best'
 
 def _parse_entry(entry: dict) -> dict:
     formats = []
     if entry.get('formats'):
         for f in entry['formats']:
+            # Solo incluir formatos que tengan video o audio.
             if f.get('vcodec', 'none') != 'none' or f.get('acodec', 'none') != 'none':
                 formats.append({
                     'format_id': f.get('format_id'), 'ext': f.get('ext'),
@@ -156,7 +137,7 @@ def _parse_entry(entry: dict) -> dict:
 
 def get_url_info(url: str) -> dict or None:
     ydl_opts = get_common_ydl_opts()
-    ydl_opts.update({'skip_download': True, 'logger': YtdlpLogger(), 'playlist_items': '1'})
+    ydl_opts.update({'skip_download': True, 'logger': YtdlpAuthLogger(), 'playlist_items': '1'})
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -165,11 +146,15 @@ def get_url_info(url: str) -> dict or None:
                 return None
             
             if 'entries' in info: # Es una playlist
+                # Tomar el primer video para la información general
+                if not info.get('entries'): return None # Playlist vacía
                 first_entry = info['entries'][0]
                 playlist_result = _parse_entry(first_entry)
+                # Sobrescribir con metadatos de la playlist
                 playlist_result['is_playlist'] = True
                 playlist_result['playlist_count'] = info.get('playlist_count')
                 playlist_result['title'] = info.get('title') # Usar el título de la playlist
+                # Guardar todas las entradas parseadas para posible uso futuro
                 playlist_result['entries'] = [_parse_entry(e) for e in info.get('entries', [])]
                 return playlist_result
 
@@ -182,35 +167,55 @@ def get_url_info(url: str) -> dict or None:
         return None
 
 def search_music(query: str, limit: int = 10) -> list:
+    """
+    Busca música exclusivamente en Spotify para obtener metadatos de alta calidad.
+    """
     results = []
-    if spotify_api:
-        try:
-            spotify_results = spotify_api.search(q=query, type='track', limit=limit)
-            for item in spotify_results['tracks']['items']:
-                results.append({
-                    'source': 'spotify', 'title': item['name'],
-                    'artist': ", ".join(artist['name'] for artist in item['artists']),
-                    'album': item['album']['name'], 'duration': item['duration_ms'] / 1000,
-                    'search_term': f"{item['name']} {item['artists'][0]['name']} Audio",
-                    'thumbnail': item['album']['images'][0]['url'] if item['album']['images'] else None
-                })
-        except Exception as e:
-            logger.warning(f"Búsqueda en Spotify falló: {e}")
+    if not spotify_api:
+        logger.warning("La búsqueda de música está deshabilitada: no se configuraron las credenciales de Spotify.")
+        return results
 
-    if not results:
-        logger.info(f"No hay resultados en Spotify, usando YouTube.")
-        try:
-            info = get_url_info(f"ytsearch{limit}:{query} official audio")
-            if info and 'entries' in info:
-                for entry in info['entries']:
-                    title, artist = entry.get('title', 'N/A'), entry.get('artist', entry.get('uploader', 'N/A'))
-                    if ' - ' in title:
-                        parts = title.split(' - ', 1)
-                        if len(parts) == 2 and len(parts[0]) < len(parts[1]):
-                            artist, title = parts[0], parts[1]
-                    results.append({'source': 'youtube', 'title': title.strip(), 'artist': artist.strip(),
-                                    'duration': entry.get('duration'), 'url': entry.get('url')})
-        except Exception as e:
-            logger.error(f"La búsqueda en YouTube falló: {e}")
+    try:
+        spotify_results = spotify_api.search(q=query, type='track', limit=limit)
+        for item in spotify_results['tracks']['items']:
+            if not item or not item.get('name') or not item['artists']:
+                continue
+
+            # Construir un término de búsqueda preciso para YouTube
+            search_term = f"{item['artists'][0]['name']} - {item['name']} Official Audio"
+            
+            results.append({
+                'source': 'spotify',
+                'title': item['name'],
+                'artist': ", ".join(artist['name'] for artist in item['artists']),
+                'album': item['album']['name'],
+                'duration': item['duration_ms'] / 1000,
+                'search_term': search_term,
+                'thumbnail': item['album']['images'][0]['url'] if item['album']['images'] else None
+            })
+    except Exception as e:
+        logger.error(f"La búsqueda en Spotify falló: {e}", exc_info=True)
+        # No devolvemos nada si Spotify falla, para mantener la consistencia del flujo.
+        return []
             
     return results
+
+def download_thumbnail(url: str, save_path: str) -> str | None:
+    """
+    Descarga una imagen desde una URL y la guarda localmente.
+    """
+    try:
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+        
+        # Asegurarse de que el directorio existe
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+        with open(save_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        logger.info(f"Carátula descargada y guardada en: {save_path}")
+        return save_path
+    except requests.RequestException as e:
+        logger.error(f"No se pudo descargar la carátula desde {url}: {e}")
+        return None
