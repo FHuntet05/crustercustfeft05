@@ -124,21 +124,27 @@ async def _run_ffmpeg_with_progress(context: ProgressContext, cmd: str, input_pa
 
 async def process_media_task(bot: Client, task: dict):
     task_id, user_id, context = str(task['_id']), task['user_id'], None
-    files_to_clean = set()
+    status_message, files_to_clean = None, set()
+    filename = task.get('original_filename') or task.get('url', 'Tarea')
 
     try:
         task = await db_instance.get_task(task_id)
         if not task: raise InvalidMediaError("Tarea no encontrada después de recargar.")
         
-        filename = task.get('original_filename') or task.get('url', 'Tarea')
         if ref := task.get('status_message_ref'):
             try:
                 status_message = await bot.get_messages(ref['chat_id'], ref['message_id'])
-                await status_message.edit_text(f"Iniciando: <code>{escape_html(filename)}</code>", parse_mode=ParseMode.HTML)
-                context = ProgressContext(bot, status_message, task)
-            except Exception:
-                context = None
+                logger.info(f"Mensaje de estado {status_message.id} adoptado para la tarea {task_id}.")
+            except Exception as e:
+                logger.warning(f"No se pudo adoptar mensaje {ref['message_id']} para la tarea {task_id}: {e}")
         
+        if not status_message:
+            status_message = await bot.send_message(user_id, f"Iniciando: <code>{escape_html(filename)}</code>", parse_mode=ParseMode.HTML)
+            logger.info(f"Nuevo mensaje de estado {status_message.id} creado para la tarea {task_id}.")
+        
+        context = ProgressContext(bot, status_message, task)
+        await context.edit_message(f"Iniciando: <code>{escape_html(filename)}</code>")
+
         dl_dir = os.path.join(DOWNLOAD_DIR, task_id)
         os.makedirs(dl_dir, exist_ok=True)
         files_to_clean.add(dl_dir)
@@ -153,8 +159,8 @@ async def process_media_task(bot: Client, task: dict):
             if not actual_download_path: raise NetworkError("La descarga desde la URL falló.")
         elif file_id := task.get('file_id'):
             actual_download_path = os.path.join(dl_dir, filename)
-            await bot.download_media(message=file_id, file_name=actual_download_path, progress=pyrogram_progress_callback if context else None,
-                                     progress_args=(context, "📥 Descargando...", filename) if context else ())
+            await bot.download_media(message=file_id, file_name=actual_download_path, progress=pyrogram_progress_callback,
+                                     progress_args=(context, "📥 Descargando...", filename))
         
         initial_size = os.path.getsize(actual_download_path) if os.path.exists(actual_download_path) else 0
 
@@ -164,12 +170,12 @@ async def process_media_task(bot: Client, task: dict):
             final_filename_base = sanitize_filename(task.get('processing_config', {}).get('final_filename', os.path.splitext(filename)[0]))
             output_path_base = os.path.join(output_dir, f"{final_filename_base}.mp4")
             
-            if context: await context.edit_message("Preparando para el procesamiento FFmpeg...")
+            await context.edit_message("Preparando para el procesamiento FFmpeg...")
             commands, definitive_output_path = ffmpeg.build_ffmpeg_command(task, actual_download_path, output_path_base)
             
             for i, cmd in enumerate(commands):
                 if not cmd: continue
-                if i == len(commands) - 1 and context:
+                if i == len(commands) - 1:
                     await _run_ffmpeg_with_progress(context, cmd, actual_download_path, initial_size)
                 else:
                     await _run_ffmpeg_process(cmd)
@@ -182,11 +188,10 @@ async def process_media_task(bot: Client, task: dict):
         for final_path in found_files:
             final_size, final_filename = os.path.getsize(final_path), os.path.basename(final_path)
             caption = generate_summary_caption(task, initial_size, final_size, final_filename)
-            if context: await context.edit_message(f"⬆️ Subiendo: <code>{escape_html(final_filename)}</code>")
+            await context.edit_message(f"⬆️ Subiendo: <code>{escape_html(final_filename)}</code>")
             
             upload_args = {'caption': caption, 'parse_mode': ParseMode.HTML,
-                           'progress': pyrogram_progress_callback if context else None,
-                           'progress_args': (context, "⬆️ Subiendo...", final_filename) if context else ()}
+                           'progress': pyrogram_progress_callback, 'progress_args': (context, "⬆️ Subiendo...", final_filename)}
             
             if final_path.endswith(('.mp4', '.mkv', '.webm')): await bot.send_video(user_id, video=final_path, **upload_args)
             elif final_path.endswith(('.mp3', '.flac', '.m4a', '.opus')): await bot.send_audio(user_id, audio=final_path, **upload_args)

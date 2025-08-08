@@ -2,7 +2,7 @@ import logging
 import asyncio
 import re
 from pyrogram import Client, filters
-from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message, CallbackQuery
 from pyrogram.enums import ParseMode
 from pyrogram.errors import MessageNotModified
 from bson.objectid import ObjectId
@@ -10,12 +10,11 @@ from bson.objectid import ObjectId
 from src.db.mongo_manager import db_instance
 from src.core import downloader
 from src.helpers.keyboards import (build_back_button, build_processing_menu,
-                                   build_detailed_format_menu, build_audio_convert_menu,
-                                   build_audio_effects_menu, build_watermark_menu,
-                                   build_position_menu, build_audio_metadata_menu,
-                                   build_tracks_menu, build_transcode_menu,
-                                   build_thumbnail_menu, build_confirmation_keyboard,
-                                   build_search_results_keyboard)
+                                   build_audio_convert_menu, build_audio_effects_menu,
+                                   build_watermark_menu, build_position_menu,
+                                   build_audio_metadata_menu, build_tracks_menu,
+                                   build_transcode_menu, build_thumbnail_menu,
+                                   build_confirmation_keyboard, build_search_results_keyboard)
 from src.helpers.utils import get_greeting, escape_html, sanitize_filename, format_time
 
 logger = logging.getLogger(__name__)
@@ -28,30 +27,22 @@ async def open_task_menu_from_p(client: Client, message: Message, task_id: str):
     text_content = f"🛠️ Configurando Tarea:\n<code>{escape_html(task.get('original_filename', '...'))}</code>"
     markup = build_processing_menu(task_id, task['file_type'], task)
     
-    if hasattr(message, 'photo') and message.photo:
-        await message.delete()
-        await client.send_message(
-            chat_id=message.chat.id,
-            text=text_content,
-            reply_markup=markup,
-            parse_mode=ParseMode.HTML
-        )
-    else:
-        try:
-            if message.from_user.is_bot:
-                 await message.edit_text(text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
-            else:
-                 await message.reply(text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
-        except MessageNotModified:
-            pass
-        except Exception:
-             await message.reply(text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
+    try:
+        if isinstance(message, CallbackQuery):
+            await message.message.edit_text(text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
+        else:
+            await message.reply(text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
+    except MessageNotModified:
+        pass
+    except Exception as e:
+        logger.error(f"Error en open_task_menu_from_p: {e}")
+        await client.send_message(message.chat.id, text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
 
 @Client.on_callback_query(filters.regex(r"^p_open_"))
 async def open_task_menu_callback(client: Client, query: CallbackQuery):
     await query.answer()
     task_id = query.data.split("_")[2]
-    await open_task_menu_from_p(client, query.message, task_id)
+    await open_task_menu_from_p(client, query, task_id)
 
 @Client.on_callback_query(filters.regex(r"^task_"))
 async def handle_task_actions(client: Client, query: CallbackQuery):
@@ -160,13 +151,13 @@ async def show_config_menu(client: Client, query: CallbackQuery):
                       "thumbnail": "🖼️ Gestione la miniatura del video:" }
     
     if menu_type in keyboards:
-        if query.message.photo: await query.message.delete()
-        target_func = client.send_message if query.message.photo else query.message.edit_text
-        await target_func(
-            chat_id=query.message.chat.id,
-            text=menu_messages[menu_type],
-            reply_markup=keyboards[menu_type]
-        )
+        try:
+            await query.message.edit_text(
+                text=menu_messages[menu_type],
+                reply_markup=keyboards[menu_type]
+            )
+        except MessageNotModified:
+            pass
         return
 
     if not hasattr(client, 'user_data'): client.user_data = {}
@@ -510,15 +501,17 @@ async def handle_playlist_action(client: Client, query: CallbackQuery):
         first_video_info = playlist_info.get("entries", [{}])[0]
         if not first_video_info:
             return await client.send_message(user.id, "❌ Error: La playlist parece estar vacía.")
-
-        await db_instance.set_user_state(user.id, "awaiting_quality_selection", {"url_info": first_video_info})
         
         caption = (f"<b>📝 Nombre:</b> {escape_html(first_video_info['title'])}\n"
                    f"<b>🕓 Duración:</b> {format_time(first_video_info.get('duration'))}\n\n"
                    "Elija la calidad para la descarga:")
         keyboard = build_detailed_format_menu("url_selection", first_video_info.get('formats', []))
         
+        sent_message = None
         if first_video_info.get('thumbnail'):
-            await client.send_photo(user.id, photo=first_video_info['thumbnail'], caption=caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+            sent_message = await client.send_photo(user.id, photo=first_video_info['thumbnail'], caption=caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
         else:
-            await client.send_message(user.id, text=caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+            sent_message = await client.send_message(user.id, text=caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        
+        if sent_message:
+             await db_instance.set_user_state(user.id, "awaiting_quality_selection", {"url_info": first_video_info, "source_message_id": sent_message.id})
