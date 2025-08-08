@@ -1,5 +1,3 @@
-# src/core/ffmpeg.py
-
 import asyncio
 import logging
 import subprocess
@@ -8,6 +6,8 @@ import os
 import re
 import json
 
+from src.core.exceptions import FFmpegProcessingError
+
 logger = logging.getLogger(__name__)
 
 def get_media_info(file_path: str) -> dict:
@@ -15,13 +15,11 @@ def get_media_info(file_path: str) -> dict:
         logger.error(f"ffprobe no puede encontrar el archivo: {file_path}")
         return {}
         
-    command = [
-        "ffprobe", "-v", "error", "-show_format", "-show_streams",
-        "-of", "default=noprint_wrappers=1", "-print_format", "json", file_path
-    ]
+    command = ["ffprobe", "-v", "error", "-show_format", "-show_streams",
+               "-of", "default=noprint_wrappers=1", "-print_format", "json", file_path]
     try:
         process = subprocess.Popen(
-            command, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True, encoding='utf-8'
         )
         stdout, stderr = process.communicate(timeout=60)
@@ -32,14 +30,10 @@ def get_media_info(file_path: str) -> dict:
             
         return json.loads(stdout)
     except Exception as e:
-        logger.error(f"No se pudo obtener info de {file_path} (JSON o genérico): {e}")
+        logger.error(f"No se pudo obtener info de {file_path}: {e}")
         return {}
 
 def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnail_path: str = None, watermark_path: str = None, subs_path: str = None, new_audio_path: str = None) -> tuple[list[str], str]:
-    """
-    Construye el comando FFmpeg principal.
-    Devuelve: una tupla (lista_de_comandos, ruta_final_definitiva).
-    """
     config = task.get('processing_config', {})
 
     if config.get('extract_audio'):
@@ -53,22 +47,26 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
 
     command_parts = ["ffmpeg", "-y"]
     
-    if 'trim_times' in config:
-        start, _, end = config['trim_times'].partition('-')
-        if start.strip(): command_parts.append(f"-ss {shlex.quote(start.strip())}")
-        if end.strip(): command_parts.append(f"-to {shlex.quote(end.strip())}")
+    # Manejo de Multi-corte (trim)
+    if trim_times := config.get('trim_times'):
+        if ',' in trim_times:
+            return build_multi_trim_command(trim_times, input_path, output_path)
+        else:
+            start, _, end = trim_times.partition('-')
+            if start.strip(): command_parts.extend(["-ss", start.strip()])
+            if end.strip(): command_parts.extend(["-to", end.strip()])
     
-    command_parts.append(f"-i {shlex.quote(input_path)}")
+    command_parts.extend(["-i", shlex.quote(input_path)])
     input_count = 1
     
-    if thumbnail_path: command_parts.append(f"-i {shlex.quote(thumbnail_path)}"); thumb_map_idx = input_count; input_count += 1
-    if watermark_path: command_parts.append(f"-i {shlex.quote(watermark_path)}"); watermark_map_idx = input_count; input_count += 1
-    if subs_path: command_parts.append(f"-i {shlex.quote(subs_path)}"); subs_map_idx = input_count; input_count += 1
+    if thumbnail_path: command_parts.extend(["-i", shlex.quote(thumbnail_path)]); thumb_map_idx = input_count; input_count += 1
+    if watermark_path: command_parts.extend(["-i", shlex.quote(watermark_path)]); watermark_map_idx = input_count; input_count += 1
+    if subs_path: command_parts.extend(["-i", shlex.quote(subs_path)]); subs_map_idx = input_count; input_count += 1
 
-    codec_opts, map_opts, metadata_opts = [], [], []
-    video_filters, filter_complex_parts = [], []
-    video_chain = "[0:v]"
+    filter_complex_parts = []
+    video_chain, audio_chain = "[0:v]", "[0:a]"
     
+    video_filters = []
     if task.get('file_type') == 'video':
         if transcode_config := config.get('transcode'):
             if resolution := transcode_config.get('resolution'):
@@ -87,101 +85,115 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
     if config.get('watermark', {}).get('type') == 'image' and watermark_path:
         pos_map = {'top_left': '10:10', 'top_right': 'W-w-10:10', 'bottom_left': '10:H-h-10', 'bottom_right': 'W-w-10:H-h-10'}
         filter_complex_parts.append(f"{video_chain}[{watermark_map_idx}:v]overlay={pos_map.get(config['watermark'].get('position', 'top_right'))}[outv]")
-        map_opts.append("-map [outv]")
+        video_chain = "[outv]"
     elif filter_complex_parts:
         last_filter = filter_complex_parts.pop()
         filter_complex_parts.append(last_filter.replace('[filtered_v]', '[outv]'))
-        map_opts.append("-map [outv]")
-    else:
-        map_opts.append("-map 0:v:0?")
+        video_chain = "[outv]"
 
+    audio_filters = []
+    if config.get('slowed'): audio_filters.append("atempo=0.8")
+    if config.get('reverb'): audio_filters.append("aecho=0.8:0.9:1000:0.3")
+    if audio_filters:
+        filter_complex_parts.append(f"{audio_chain}{','.join(audio_filters)}[outa]")
+        audio_chain = "[outa]"
+
+    if filter_complex_parts:
+        command_parts.extend(['-filter_complex', ";".join(filter_complex_parts)])
+
+    command_parts.extend(["-map", video_chain if video_chain.startswith("[") else "0:v:0?"])
+    command_parts.extend(["-map", audio_chain if audio_chain.startswith("[") else "0:a:0?"])
+    
     if task.get('file_type') == 'video':
-        codec_opts.extend(["-c:v copy", "-c:a copy"])
         if config.get('transcode'):
-            codec_opts = ["-c:v libx264", "-preset veryfast", "-crf 28", "-c:a aac", "-b:a 128k"]
-        
-        codec_opts.append("-c:s mov_text")
-        map_opts.append("-map 0:a:0?")
-        
-        if config.get('remove_thumbnail'): map_opts.append("-map -0:v:1") 
-        elif thumbnail_path:
-            map_idx_str = f"v:{len(map_opts)-2}" if "[outv]" not in map_opts else f"v:{len(map_opts)-1}"
-            map_opts.append(f"-map {thumb_map_idx}")
-            codec_opts.append(f"-c:{map_idx_str} mjpeg -disposition:{map_idx_str} attached_pic")
-
-        if config.get('remove_subtitles'): map_opts.append("-map -0:s")
-        else: map_opts.append("-map 0:s?")
-        if subs_path: map_opts.append(f"-map {subs_map_idx}")
-        map_opts.append("-map -0:t")
+            command_parts.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-c:a", "aac", "-b:a", "128k"])
+        else:
+            command_parts.extend(["-c:v", "copy"])
+            if audio_chain == "[0:a]": command_parts.extend(["-c:a", "copy"])
     
     elif task.get('file_type') == 'audio':
         fmt, bitrate = config.get('audio_format', 'mp3'), config.get('audio_bitrate', '192k')
         codec_map = {'mp3': 'libmp3lame', 'flac': 'flac', 'opus': 'libopus'}
-        audio_filters = []
-        if config.get('slowed'): audio_filters.append("atempo=0.8")
-        if config.get('reverb'): audio_filters.append("aecho=0.8:0.9:1000:0.3")
-        if audio_filters: codec_opts.append(f"-af {shlex.quote(','.join(audio_filters))}")
-        codec_opts.extend(["-vn", f"-c:a {codec_map.get(fmt, 'libmp3lame')}"])
-        if fmt != 'flac': codec_opts.append(f"-b:a {bitrate}")
-        map_opts = ["-map 0:a:0"]
+        command_parts.extend(["-vn", "-c:a", codec_map.get(fmt, 'libmp3lame')])
+        if fmt != 'flac': command_parts.extend(["-b:a", bitrate])
+        
         if 'audio_tags' in config:
             tags = config['audio_tags']
-            if tags.get('title'): metadata_opts.append(f"-metadata title={shlex.quote(tags['title'])}")
-            if tags.get('artist'): metadata_opts.append(f"-metadata artist={shlex.quote(tags['artist'])}")
-            if tags.get('album'): metadata_opts.append(f"-metadata album={shlex.quote(tags['album'])}")
-        if thumbnail_path:
-            map_opts.append(f"-map {thumb_map_idx}"); codec_opts.extend(["-c:v copy", "-disposition:v:0 attached_pic"])
-    
+            if tags.get('title'): command_parts.extend(["-metadata", f"title={tags['title']}"])
+            if tags.get('artist'): command_parts.extend(["-metadata", f"artist={tags['artist']}"])
+            if tags.get('album'): command_parts.extend(["-metadata", f"album={tags['album']}"])
+
     if config.get('mute_audio'):
-        codec_opts = [opt for opt in codec_opts if '-c:a' not in opt and '-b:a' not in opt]
-        map_opts = [opt for opt in map_opts if '0:a' not in opt]; codec_opts.append("-an")
+        command_parts = [p for p in command_parts if p not in ["-c:a", "copy", "aac"] and not p.startswith("-b:a")]
+        command_parts = [p for p in command_parts if not p.startswith("-map") or "a" not in p]
+        command_parts.append("-an")
 
-    if filter_complex_parts: command_parts.append(f'-filter_complex "{";".join(filter_complex_parts)}"')
-
-    command_parts.extend(codec_opts); command_parts.extend(metadata_opts); command_parts.extend(map_opts)
     command_parts.append(shlex.quote(output_path))
     
-    final_command = " ".join(part for part in command_parts if part)
+    final_command = " ".join(command_parts)
     logger.info(f"Comando FFmpeg estándar construido: {final_command}")
     return [final_command], output_path
 
+def build_multi_trim_command(trim_times_str: str, input_path: str, output_path: str) -> tuple[list[str], str]:
+    segments = [s.strip() for s in trim_times_str.split(',') if s.strip()]
+    
+    filter_chains = []
+    concat_inputs = []
+    
+    for i, segment in enumerate(segments):
+        start, _, end = segment.partition('-')
+        if not start or not end: continue
+        
+        filter_chains.append(f"[0:v]trim=start={start.strip()}:end={end.strip()},setpts=PTS-STARTPTS[v{i}]")
+        filter_chains.append(f"[0:a]atrim=start={start.strip()}:end={end.strip()},asetpts=PTS-STARTPTS[a{i}]")
+        concat_inputs.append(f"[v{i}][a{i}]")
+
+    if not filter_chains:
+        raise ValueError("Formato de multi-corte inválido.")
+
+    concat_str = "".join(concat_inputs)
+    filter_chains.append(f"{concat_str}concat=n={len(segments)}:v=1:a=1[outv][outa]")
+    
+    final_filter_complex = ";".join(filter_chains)
+
+    command = [
+        "ffmpeg", "-y",
+        "-i", shlex.quote(input_path),
+        "-filter_complex", final_filter_complex,
+        "-map", "[outv]",
+        "-map", "[outa]",
+        shlex.quote(output_path)
+    ]
+    
+    final_command_str = " ".join(command)
+    logger.info(f"Comando FFmpeg de multi-corte construido: {final_command_str}")
+    return [final_command_str], output_path
+
 def build_join_command(file_list_path: str, output_path: str) -> tuple[list[str], str]:
     command = f"ffmpeg -y -f concat -safe 0 -i {shlex.quote(file_list_path)} -c copy {shlex.quote(output_path)}"
-    logger.info(f"Comando de unión de videos: {command}")
     return [command], output_path
 
 def build_extract_audio_command(input_path: str, output_path_base: str, media_info: dict) -> tuple[list[str], str]:
     audio_stream = next((s for s in media_info.get('streams', []) if s.get('codec_type') == 'audio'), None)
     ext = ".m4a"
-    if audio_stream:
-        codec_name = audio_stream.get('codec_name')
-        ext_map = {'mp3': '.mp3', 'aac': '.m4a', 'opus': '.opus', 'flac': '.flac'}
-        ext = ext_map.get(codec_name, '.m4a')
+    if audio_stream and (codec_name := audio_stream.get('codec_name')):
+        ext = {'mp3': '.mp3', 'aac': '.m4a', 'opus': '.opus', 'flac': '.flac'}.get(codec_name, '.m4a')
     
     final_output_path = f"{os.path.splitext(output_path_base)[0]}{ext}"
     command = f"ffmpeg -y -i {shlex.quote(input_path)} -vn -c:a copy {shlex.quote(final_output_path)}"
-    logger.info(f"Comando de extracción de audio: {command}")
     return [command], final_output_path
 
 def build_replace_audio_command(input_path: str, new_audio_path: str, output_path: str) -> tuple[list[str], str]:
     command = (f"ffmpeg -y -i {shlex.quote(input_path)} -i {shlex.quote(new_audio_path)} "
-               f"-map 0:v:0 -map 1:a:0 -c:v copy -c:a copy -map 0:s? -map -0:t "
-               f"{shlex.quote(output_path)}")
-    logger.info(f"Comando de reemplazo de audio: {command}")
+               f"-map 0:v:0 -map 1:a:0 -c:v copy -c:a copy {shlex.quote(output_path)}")
     return [command], output_path
-
-def build_extract_thumb_command(input_path: str, output_thumb_path: str) -> tuple[list[str], str]:
-    command = (f"ffmpeg -y -i {shlex.quote(input_path)} -an -vf select='eq(pict_type,I)' "
-               f"-vframes 1 -q:v 2 {shlex.quote(output_thumb_path)}")
-    logger.info(f"Comando de extracción de miniatura: {command}")
-    return [command], output_thumb_path
 
 def build_gif_command(config, input_path, output_path) -> tuple[list[str], str]:
     gif_opts = config['gif_options']; duration, fps = gif_opts['duration'], gif_opts['fps']
     palette_path = f"{os.path.splitext(output_path)[0]}.palette.png"; filters = f"fps={fps},scale=480:-1:flags=lanczos"
     cmd1 = f"ffmpeg -y -ss 0 -t {duration} -i {shlex.quote(input_path)} -vf \"{filters},palettegen\" {shlex.quote(palette_path)}"
     final_gif_path = f"{os.path.splitext(output_path)[0]}.gif"
-    cmd2 = f"ffmpeg -ss 0 -t {duration} -i {shlex.quote(input_path)} -i {shlex.quote(palette_path)} -lavfi \"{filters} [x]; [x][1:v] paletteuse\" {shlex.quote(final_gif_path)}"
+    cmd2 = f"ffmpeg -y -ss 0 -t {duration} -i {shlex.quote(input_path)} -i {shlex.quote(palette_path)} -lavfi \"{filters} [x]; [x][1:v] paletteuse\" {shlex.quote(final_gif_path)}"
     return [cmd1, cmd2], final_gif_path
 
 def build_split_command(config, input_path, output_path) -> tuple[list[str], str]:
@@ -190,6 +202,5 @@ def build_split_command(config, input_path, output_path) -> tuple[list[str], str
     if 's' in criteria.lower():
         command = (f"ffmpeg -y -i {shlex.quote(input_path)} -c copy -map 0 "
                    f"-segment_time {criteria.lower().replace('s', '')} -f segment -reset_timestamps 1 {shlex.quote(final_output_pattern)}")
-        # Para split, el "output path" es un patrón, no un archivo único. Devolvemos el patrón base para el glob.
         return [command], f"{base_name}_part*{ext}"
     return [""], ""

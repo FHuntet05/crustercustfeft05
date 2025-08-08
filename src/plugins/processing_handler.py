@@ -38,15 +38,14 @@ async def open_task_menu_from_p(client: Client, message: Message, task_id: str):
         )
     else:
         try:
-            if message.from_user.is_bot: # Si el mensaje es del bot (un callback)
+            if message.from_user.is_bot:
                  await message.edit_text(text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
-            else: # Si es un comando del usuario
+            else:
                  await message.reply(text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
         except MessageNotModified:
             pass
         except Exception:
              await message.reply(text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
-
 
 @Client.on_callback_query(filters.regex(r"^p_open_"))
 async def open_task_menu_callback(client: Client, query: CallbackQuery):
