@@ -289,21 +289,28 @@ async def handle_text_input(client: Client, message: Message):
 async def set_value_callback(client: Client, query: CallbackQuery):
     await query.answer()
     parts = query.data.split("_")
-    config_type, task_id = parts[1], parts[2]
+    config_type = parts[1]
+    task_id = parts[2]
     
-    if not (task := await db_instance.get_task(task_id)): return await query.message.delete()
+    if not (task := await db_instance.get_task(task_id)): 
+        return await query.message.delete()
     
     config = task.get('processing_config', {})
+    
+    # --- LÓGICA DE ACTUALIZACIÓN DE LA DB ---
     if config_type == "transcode":
         value = "_".join(parts[3:])
-        if value == "remove_all": await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$unset": {"processing_config.transcode": ""}})
-        else: key, new_value = value.split("_", 1); await db_instance.update_task_config(task_id, f"transcode.{key}", new_value)
-    
+        if value == "remove_all": 
+            await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$unset": {"processing_config.transcode": ""}})
+        else: 
+            key, new_value = value.split("_", 1)
+            await db_instance.update_task_config(task_id, f"transcode.{key}", new_value)
     elif config_type == "watermark":
-        action = parts[3] # El task_id es parts[2]
-        if action == "remove": await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$unset": {"processing_config.watermark": ""}})
-        elif action == "position": await db_instance.update_task_config(task_id, "watermark.position", parts[4])
-        
+        action = parts[3]
+        if action == "remove": 
+            await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$unset": {"processing_config.watermark": ""}})
+        elif action == "position": 
+            await db_instance.update_task_config(task_id, "watermark.position", parts[4])
     elif config_type == "thumb_op":
         op = parts[3]
         current_value = config.get(f"{op}_thumbnail", False)
@@ -312,26 +319,38 @@ async def set_value_callback(client: Client, query: CallbackQuery):
             other_op = "remove" if op == "extract" else "extract"
             update_query["$unset"] = {f"processing_config.{other_op}_thumbnail": "", "processing_config.thumbnail_file_id": ""}
         await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, update_query)
+    elif config_type == "mute": 
+        await db_instance.update_task_config(task_id, 'mute_audio', not config.get('mute_audio', False))
+    elif config_type == "audioprop": 
+        await db_instance.update_task_config(task_id, f"audio_{parts[3]}", parts[4])
+    elif config_type == "audioeffect": 
+        await db_instance.update_task_config(task_id, parts[3], not config.get(parts[3], False))
+    elif config_type == "trackopt": 
+        await db_instance.update_task_config(task_id, parts[3], not config.get(parts[3], False))
 
-    elif config_type == "mute": await db_instance.update_task_config(task_id, 'mute_audio', not config.get('mute_audio', False))
-    elif config_type == "audioprop": await db_instance.update_task_config(task_id, f"audio_{parts[3]}", parts[4])
-    elif config_type == "audioeffect": await db_instance.update_task_config(task_id, parts[3], not config.get(parts[3], False))
-    elif config_type == "trackopt": await db_instance.update_task_config(task_id, parts[3], not config.get(parts[3], False))
-
-    task = await db_instance.get_task(task_id)
+    # --- LÓGICA DE RECONSTRUCCIÓN DEL TECLADO (CORREGIDA) ---
+    task = await db_instance.get_task(task_id) # Recargar datos actualizados
     config = task.get('processing_config', {})
     
-    keyboard = build_processing_menu(task_id, task['file_type'], task)
-    if config_type in ["audioeffect", "trackopt", "transcode", "thumb_op", "watermark"]:
-        if config_type == "watermark" and parts[3] == "position":
-             message_text = "✅ Posición guardada. Volviendo al menú..."
-             keyboard = build_processing_menu(task_id, task['file_type'], task)
+    keyboard = None
+    message_text = "🛠️ Configuración actualizada."
+
+    if config_type == "transcode":
+        keyboard = build_transcode_menu(task_id)
+    elif config_type == "watermark":
+        if parts[3] == "position":
+            message_text = "✅ Posición guardada. Volviendo al menú..."
+            keyboard = build_processing_menu(task_id, task['file_type'], task)
         else:
-            keyboards = {"audioeffect": build_audio_effects_menu, "trackopt": build_tracks_menu, "transcode": build_transcode_menu, "thumb_op": build_thumbnail_menu, "watermark": build_watermark_menu}
-            keyboard = keyboards[config_type](task_id, config)
-            message_text = "🛠️ Configuración actualizada."
-    else:
-        message_text = "🛠️ Configuración actualizada."
+            keyboard = build_watermark_menu(task_id)
+    elif config_type == "audioeffect":
+        keyboard = build_audio_effects_menu(task_id, config)
+    elif config_type == "trackopt":
+        keyboard = build_tracks_menu(task_id, config)
+    elif config_type == "thumb_op":
+        keyboard = build_thumbnail_menu(task_id, config)
+    else: # Fallback al menú principal para los demás casos
+        keyboard = build_processing_menu(task_id, task['file_type'], task)
     
     await query.message.edit_text(message_text, reply_markup=keyboard)
 
