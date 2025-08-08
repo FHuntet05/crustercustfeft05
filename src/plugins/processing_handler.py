@@ -58,11 +58,16 @@ async def handle_task_actions(client: Client, query: CallbackQuery):
         await query.message.edit_text(f"✅ Tarea añadida al panel. Use `/p {count}` para configurarla.")
 
     elif action == "queuesingle":
-        await db_instance.update_task_config(task_id, "initial_message_id", query.message.id)
-        await db_instance.update_task(task_id, "status", "queued")
-        await query.message.edit_text("🔥 Tarea enviada a la forja...", parse_mode=ParseMode.HTML)
+        # Guardar referencia del mensaje y poner en cola
+        status_message_ref = {"chat_id": query.message.chat.id, "message_id": query.message.id}
+        await db_instance.tasks.update_one(
+            {"_id": ObjectId(task_id)},
+            {"$set": {"status": "queued", "status_message_ref": status_message_ref}}
+        )
+        await query.message.edit_text("⏳ <b>En Cola...</b>\nSu tarea será procesada en breve.", parse_mode=ParseMode.HTML)
 
     elif action == "delete":
+        if query.message.photo: await query.message.delete()
         await db_instance.delete_task_by_id(task_id)
         await query.message.edit_text("🗑️ Tarea cancelada y eliminada.")
 
@@ -80,13 +85,17 @@ async def handle_profile_and_panel_actions(client: Client, query: CallbackQuery)
             if not (preset := await db_instance.get_preset_by_id(preset_id)):
                 return await query.message.edit_text("❌ El perfil seleccionado ya no existe.")
             
-            await db_instance.update_task_config(task_id, "initial_message_id", query.message.id)
-            
+            # Guardar referencia del mensaje y poner en cola con el perfil
+            status_message_ref = {"chat_id": query.message.chat.id, "message_id": query.message.id}
             await db_instance.tasks.update_one(
                 {"_id": ObjectId(task_id)},
-                {"$set": {"processing_config": preset.get('config_data', {}), "status": "queued"}}
+                {"$set": {
+                    "processing_config": preset.get('config_data', {}), 
+                    "status": "queued",
+                    "status_message_ref": status_message_ref
+                }}
             )
-            await query.message.edit_text(f"✅ Perfil '<b>{preset['preset_name'].capitalize()}</b>' aplicado. La tarea ha sido enviada a la forja...", parse_mode=ParseMode.HTML)
+            await query.message.edit_text(f"✅ Perfil '<b>{preset['preset_name'].capitalize()}</b>' aplicado.\n⏳ <b>En Cola...</b>", parse_mode=ParseMode.HTML)
         
         elif action == "save" and parts[2] == "request":
             task_id = parts[3]
@@ -122,10 +131,16 @@ async def show_config_menu(client: Client, query: CallbackQuery):
     config = task.get('processing_config', {})
     
     if menu_type == "extract_audio":
-        await db_instance.update_task_config(task_id, "extract_audio", True)
-        await db_instance.update_task(task_id, "status", "queued")
-        await db_instance.update_task_config(task_id, "initial_message_id", query.message.id)
-        return await query.message.edit_text("✅ Tarea de extracción de audio enviada a la forja...", parse_mode=ParseMode.HTML)
+        status_message_ref = {"chat_id": query.message.chat.id, "message_id": query.message.id}
+        await db_instance.tasks.update_one(
+            {"_id": ObjectId(task_id)},
+            {"$set": {
+                "processing_config.extract_audio": True,
+                "status": "queued",
+                "status_message_ref": status_message_ref
+            }}
+        )
+        return await query.message.edit_text("✅ Tarea de extracción de audio enviada a la forja...\n⏳ <b>En Cola...</b>", parse_mode=ParseMode.HTML)
 
     keyboards = {
         "dlquality": build_detailed_format_menu(task_id, task.get('url_info', {}).get('formats', [])),
@@ -143,7 +158,9 @@ async def show_config_menu(client: Client, query: CallbackQuery):
     }
     
     if menu_type in keyboards:
-        return await query.message.edit_text(menu_messages[menu_type], reply_markup=keyboards[menu_type])
+        if query.message.photo: await query.message.delete()
+        target_message = await client.send_message(query.message.chat.id, menu_messages[menu_type], reply_markup=keyboards[menu_type]) if query.message.photo else await query.message.edit_text(menu_messages[menu_type], reply_markup=keyboards[menu_type])
+        return
 
     if not hasattr(client, 'user_data'): client.user_data = {}
     client.user_data[query.from_user.id] = {"active_config": {"task_id": task_id, "menu_type": menu_type, "source_message_id": query.message.id}}
@@ -213,7 +230,6 @@ async def handle_media_input(client: Client, message: Message):
     else:
         await client.send_message(user_id, f"{feedback}\n\nVolviendo al menú de configuración...", reply_markup=build_processing_menu(task_id, task['file_type'], task))
 
-# --- ESTA FUNCIÓN YA NO ES UN MANEJADOR DE EVENTOS, SINO UNA FUNCIÓN AUXILIAR ---
 async def handle_text_input(client: Client, message: Message):
     user_id, user_input = message.from_user.id, message.text.strip()
     
@@ -284,7 +300,7 @@ async def set_value_callback(client: Client, query: CallbackQuery):
         else: key, new_value = value.split("_", 1); await db_instance.update_task_config(task_id, f"transcode.{key}", new_value)
     
     elif config_type == "watermark":
-        action = parts[2]
+        action = parts[3] # El task_id es parts[2]
         if action == "remove": await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$unset": {"processing_config.watermark": ""}})
         elif action == "position": await db_instance.update_task_config(task_id, "watermark.position", parts[4])
         
@@ -306,12 +322,16 @@ async def set_value_callback(client: Client, query: CallbackQuery):
     config = task.get('processing_config', {})
     
     keyboard = build_processing_menu(task_id, task['file_type'], task)
-    if config_type in ["audioeffect", "trackopt", "transcode", "thumb_op"]:
-        keyboards = {"audioeffect": build_audio_effects_menu, "trackopt": build_tracks_menu, "transcode": build_transcode_menu, "thumb_op": build_thumbnail_menu}
-        keyboard = keyboards[config_type](task_id, config)
-    
-    message_text = "🛠️ Configuración actualizada."
-    if config_type == "watermark" and parts[2] == "position": message_text = "✅ Posición guardada. Volviendo al menú..."
+    if config_type in ["audioeffect", "trackopt", "transcode", "thumb_op", "watermark"]:
+        if config_type == "watermark" and parts[3] == "position":
+             message_text = "✅ Posición guardada. Volviendo al menú..."
+             keyboard = build_processing_menu(task_id, task['file_type'], task)
+        else:
+            keyboards = {"audioeffect": build_audio_effects_menu, "trackopt": build_tracks_menu, "transcode": build_transcode_menu, "thumb_op": build_thumbnail_menu, "watermark": build_watermark_menu}
+            keyboard = keyboards[config_type](task_id, config)
+            message_text = "🛠️ Configuración actualizada."
+    else:
+        message_text = "🛠️ Configuración actualizada."
     
     await query.message.edit_text(message_text, reply_markup=keyboard)
 
@@ -325,17 +345,30 @@ async def set_download_format(client: Client, query: CallbackQuery):
     task = await db_instance.get_task(task_id)
     if not task: return await query.message.edit_text("❌ Tarea no encontrada.")
     if query.message.photo: await query.message.delete()
-
+    
+    status_message_ref = {"chat_id": query.message.chat.id, "message_id": query.message.id}
     final_format_id = format_id
+    updates = {}
+
     if format_id == "bestaudio": final_format_id = downloader.get_best_audio_format_id(task.get('url_info', {}).get('formats', []))
     elif format_id == "bestvideo": final_format_id = downloader.get_best_video_format_id(task.get('url_info', {}).get('formats', []))
     elif format_id == "mp3":
         final_format_id = downloader.get_best_audio_format_id(task.get('url_info', {}).get('formats', []))
-        await db_instance.update_task_config(task_id, "audio_format", "mp3")
+        updates["processing_config.audio_format"] = "mp3"
     elif task['file_type'] == 'video':
         best_audio_id = downloader.get_best_audio_format_id(task.get('url_info', {}).get('formats', []))
         if best_audio_id: final_format_id = f"{format_id}+{best_audio_id}"
 
-    await db_instance.update_task_config(task_id, "download_format_id", final_format_id)
-    await db_instance.update_task(task_id, "status", "queued")
-    await client.send_message(query.from_user.id, "✅ Calidad seleccionada. La tarea ha sido enviada a la forja...")
+    updates["processing_config.download_format_id"] = final_format_id
+    updates["status"] = "queued"
+    updates["status_message_ref"] = status_message_ref
+
+    await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": updates})
+    
+    # Enviar la respuesta desde el cliente para asegurar la entrega
+    await client.edit_message_text(
+        chat_id=status_message_ref['chat_id'],
+        message_id=status_message_ref['message_id'],
+        text="✅ Calidad seleccionada.\n⏳ <b>En Cola...</b>",
+        parse_mode=ParseMode.HTML
+    )
