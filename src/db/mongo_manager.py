@@ -46,14 +46,14 @@ class Database:
             logger.info("Índices TTL de búsqueda verificados y/o creados.")
         except OperationFailure as e:
             if "Index already exists" in str(e) or "IndexOptionsConflict" in str(e):
-                logger.warning(f"No se crearon los índices porque ya existen o hay un conflicto. El bot continuará. Error: {e}")
+                logger.warning(f"No se crearon los índices porque ya existen o hay un conflicto. Error: {e}")
             else:
                 logger.error(f"Error inesperado al crear los índices de la DB: {e}", exc_info=True)
         finally:
             self._initialized = True
 
     async def add_task(self, user_id, file_type, file_name=None, file_size=None, url=None, file_id=None, 
-                         processing_config=None, url_info=None, status="pending_processing", custom_fields=None):
+                         processing_config=None, url_info=None, status="pending_processing", metadata=None, custom_fields=None):
         task_doc = {
             "user_id": int(user_id),
             "url": url,
@@ -67,11 +67,12 @@ class Database:
             "processing_config": processing_config or {},
             "url_info": url_info or {},
             "last_error": None,
-            "file_metadata": {
+            "file_metadata": metadata or {
                 "size": file_size,
                 "duration": None,
                 "resolution": None,
-                "bitrate": None
+                "bitrate": None,
+                "streams": []
             }
         }
         if custom_fields:
@@ -96,6 +97,9 @@ class Database:
 
     async def update_task_field(self, task_id: str, field: str, value):
         return await self.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": {field: value}})
+    
+    async def update_task_fields(self, task_id: str, updates: dict):
+        return await self.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": updates})
 
     async def delete_task_by_id(self, task_id: str):
         return await self.tasks.delete_one({"_id": ObjectId(task_id)})
