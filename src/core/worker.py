@@ -53,9 +53,16 @@ class ProgressTracker:
             return
         
         elapsed = current_time - self.start_time
-        speed = current / elapsed if elapsed > 0 else 0
-        eta = (total - current) / speed if speed > 0 else 0
-        percentage = (current / total) * 100 if total > 0 else 0
+        
+        if total > 0:
+            speed = current / elapsed if elapsed > 0 else 0
+            eta = (total - current) / speed if speed > 0 else float('inf')
+            percentage = (current / total) * 100
+        else:
+            # Manejar caso de tamaño total desconocido
+            speed = current / elapsed if elapsed > 0 else 0
+            eta = float('inf')
+            percentage = 0  # No se puede calcular el porcentaje
 
         text = format_status_message(
             operation=self.operation,
@@ -65,6 +72,7 @@ class ProgressTracker:
             total_bytes=total,
             speed=speed,
             eta=eta,
+            elapsed_time=elapsed,
             is_processing=is_processing
         )
         
@@ -96,13 +104,14 @@ class ProgressTracker:
     def ytdlp_hook(self, d):
         if d['status'] == 'downloading':
             total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-            if total_bytes > 0:
-                # El loop de eventos puede no estar corriendo en el hilo de yt-dlp,
-                # así que programamos la corutina de forma segura.
-                asyncio.run_coroutine_threadsafe(
-                    self.update_progress(d['downloaded_bytes'], total_bytes, is_processing=False),
-                    self.bot.loop
-                )
+            downloaded_bytes = d.get('downloaded_bytes', 0)
+            
+            # El loop de eventos puede no estar corriendo en el hilo de yt-dlp,
+            # así que programamos la corutina de forma segura.
+            asyncio.run_coroutine_threadsafe(
+                self.update_progress(downloaded_bytes, total_bytes, is_processing=False),
+                self.bot.loop
+            )
 
 async def _run_ffmpeg_process(cmd: str):
     process = await asyncio.create_subprocess_shell(cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -116,7 +125,8 @@ async def _run_ffmpeg_with_progress(tracker: ProgressTracker, cmd: str, input_pa
     total_duration_sec = float(duration_info.get('format', {}).get('duration', 0))
     if total_duration_sec <= 0:
         logger.warning("No se pudo obtener la duración. Ejecutando FFmpeg sin barra de progreso.")
-        await tracker.update_progress(0, 0)
+        tracker.set_operation("⚙️ Procesando...")
+        await tracker.update_progress(0, 0, is_processing=True)
         return await _run_ffmpeg_process(cmd)
 
     tracker.set_operation("⚙️ Procesando...")
@@ -156,7 +166,6 @@ async def process_media_task(bot: Client, task: dict):
         task = await db_instance.get_task(task_id)
         if not task: raise InvalidMediaError("Tarea no encontrada después de recargar.")
         
-        # Lógica de limpieza de carátulas: añadir a la lista antes de que empiece nada
         if thumbnail_path := task.get('processing_config', {}).get('thumbnail_path'):
             if os.path.exists(thumbnail_path):
                 files_to_clean.add(thumbnail_path)
@@ -191,7 +200,9 @@ async def process_media_task(bot: Client, task: dict):
         elif file_id := task.get('file_id'):
             tracker.set_operation("📥 Descargando")
             actual_download_path = os.path.join(dl_dir, filename)
-            await bot.download_media(message=file_id, file_name=actual_download_path, progress=tracker.pyrogram_callback)
+            # Pyrogram no nos da el tamaño total aquí, así que lo obtenemos de la tarea
+            total_size = task.get('file_metadata', {}).get('size', 0)
+            await bot.download_media(message=file_id, file_name=actual_download_path, progress=tracker.pyrogram_callback, progress_args=(total_size,))
         
         initial_size = os.path.getsize(actual_download_path) if os.path.exists(actual_download_path) else 0
 
@@ -199,11 +210,10 @@ async def process_media_task(bot: Client, task: dict):
         try:
             output_dir = os.path.join(OUTPUT_DIR, task_id); os.makedirs(output_dir, exist_ok=True); files_to_clean.add(output_dir)
             final_filename_base = sanitize_filename(task.get('processing_config', {}).get('final_filename', os.path.splitext(filename)[0]))
-            output_path_base = os.path.join(output_dir, f"{final_filename_base}") # Extensión se añade en ffmpeg.py
+            output_path_base = os.path.join(output_dir, f"{final_filename_base}")
             
-            await tracker.update_progress(0,1) # Mensaje "Preparando"
+            await tracker.update_progress(0,1, is_processing=True)
             
-            # El worker ahora es responsable de pasar la ruta de la carátula al constructor de comandos
             commands, definitive_output_path = ffmpeg.build_ffmpeg_command(task, actual_download_path, output_path_base)
             
             for i, cmd in enumerate(commands):
@@ -224,7 +234,7 @@ async def process_media_task(bot: Client, task: dict):
             
             tracker.set_operation("⬆️ Subiendo", final_filename)
             
-            upload_args = {'caption': caption, 'parse_mode': ParseMode.HTML, 'progress': tracker.pyrogram_callback}
+            upload_args = {'caption': caption, 'parse_mode': ParseMode.HTML, 'progress': tracker.pyrogram_callback, 'progress_args': (final_size,)}
             
             if final_path.endswith(('.mp4', '.mkv', '.webm')): await bot.send_video(user_id, video=final_path, **upload_args)
             elif final_path.endswith(('.mp3', '.flac', 'm4a', '.opus')): await bot.send_audio(user_id, audio=final_path, **upload_args)
@@ -262,7 +272,8 @@ async def process_metadata_task(bot: Client, task: dict):
         
         tracker.set_operation("📥 Descargando")
         file_path = os.path.join(dl_dir, task['original_filename'])
-        await bot.download_media(message=task['file_id'], file_name=file_path, progress=tracker.pyrogram_callback)
+        total_size = task.get('file_metadata', {}).get('size', 0)
+        await bot.download_media(message=task['file_id'], file_name=file_path, progress=tracker.pyrogram_callback, progress_args=(total_size,))
 
         media_info = get_media_info(file_path)
         if not media_info: raise InvalidMediaError("No se pudieron leer los metadatos del archivo descargado.")
@@ -311,7 +322,7 @@ async def worker_loop(bot_instance: Client):
                 
                 async def task_wrapper(task_doc):
                     try:
-                        if task_doc.get('status') == 'pending_metadata' or (not task_doc.get('processed_at') and task_doc.get('status') != 'completed'): # compatibilidad
+                        if task_doc.get('status') == 'pending_metadata' or (not task_doc.get('processed_at') and task_doc.get('status') != 'completed'):
                             await process_metadata_task(bot_instance, task_doc)
                         else:
                             await process_media_task(bot_instance, task_doc)

@@ -17,11 +17,10 @@ def get_greeting(user_id: int) -> str:
     return "Jefe" if user_id == ADMIN_USER_ID else "Usuario"
 
 def format_bytes(size_in_bytes) -> str:
-    if size_in_bytes is None or not isinstance(size_in_bytes, (int, float)): return "N/A"
+    if size_in_bytes is None or not isinstance(size_in_bytes, (int, float)) or size_in_bytes <= 0:
+        return "0 B"
     try:
         size = float(size_in_bytes)
-        if size < 0: return "N/A"
-        if size == 0: return "0 B"
         power = 1024
         n = 0
         power_labels = {0: 'B', 1: 'KB', 2: 'MB', 3: 'GB', 4: 'TB'}
@@ -50,8 +49,8 @@ def escape_html(text: str) -> str:
     if not isinstance(text, str): return ""
     return escape(text, quote=False)
 
-def _create_text_bar(percentage: float, length: int = 10, fill_char: str = '█', empty_char: str = '░') -> str:
-    if not 0 <= percentage <= 100: percentage = max(0, min(100, percentage))
+def _create_text_bar(percentage: float, length: int = 12, fill_char: str = '■', empty_char: str = '□') -> str:
+    if not 0 <= percentage <= 100: percentage = 0
     filled_len = int(length * percentage / 100)
     return fill_char * filled_len + empty_char * (length - filled_len)
 
@@ -81,47 +80,47 @@ def format_status_message(
     total_bytes: float,
     speed: float,
     eta: float,
+    elapsed_time: float,
     is_processing: bool = False
 ) -> str:
     """
-    Formatea el mensaje de estado con un diseño mejorado y una lógica corregida.
-    Esta función es ahora "pura": solo formatea datos, no realiza cálculos.
+    Formatea el mensaje de estado con el nuevo diseño solicitado y lógica robusta.
     """
+    short_filename = (filename[:50] + '...') if len(filename) > 53 else filename
     bar = _create_text_bar(percentage)
-    short_filename = (filename[:40] + '…') if len(filename) > 43 else filename
     
     op_map = {
-        "📥 Descargando": ("📥 <b>Descargando...</b>", "yt-dlp"),
-        "⚙️ Procesando": ("⚙️ <b>Procesando...</b>", "FFmpeg"),
-        "⬆️ Subiendo": ("⬆️ <b>Subiendo a Telegram...</b>", "Pyrogram")
+        "📥 Descargando": "#Downloading",
+        "⚙️ Procesando": "#Processing",
+        "⬆️ Subiendo": "#Uploading"
     }
-    # Obtener el título de la operación, si no, usar el texto original
-    op_title = op_map.get(operation.strip().replace("...", ""), (operation, "N/A"))[0]
+    status_tag = op_map.get(operation.strip().replace("...", ""), "#Working")
 
     lines = [
-        op_title,
+        f"<b>{operation}</b>",
         f"<code>{escape_html(short_filename)}</code>\n",
-        f"<b>{bar}</b>  {percentage:.1f}%",
+        f"[{bar}] {percentage:.2f}%"
     ]
 
     if is_processing:
-        # Lógica para FFmpeg (basado en tiempo)
         processed_str = format_time(processed_bytes)
-        total_str = format_time(total_bytes)
-        speed_str = f"{speed:.2f}x" if speed > 0 else "N/A"
-        lines.append(f"↳ {processed_str} de {total_str}")
+        total_str = format_time(total_bytes) if total_bytes > 0 else "??:??"
+        speed_str = f"{speed:.2f}x"
+        lines.append(f"┠ Processed: {processed_str} of {total_str}")
     else:
-        # Lógica para transferencias (basado en bytes)
         processed_str = format_bytes(processed_bytes)
-        total_str = format_bytes(total_bytes)
-        speed_str = f"{format_bytes(speed)}/s" if speed > 0 else "N/A"
-        lines.append(f"↳ {processed_str} de {total_str}")
+        total_str = format_bytes(total_bytes) if total_bytes > 0 else "???"
+        speed_str = f"{format_bytes(speed)}/s"
+        lines.append(f"┠ Processed: {processed_str} of {total_str}")
 
     lines.extend([
-        f"\n⚡️ <b>Velocidad:</b> {speed_str}",
-        f"⏳ <b>ETA:</b> {format_time(eta)}"
+        f"┠ Status: {status_tag}",
+        f"┠ ETA: {format_time(eta)}",
+        f"┠ Speed: {speed_str}",
+        f"┠ Elapsed: {int(elapsed_time)}s",
+        f"┖ Engine: JefesMediaSuite"
     ])
-
+    
     return "\n".join(lines)
 
 
