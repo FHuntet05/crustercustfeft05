@@ -46,10 +46,13 @@ async def _progress_callback_pyrogram(current, total, user_id, operation, filena
     eta = (total - current) / speed if speed > 0 else 0
     percentage = (current / total) * 100
     
+    # --- LÓGICA CORREGIDA ---
+    # Comprobación de seguridad para evitar AttributeError si message.from_user es None.
+    # Esto ocurre cuando el mensaje de estado es del propio bot.
     user_mention = "Usuario"
     if hasattr(ctx.message, 'from_user') and ctx.message.from_user:
         user_mention = ctx.message.from_user.mention
-
+    
     text = format_status_message(
         operation=operation, 
         filename=filename or ctx.task.get('original_filename', 'archivo'),
@@ -77,7 +80,7 @@ async def _run_ffmpeg_process(cmd: str):
 async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
     duration_info = get_media_info(input_path)
     total_duration_sec = float(duration_info.get('format', {}).get('duration', 0))
-    if total_duration_sec == 0: logger.warning("No se pudo obtener la duración.")
+    if total_duration_sec == 0: logger.warning("No se pudo obtener la duración. El progreso de FFmpeg no se mostrará.")
     
     time_pattern = re.compile(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})")
     process = await asyncio.create_subprocess_shell(cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -100,6 +103,7 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
             if not line: continue
             all_stderr_lines.append(line.strip())
             if match := time_pattern.search(line):
+                # El progreso solo se muestra si tenemos duración y un contexto de UI.
                 if total_duration_sec > 0 and ctx:
                     h, m, s, ms = map(int, match.groups())
                     processed_sec = h * 3600 + m * 60 + s + ms / 100
@@ -140,32 +144,25 @@ async def process_task(bot, task: dict):
         
         initial_text = f"Iniciando: <code>{escape_html(task.get('original_filename') or task.get('url', 'Tarea'))}</code>"
         
-        # --- NUEVO: Lógica para adoptar o crear un mensaje de estado ---
         if ref := task.get('status_message_ref'):
             try:
-                # Intenta "adoptar" y editar el mensaje que el usuario ya está viendo.
                 status_message = await bot.get_messages(ref['chat_id'], ref['message_id'])
                 await status_message.edit_text(initial_text, parse_mode=ParseMode.HTML)
             except Exception as e:
                 logger.warning(f"No se pudo adoptar el mensaje de estado {ref['message_id']} para la tarea {task_id}: {e}. Se creará uno nuevo.")
-                status_message = None # Forzar la creación de un nuevo mensaje.
+                status_message = None
 
         if not status_message:
-            # Comportamiento de fallback: si no hay referencia o falló la adopción, enviar un nuevo mensaje.
-            # Esto es clave para las tareas silenciosas (búsqueda de música) que no deben tener UI.
             if task.get('file_type') != 'audio' or 'download_format_id' not in config:
                  try:
                      status_message = await bot.send_message(user_id, initial_text, parse_mode=ParseMode.HTML)
                  except Exception:
-                    # Si no se puede ni enviar un mensaje nuevo, es un error fatal para esta tarea.
                     raise Exception("No se pudo enviar el mensaje de estado inicial.")
 
         global progress_tracker
-        # Solo rastrear el progreso si hay un mensaje que actualizar.
         if status_message:
             progress_tracker[user_id] = ProgressContext(bot, status_message, task, asyncio.get_running_loop())
         
-        # --- META-TAREAS (UNIÓN Y COMPRESIÓN) ---
         if task.get('file_type') == 'join_operation':
             source_task_ids = config.get('source_task_ids', [])
             if not source_task_ids: raise Exception("Tarea de unión sin videos fuente.")
@@ -183,7 +180,6 @@ async def process_task(bot, task: dict):
                 dl_path = os.path.join(join_dir, filename)
                 
                 prog_args = (user_id, f"📥 Descargando ({i+1}/{len(source_task_ids)})...", filename)
-                # Solo mostrar progreso si hay UI
                 progress_fn = _progress_callback_pyrogram if status_message else None
                 await bot.download_media(message=source_task['file_id'], file_name=dl_path, progress=progress_fn, progress_args=prog_args)
                 downloaded_files.append(dl_path)
@@ -244,13 +240,11 @@ async def process_task(bot, task: dict):
             if status_message: await status_message.delete()
             return
             
-        # --- Flujo de procesamiento estándar ---
         actual_download_path = ""
         if url := task.get('url'):
             format_id = config.get('download_format_id')
             if not format_id: raise Exception("La tarea de URL no tiene 'download_format_id'. Flujo interrumpido.")
             
-            # Pasar progress_tracker solo si hay un mensaje de estado que actualizar
             tracker_to_use = progress_tracker if status_message else None
             actual_download_path = await asyncio.to_thread(downloader.download_from_url, url, os.path.join(DOWNLOAD_DIR, task_id), format_id, progress_tracker=tracker_to_use, user_id=user_id)
             if not actual_download_path: raise Exception("La descarga desde la URL falló.")
@@ -286,16 +280,13 @@ async def process_task(bot, task: dict):
         
         for i, cmd in enumerate(commands):
             if i == len(commands) - 1:
-                # El último comando (o único) puede usar la barra de progreso.
                 if status_message:
                     await _run_ffmpeg_with_progress(user_id, cmd, actual_download_path)
                 else:
                     await _run_ffmpeg_process(cmd)
             else:
-                # Los comandos intermedios (ej. paleta de GIF) se ejecutan sin progreso.
                 await _run_ffmpeg_process(cmd)
 
-        # Determinar el archivo final correcto después de la ejecución de comandos.
         final_output_path = glob.glob(f"{os.path.splitext(output_path)[0]}.*")
         if not final_output_path: raise Exception(f"FFmpeg finalizó pero no se encontró ningún archivo de salida en {output_path}")
         final_output_path = final_output_path[0]
@@ -324,7 +315,6 @@ async def process_task(bot, task: dict):
         await db_instance.update_task(task_id, "status", "error")
         await db_instance.update_task(task_id, "last_error", str(e))
         
-        # Intentar editar el mensaje de estado con el error o enviar uno nuevo.
         if status_message:
             try:
                 await status_message.edit_text(error_message, parse_mode=ParseMode.HTML)

@@ -15,12 +15,29 @@ def get_media_info(file_path: str) -> dict:
         logger.error(f"ffprobe no puede encontrar el archivo: {file_path}")
         return {}
         
+    # --- LÓGICA CORREGIDA ---
+    # Se pasa el comando como una lista y se usa shell=False.
+    # Esto es más seguro y robusto, especialmente con rutas que contienen
+    # caracteres especiales, evitando errores de "No such file or directory".
     command = [
-        "ffprobe", "-v", "error", "-show_format", "-show_streams",
-        "-of", "default=noprint_wrappers=1", "-print_format", "json", shlex.quote(file_path)
+        "ffprobe",
+        "-v", "error",
+        "-show_format",
+        "-show_streams",
+        "-of", "default=noprint_wrappers=1",
+        "-print_format", "json",
+        file_path
     ]
     try:
-        process = subprocess.Popen(shlex.join(command), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, encoding='utf-8')
+        # Usar shell=False y pasar la lista de comandos directamente.
+        process = subprocess.Popen(
+            command,
+            shell=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            encoding='utf-8'
+        )
         stdout, stderr = process.communicate(timeout=60)
         
         if process.returncode != 0:
@@ -149,8 +166,6 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
     final_command = " ".join(part for part in command_parts if part)
     logger.info(f"Comando FFmpeg estándar construido: {final_command}")
     return [final_command]
-
-# --- NUEVAS FUNCIONES AUXILIARES ---
 
 def build_join_command(file_list_path: str, output_path: str) -> str:
     """Construye un comando para unir videos desde una lista de archivos."""
