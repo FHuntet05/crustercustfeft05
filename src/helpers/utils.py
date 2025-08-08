@@ -82,7 +82,10 @@ async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
         try:
             await ctx.bot.edit_message_text(chat_id=ctx.message.chat.id, message_id=ctx.message.id, text=text, parse_mode=ParseMode.HTML)
             ctx.last_edit_time = current_time
-        except Exception: pass
+        except Exception as e:
+            # --- LÓGICA CORREGIDA ---
+            # Registrar el error en lugar de ignorarlo silenciosamente.
+            logger.warning(f"No se pudo editar el mensaje de estado {ctx.message.id} para el usuario {user_id}: {e}")
 
 def _progress_hook_yt_dlp(d, progress_tracker: dict):
     user_id = d.get('user_id')

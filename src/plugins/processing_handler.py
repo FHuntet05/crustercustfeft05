@@ -220,15 +220,35 @@ async def handle_media_input(client: Client, message: Message):
     await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, update_query)
     del client.user_data[user_id]["active_config"]
     
-    await client.delete_messages(user_id, [source_message_id, message.id])
+    # --- LÓGICA CORREGIDA ---
+    # Eliminar solo el mensaje del usuario que contenía el archivo.
+    await client.delete_messages(user_id, message.id)
     
     task = await db_instance.get_task(task_id)
-    if not task: return
+    if not task:
+        # Si la tarea desaparece, no se puede continuar. Informar al usuario.
+        return await client.edit_message_text(
+            chat_id=user_id,
+            message_id=source_message_id,
+            text="❌ Error crítico: La tarea asociada desapareció."
+        )
 
     if menu_type == "watermark_image":
-        await client.send_message(user_id, feedback, reply_markup=build_position_menu(task_id, "config_watermark"))
+        # Para la marca de agua, se necesita un submenú de posición.
+        await client.edit_message_text(
+            chat_id=user_id,
+            message_id=source_message_id,
+            text=feedback,
+            reply_markup=build_position_menu(task_id, "config_watermark")
+        )
     else:
-        await client.send_message(user_id, f"{feedback}\n\nVolviendo al menú de configuración...", reply_markup=build_processing_menu(task_id, task['file_type'], task))
+        # Para los demás casos, editar el mensaje original para mostrar el menú principal.
+        await client.edit_message_text(
+            chat_id=user_id,
+            message_id=source_message_id,
+            text=f"{feedback}\n\nVolviendo al menú de configuración...",
+            reply_markup=build_processing_menu(task_id, task['file_type'], task)
+        )
 
 async def handle_text_input(client: Client, message: Message):
     user_id, user_input = message.from_user.id, message.text.strip()
@@ -266,19 +286,30 @@ async def handle_text_input(client: Client, message: Message):
             feedback = "✅ Tags de audio actualizados."
         elif menu_type == "watermark_text":
             await db_instance.update_task_config(task_id, "watermark", {"type": "text", "text": user_input})
-            await client.delete_messages(user_id, [source_message_id, message.id])
+            await client.delete_messages(user_id, message.id) # Solo borrar el mensaje del usuario
             del client.user_data[user_id]['active_config']
-            await client.send_message(user_id, "✅ Texto recibido. Ahora, elija la posición:", reply_markup=build_position_menu(task_id, "config_watermark"))
+            await client.edit_message_text(
+                chat_id=user_id,
+                message_id=source_message_id,
+                text="✅ Texto recibido. Ahora, elija la posición:",
+                reply_markup=build_position_menu(task_id, "config_watermark")
+            )
             return
         else:
             return
         
         del client.user_data[user_id]['active_config']
-        await client.delete_messages(user_id, [source_message_id, message.id])
+        await client.delete_messages(user_id, message.id)
         
         task = await db_instance.get_task(task_id)
         if task:
-            await client.send_message(user_id, f"{feedback}\n\nVolviendo al menú de configuración...", reply_markup=build_processing_menu(task_id, task['file_type'], task), parse_mode=ParseMode.HTML)
+            await client.edit_message_text(
+                chat_id=user_id,
+                message_id=source_message_id,
+                text=f"{feedback}\n\nVolviendo al menú de configuración...",
+                reply_markup=build_processing_menu(task_id, task['file_type'], task),
+                parse_mode=ParseMode.HTML
+            )
 
     except Exception as e:
         logger.error(f"Error procesando entrada de config '{menu_type}': {e}")
@@ -338,7 +369,7 @@ async def set_value_callback(client: Client, query: CallbackQuery):
     if config_type == "transcode":
         keyboard = build_transcode_menu(task_id)
     elif config_type == "watermark":
-        if parts[3] == "position":
+        if len(parts) > 3 and parts[3] == "position":
             message_text = "✅ Posición guardada. Volviendo al menú..."
             keyboard = build_processing_menu(task_id, task['file_type'], task)
         else:
