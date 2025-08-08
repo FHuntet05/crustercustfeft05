@@ -217,11 +217,16 @@ async def pr_delete_command(client: Client, message: Message):
         parse_mode=ParseMode.HTML
     )
 
-@Client.on_message(filters.media & filters.private)
+# --- ARQUITECTURA CORREGIDA: GATEKEEPER PARA MEDIA ---
+@Client.on_message(filters.media & filters.private, group=1)
 async def any_file_handler(client: Client, message: Message):
     user = message.from_user
-    # La propagación se detiene en `processing_handler` si es necesario
-    
+    # Este manejador solo debe actuar si el usuario NO está en un modo de configuración activa.
+    # Si lo está, detenemos la propagación para permitir que el manejador de `processing_handler` actúe.
+    if hasattr(client, 'user_data') and user.id in client.user_data and client.user_data[user.id].get("active_config"):
+        message.stop_propagation()
+        return
+
     original_media_object, file_type = None, None
     if message.video: original_media_object, file_type = message.video, 'video'
     elif message.audio: original_media_object, file_type = message.audio, 'audio'
@@ -305,228 +310,11 @@ async def text_gatekeeper_handler(client: Client, message: Message):
     if text.startswith('/'):
         return
 
-    # PRIORIDAD 1: ¿El usuario está en un modo de configuración activa?
     if hasattr(client, 'user_data') and user.id in client.user_data and client.user_data[user.id].get("active_config"):
         return await processing_handler.handle_text_input(client, message)
 
-    # PRIORIDAD 2: ¿Es una URL?
     url_match = re.search(URL_REGEX, text)
     if url_match:
         return await handle_url_input(client, message, url_match.group(0))
 
-    # PRIORIDAD 3 (Fallback): Tratar como una búsqueda de música
     await handle_music_search(client, message, text)
-
-
-@Client.on_callback_query(filters.regex(r"^join_"))
-async def handle_join_actions(client: Client, query: CallbackQuery):
-    await query.answer()
-    user = query.from_user
-    
-    if not hasattr(client, 'user_data') or not (join_data := client.user_data.get(user.id, {}).get("join_mode")):
-        return await query.message.edit_text("❌ El modo de unión ha expirado. Por favor, inicie de nuevo con /join.")
-
-    parts = query.data.split("_")
-    action = parts[1]
-
-    if action == "cancel":
-        del client.user_data[user.id]["join_mode"]
-        return await query.message.edit_text("Operación de unión cancelada.")
-
-    if action == "select":
-        task_id = parts[2]
-        selected_ids = join_data["selected_ids"]
-        if task_id in selected_ids:
-            selected_ids.remove(task_id)
-        else:
-            selected_ids.append(task_id)
-        
-        keyboard = build_join_selection_keyboard(join_data["available_tasks"], selected_ids)
-        text = (f"🎬 <b>Modo de Unión de Videos</b>\n\n"
-                f"Seleccionados: <b>{len(selected_ids)} video(s)</b>. "
-                "Seleccione los videos que desea unir en el orden deseado.")
-        await query.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
-
-    elif action == "confirm":
-        selected_ids = join_data["selected_ids"]
-        if len(selected_ids) < 2:
-            return await query.message.edit_text("❌ Necesita seleccionar al menos 2 videos para unir.")
-
-        # --- NUEVO: Guardar referencia del mensaje para el worker ---
-        status_message_ref = {"chat_id": query.message.chat.id, "message_id": query.message.id}
-
-        join_task_id = await db_instance.add_task(
-            user_id=user.id, file_type='join_operation',
-            file_name=f"Union de {len(selected_ids)} videos.mp4",
-            processing_config={"source_task_ids": [ObjectId(tid) for tid in selected_ids]},
-            status='queued',
-            # Añadir la referencia del mensaje al crear la meta-tarea
-            custom_fields={"status_message_ref": status_message_ref} 
-        )
-
-        await db_instance.tasks.delete_many({ "_id": {"$in": [ObjectId(tid) for tid in selected_ids]} })
-        del client.user_data[user.id]["join_mode"]
-        await query.message.edit_text(f"✅ ¡Perfecto! La tarea para unir <b>{len(selected_ids)}</b> videos ha sido enviada a la forja.\n⏳ <b>En Cola...</b>", parse_mode=ParseMode.HTML)
-
-
-@Client.on_callback_query(filters.regex(r"^zip_"))
-async def handle_zip_actions(client: Client, query: CallbackQuery):
-    await query.answer()
-    user = query.from_user
-    
-    if not hasattr(client, 'user_data') or not (zip_data := client.user_data.get(user.id, {}).get("zip_mode")):
-        return await query.message.edit_text("❌ El modo de compresión ha expirado. Por favor, inicie de nuevo con /zip.")
-
-    parts = query.data.split("_")
-    action = parts[1]
-
-    if action == "cancel":
-        del client.user_data[user.id]["zip_mode"]
-        return await query.message.edit_text("Operación de compresión cancelada.")
-
-    if action == "select":
-        task_id = parts[2]
-        selected_ids = zip_data["selected_ids"]
-        if task_id in selected_ids:
-            selected_ids.remove(task_id)
-        else:
-            selected_ids.append(task_id)
-        
-        keyboard = build_zip_selection_keyboard(zip_data["available_tasks"], selected_ids)
-        text = (f"📦 <b>Modo de Compresión ZIP</b>\n\n"
-                f"Seleccionados: <b>{len(selected_ids)} tarea(s)</b>. "
-                "Seleccione las tareas a comprimir.")
-        await query.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
-
-    elif action == "confirm":
-        selected_ids = zip_data["selected_ids"]
-        if not selected_ids:
-            return await query.message.edit_text("❌ No ha seleccionado ninguna tarea para comprimir.")
-        
-        # --- NUEVO: Guardar referencia del mensaje para el worker ---
-        status_message_ref = {"chat_id": query.message.chat.id, "message_id": query.message.id}
-        
-        zip_task_id = await db_instance.add_task(
-            user_id=user.id, file_type='zip_operation',
-            file_name=f"Compresion_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.zip",
-            processing_config={"source_task_ids": [ObjectId(tid) for tid in selected_ids]},
-            status='queued',
-            custom_fields={"status_message_ref": status_message_ref} 
-        )
-
-        await db_instance.tasks.delete_many({ "_id": {"$in": [ObjectId(tid) for tid in selected_ids]} })
-        del client.user_data[user.id]["zip_mode"]
-        await query.message.edit_text(f"✅ ¡Hecho! La tarea para comprimir <b>{len(selected_ids)}</b> archivos ha sido enviada a la forja.\n⏳ <b>En Cola...</b>", parse_mode=ParseMode.HTML)
-
-
-@Client.on_callback_query(filters.regex(r"^batch_"))
-async def handle_batch_actions(client: Client, query: CallbackQuery):
-    await query.answer()
-    user = query.from_user
-    parts = query.data.split("_")
-    action = parts[1]
-
-    if action == "cancel":
-        return await query.message.edit_text("Operación en lote cancelada.")
-
-    if action == "apply":
-        profile_id = parts[2]
-        profile_name = "Default"
-        if profile_id != "default":
-            profile = await db_instance.get_preset_by_id(profile_id)
-            if not profile: return await query.message.edit_text("❌ El perfil seleccionado ya no existe.")
-            profile_name = profile.get('preset_name', 'N/A').capitalize()
-        
-        pending_tasks_count = await db_instance.tasks.count_documents({"user_id": user.id, "status": "pending_processing"})
-        await query.message.edit_text(
-            f"¿Seguro que desea procesar las <b>{pending_tasks_count}</b> tareas pendientes con el perfil '<b>{profile_name}</b>'?",
-            reply_markup=build_confirmation_keyboard(f"batch_confirm_{profile_id}", "batch_cancel"),
-            parse_mode=ParseMode.HTML
-        )
-    
-    elif action == "confirm":
-        profile_id = parts[2]
-        profile_config = {}
-        if profile_id != "default":
-            profile = await db_instance.get_preset_by_id(profile_id)
-            if not profile: return await query.message.edit_text("❌ El perfil seleccionado ya no existe.")
-            profile_config = profile.get('config_data', {})
-        
-        # Para lotes, no pasamos un mensaje de estado, el worker creará uno por tarea.
-        update_result = await db_instance.tasks.update_many(
-            {"user_id": user.id, "status": "pending_processing"},
-            {"$set": {"status": "queued", "processing_config": profile_config}}
-        )
-        await query.message.edit_text(
-            f"✅ ¡Hecho! <b>{update_result.modified_count}</b> tareas han sido enviadas a la forja.",
-            parse_mode=ParseMode.HTML
-        )
-
-@Client.on_callback_query(filters.regex(r"^song_select_"))
-async def select_song_from_search(client: Client, query: CallbackQuery):
-    await query.answer()
-    user = query.from_user
-    res_id = query.data.split("_")[2]
-
-    await query.message.delete()
-    
-    status_message = await client.send_message(user.id, "🔎 Obteniendo información de la canción seleccionada...")
-
-    try:
-        search_result = await db_instance.search_results.find_one({"_id": ObjectId(res_id)})
-        if not search_result:
-            return await status_message.edit_text("❌ Error: Resultado de búsqueda no encontrado o ha expirado.")
-
-        url_to_fetch = search_result.get('url')
-        if not url_to_fetch:
-            search_term = search_result.get('search_term', f"{search_result.get('title')} {search_result.get('artist')}")
-            url_to_fetch = f"ytsearch:{search_term}"
-
-        info = await asyncio.to_thread(downloader.get_url_info, url_to_fetch)
-        if not info or not info.get('formats'):
-            return await status_message.edit_text("❌ No pude obtener información de ese enlace.")
-
-        file_type = 'audio'
-        best_audio_id = downloader.get_best_audio_format_id(info.get('formats', []))
-        processing_config = { "download_format_id": best_audio_id, "audio_format": "mp3" }
-
-        # Este es el único flujo que debe ser "silencioso". No se pasa status_message_ref.
-        task_id = await db_instance.add_task(
-            user_id=user.id, file_type=file_type, url=info['url'],
-            file_name=sanitize_filename(info['title']), url_info=info,
-            processing_config=processing_config, status="queued"
-        )
-        if not task_id:
-            return await status_message.edit_text("❌ Error al crear la tarea en la DB.")
-        
-        await status_message.edit_text(
-            f"✅ Canción '<b>{escape_html(info['title'])}</b>' seleccionada y enviada a la forja para ser procesada.",
-            parse_mode=ParseMode.HTML
-        )
-
-    except Exception as e:
-        logger.error(f"Error en select_song_from_search: {e}", exc_info=True)
-        await status_message.edit_text(f"❌ Ocurrió un error inesperado: <code>{escape_html(str(e))}</code>")
-
-@Client.on_callback_query(filters.regex(r"^search_page_"))
-async def handle_search_pagination(client: Client, query: CallbackQuery):
-    """Maneja la paginación de los resultados de búsqueda."""
-    await query.answer()
-    parts = query.data.split("_")
-    search_id, page = parts[2], int(parts[3])
-
-    all_results = await db_instance.search_results.find(
-        {"search_id": search_id}
-    ).to_list(length=100)
-
-    if not all_results:
-        return await query.message.edit_text("❌ La sesión de búsqueda ha expirado o no se encontraron resultados.")
-
-    keyboard = build_search_results_keyboard(all_results, search_id, page=page)
-    await query.message.edit_reply_markup(reply_markup=keyboard)
-
-@Client.on_callback_query(filters.regex(r"^cancel_search_"))
-async def cancel_search_session(client: Client, query: CallbackQuery):
-    """Cancela una sesión de búsqueda y elimina el mensaje."""
-    await query.answer("Búsqueda cancelada.")
-    await query.message.delete()
