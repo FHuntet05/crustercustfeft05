@@ -24,25 +24,34 @@ from . import processing_handler
 logger = logging.getLogger(__name__)
 
 URL_REGEX = r'(https?://[^\s]+)'
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
+ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")
 
 @Client.on_message(filters.command("start") & filters.private)
 async def start_command(client: Client, message: Message):
     user = message.from_user
     greeting_prefix = get_greeting(user.id)
-    await db_instance.get_user_settings(user.id)
+    
+    user_settings = await db_instance.get_user_settings(user.id)
+    user_state = user_settings.get("user_state", {})
+    if user_state.get("status") != "idle":
+        if source_message_id := user_state.get("data", {}).get("source_message_id"):
+            try:
+                await client.delete_messages(user.id, source_message_id)
+            except Exception:
+                pass
+    
+    await db_instance.set_user_state(user.id, "idle")
+
     start_message = (
-        f"A sus órdenes, {greeting_prefix}, bienvenido a la <b>Suite de Medios v13.0 (Robustez)</b>.\n\n"
-        "Esta versión introduce mejoras críticas de estabilidad y gestión de recursos.\n\n"
+        f"A sus órdenes, {greeting_prefix}, bienvenido a la <b>Suite de Medios v13.2 (Estabilidad UI)</b>.\n\n"
+        "Sistema de estado reiniciado. Estoy listo para nuevas tareas.\n\n"
         "<b>Comandos Principales:</b>\n"
         "• /panel - Muestra su mesa de trabajo con detalles.\n"
         "• /p <code>[ID]</code> - Abre el menú de una tarea.\n"
         "• /p clean <code>[ID]</code> - Elimina una tarea específica.\n"
-        "• /join - Une videos del panel.\n"
-        "• /zip - Comprime tareas del panel en un ZIP.\n"
-        "• /p_all - Procesa todas las tareas del panel a la vez.\n"
+        "• /join, /zip, /p_all - Acciones en lote.\n"
         "• /profiles - Gestiona sus perfiles.\n\n"
-        "Envíe un archivo, un enlace de YouTube, o un texto para buscar música."
+        "Envíe un archivo, enlace de YouTube o un texto para buscar música."
     )
     await message.reply(start_message, parse_mode=ParseMode.HTML)
 
@@ -101,6 +110,17 @@ async def process_command(client: Client, message: Message):
     else:
         await message.reply(f"❌ ID inválido. Tiene {len(pending_tasks)} tareas en su panel.")
 
+async def reset_user_state_if_needed(client: Client, user_id: int):
+    user_state = await db_instance.get_user_state(user_id)
+    if user_state.get("status") != "idle":
+        logger.warning(f"Reseteando estado obsoleto '{user_state.get('status')}' para el usuario {user_id}.")
+        if source_message_id := user_state.get("data", {}).get("source_message_id"):
+            try:
+                await client.delete_messages(user_id, source_message_id)
+            except Exception:
+                pass
+        await db_instance.set_user_state(user_id, "idle")
+
 @Client.on_message(filters.media & filters.private, group=1)
 async def any_file_handler(client: Client, message: Message):
     user = message.from_user
@@ -110,16 +130,14 @@ async def any_file_handler(client: Client, message: Message):
         message.stop_propagation()
         return
 
-    metadata = {}
-    status = "pending_processing"
+    await reset_user_state_if_needed(client, user.id)
+
+    metadata, status = {}, "pending_processing"
     reply_message_text = "✅ Archivo recibido y añadido al panel."
 
     if message.video:
         media, file_type = message.video, 'video'
-        metadata = {
-            "size": media.file_size, "duration": media.duration,
-            "resolution": f"{media.width}x{media.height}" if media.width else None
-        }
+        metadata = {"size": media.file_size, "duration": media.duration, "resolution": f"{media.width}x{media.height}" if media.width else None}
     elif message.audio:
         media, file_type = message.audio, 'audio'
         metadata = {"size": media.file_size, "duration": media.duration}
@@ -132,20 +150,15 @@ async def any_file_handler(client: Client, message: Message):
 
     final_file_name = sanitize_filename(getattr(media, 'file_name', f"{file_type}_{int(datetime.utcnow().timestamp())}"))
     
-    task_id = await db_instance.add_task(
-        user_id=user.id, file_type=file_type, file_name=final_file_name,
-        file_id=media.file_id, file_size=media.file_size,
-        status=status, metadata=metadata
-    )
+    task_id = await db_instance.add_task(user_id=user.id, file_type=file_type, file_name=final_file_name, file_id=media.file_id,
+                                       file_size=media.file_size, status=status, metadata=metadata)
 
-    if not task_id:
-        return await message.reply("❌ Hubo un error al registrar la tarea en la base de datos.")
+    if not task_id: return await message.reply("❌ Hubo un error al registrar la tarea en la base de datos.")
 
     status_msg = await message.reply(reply_message_text, parse_mode=ParseMode.HTML)
     
     if status == "pending_processing":
-        user_presets = await db_instance.get_user_presets(user.id)
-        if user_presets:
+        if user_presets := await db_instance.get_user_presets(user.id):
             keyboard = build_profiles_keyboard(str(task_id), user_presets)
             await status_msg.edit("¿Desea aplicar un perfil?", reply_markup=keyboard)
         else:
@@ -154,52 +167,49 @@ async def any_file_handler(client: Client, message: Message):
 
 async def handle_url_input(client: Client, message: Message, url: str):
     user = message.from_user
-    await db_instance.set_user_state(user.id, "busy")
     status_message = await message.reply("🔎 Analizando enlace...", parse_mode=ParseMode.HTML)
     
     try:
+        await db_instance.set_user_state(user.id, "busy", data={"source_message_id": status_message.id})
         info = await asyncio.to_thread(downloader.get_url_info, url)
+        
         if not info:
-            await db_instance.set_user_state(user.id, "idle")
-            return await status_message.edit_text("❌ No pude obtener información de ese enlace. Puede que sea privado o esté restringido.")
+            raise ValueError("No pude obtener información de ese enlace. Puede que sea privado o esté restringido.")
         
         if info.get("is_playlist"):
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"📥 Procesar Primer Video ({info['playlist_count']} en total)", callback_data=f"playlist_process_first_{info['id']}")]
             ])
             await status_message.edit_text(f"He detectado una playlist llamada '<b>{escape_html(info['title'])}</b>'. ¿Cómo desea proceder?", reply_markup=keyboard, parse_mode=ParseMode.HTML)
-            await db_instance.set_user_state(user.id, "awaiting_playlist_action", {"playlist_info": info})
+            await db_instance.set_user_state(user.id, "awaiting_playlist_action", {"playlist_info": info, "source_message_id": status_message.id})
             return
 
-        await db_instance.set_user_state(user.id, "awaiting_quality_selection", {"url_info": info})
-        
-        caption_parts = [
-            f"<b>📝 Nombre:</b> {escape_html(info['title'])}",
-            f"<b>🕓 Duración:</b> {format_time(info.get('duration'))}",
-            f"<b>📢 Canal:</b> {escape_html(info.get('uploader'))}",
-            "\nElija la calidad para la descarga:"
-        ]
-        caption = "\n".join(caption_parts)
-        
+        caption = (f"<b>📝 Nombre:</b> {escape_html(info['title'])}\n"
+                   f"<b>🕓 Duración:</b> {format_time(info.get('duration'))}\n"
+                   f"<b>📢 Canal:</b> {escape_html(info.get('uploader'))}\n\n"
+                   "Elija la calidad para la descarga:")
         keyboard = build_detailed_format_menu("url_selection", info['formats'])
+        
+        await db_instance.set_user_state(user.id, "awaiting_quality_selection", {"url_info": info, "source_message_id": status_message.id})
         
         if info.get('thumbnail'):
             await status_message.delete()
-            await client.send_photo(chat_id=user.id, photo=info['thumbnail'], caption=caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+            sent_message = await client.send_photo(user.id, photo=info['thumbnail'], caption=caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+            await db_instance.set_user_state(user.id, "awaiting_quality_selection", {"url_info": info, "source_message_id": sent_message.id})
         else:
             await status_message.edit_text(caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
     except AuthenticationError as e:
-        await db_instance.set_user_state(user.id, "idle")
-        logger.error(f"Error de autenticación procesando URL {url}: {e.message}")
-        error_text = f"❌ <b>Error de Autenticación con YouTube</b>\n\nNo pude procesar el enlace. Esto suele ocurrir cuando las cookies de autenticación han expirado."
-        await status_message.edit_text(error_text, parse_mode=ParseMode.HTML)
-        if ADMIN_USER_ID != 0:
-            await client.send_message(ADMIN_USER_ID, f"⚠️ <b>Alerta de Sistema:</b>\n\nFallo de autenticación de YouTube detectado. Por favor, actualice el archivo <code>youtube_cookies.txt</code> para restaurar la funcionalidad completa.", parse_mode=ParseMode.HTML)
+        await status_message.edit_text(f"❌ <b>Error de Autenticación con YouTube</b>\n\nNo pude procesar el enlace. Las cookies de autenticación pueden haber expirado.", parse_mode=ParseMode.HTML)
+        if ADMIN_USER_ID and ADMIN_USER_ID.isdigit():
+            await client.send_message(int(ADMIN_USER_ID), f"⚠️ <b>Alerta:</b> Fallo de autenticación de YouTube. Actualice <code>youtube_cookies.txt</code>.", parse_mode=ParseMode.HTML)
     except Exception as e:
-        await db_instance.set_user_state(user.id, "idle")
         logger.error(f"Error procesando URL {url}: {e}")
         await status_message.edit_text(f"❌ Ocurrió un error: <code>{escape_html(str(e))}</code>")
+    finally:
+        current_state = await db_instance.get_user_state(user.id)
+        if current_state.get("status") == "busy":
+            await db_instance.set_user_state(user.id, "idle")
 
 async def handle_music_search(client: Client, message: Message, query: str):
     user = message.from_user
@@ -227,9 +237,7 @@ async def text_gatekeeper_handler(client: Client, message: Message):
     if hasattr(client, 'user_data') and client.user_data.get(user.id, {}).get("active_config"):
         return await processing_handler.handle_text_input(client, message)
 
-    user_state = await db_instance.get_user_state(user.id)
-    if user_state.get("status") != "idle":
-        return await message.reply("Estoy esperando que complete una acción anterior. Por favor, use los botones del menú.")
+    await reset_user_state_if_needed(client, user.id)
 
     url_match = re.search(URL_REGEX, text)
     if url_match:
@@ -240,17 +248,10 @@ async def text_gatekeeper_handler(client: Client, message: Message):
 @Client.on_callback_query(filters.regex(r"^(join_|zip_|batch_|song_|search_|cancel_search_|playlist_)"))
 async def combined_utility_callbacks(client: Client, query: CallbackQuery):
     data = query.data
-    if data.startswith("join_"):
-        await processing_handler.handle_join_actions(client, query)
-    elif data.startswith("zip_"):
-        await processing_handler.handle_zip_actions(client, query)
-    elif data.startswith("batch_"):
-        await processing_handler.handle_batch_actions(client, query)
-    elif data.startswith("song_select_"):
-        await processing_handler.select_song_from_search(client, query)
-    elif data.startswith("search_page_"):
-        await processing_handler.handle_search_pagination(client, query)
-    elif data.startswith("cancel_search_"):
-        await processing_handler.cancel_search_session(client, query)
-    elif data.startswith("playlist_"):
-        await processing_handler.handle_playlist_action(client, query)
+    if data.startswith("join_"): await processing_handler.handle_join_actions(client, query)
+    elif data.startswith("zip_"): await processing_handler.handle_zip_actions(client, query)
+    elif data.startswith("batch_"): await processing_handler.handle_batch_actions(client, query)
+    elif data.startswith("song_select_"): await processing_handler.select_song_from_search(client, query)
+    elif data.startswith("search_page_"): await processing_handler.handle_search_pagination(client, query)
+    elif data.startswith("cancel_search_"): await processing_handler.cancel_search_session(client, query)
+    elif data.startswith("playlist_"): await processing_handler.handle_playlist_action(client, query)

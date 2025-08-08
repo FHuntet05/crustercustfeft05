@@ -86,12 +86,11 @@ def build_detailed_format_menu(task_id: str, formats: list) -> InlineKeyboardMar
     keyboard, row = [], []
     
     video_formats = sorted(
-        [f for f in formats if f.get('vcodec') not in ['none', None] and f.get('height') and f.get('height') >= 144],
+        [f for f in formats if f.get('vcodec') not in ['none', None] and f.get('height')],
         key=lambda x: (x.get('height', 0), x.get('fps', 0) or 0),
         reverse=True
     )
     
-    processed_labels = set()
     for f in video_formats:
         if not (format_id := f.get('format_id')): continue
         
@@ -100,14 +99,10 @@ def build_detailed_format_menu(task_id: str, formats: list) -> InlineKeyboardMar
         
         fps_str = f" @ {int(fps)}fps" if fps and int(fps) > 30 else ""
         label = f"🎬 {height}p{fps_str} ({ext.upper()})"
-        
-        if label in processed_labels: continue
-        processed_labels.add(label)
-        
         full_label = label + (f" - {format_bytes(filesize)}" if filesize else "")
         
         row.append(InlineKeyboardButton(full_label, callback_data=f"set_dlformat_{task_id}_{format_id}"))
-        if len(row) == 2:
+        if len(row) >= 2:
             keyboard.append(row)
             row = []
     if row:
@@ -120,7 +115,6 @@ def build_detailed_format_menu(task_id: str, formats: list) -> InlineKeyboardMar
         [InlineKeyboardButton("❌ Cancelar", callback_data=f"task_delete_{task_id}")]
     ])
     return InlineKeyboardMarkup(keyboard)
-
 
 def build_search_results_keyboard(all_results: list, search_id: str, page: int = 1, page_size: int = 5) -> InlineKeyboardMarkup:
     keyboard = []

@@ -33,6 +33,35 @@ def get_media_info(file_path: str) -> dict:
         logger.error(f"No se pudo obtener info de {file_path}: {e}")
         return {}
 
+def build_multi_trim_command(trim_times_str: str, input_path: str, output_path: str) -> tuple[list[str], str]:
+    segments = [s.strip() for s in trim_times_str.split(',') if s.strip()]
+    
+    filter_chains = []
+    concat_inputs = []
+    
+    for i, segment in enumerate(segments):
+        start, _, end = segment.partition('-')
+        if not start or not end: continue
+        
+        filter_chains.append(f"[0:v]trim=start={start.strip()}:end={end.strip()},setpts=PTS-STARTPTS[v{i}]")
+        filter_chains.append(f"[0:a]atrim=start={start.strip()}:end={end.strip()},asetpts=PTS-STARTPTS[a{i}]")
+        concat_inputs.append(f"[v{i}][a{i}]")
+
+    if not filter_chains:
+        raise ValueError("Formato de multi-corte inválido. Use rangos como 'INICIO-FIN' separados por comas.")
+
+    concat_str = "".join(concat_inputs)
+    filter_chains.append(f"{concat_str}concat=n={len(segments)}:v=1:a=1[outv][outa]")
+    
+    final_filter_complex = ";".join(filter_chains)
+
+    command_parts = ["ffmpeg", "-y", "-i", shlex.quote(input_path), "-filter_complex", final_filter_complex,
+                     "-map", "[outv]", "-map", "[outa]", shlex.quote(output_path)]
+    
+    final_command_str = " ".join(command_parts)
+    logger.info(f"Comando FFmpeg de multi-corte construido: {final_command_str}")
+    return [final_command_str], output_path
+
 def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnail_path: str = None, watermark_path: str = None, subs_path: str = None, new_audio_path: str = None) -> tuple[list[str], str]:
     config = task.get('processing_config', {})
 
@@ -45,16 +74,16 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
     if 'split_criteria' in config:
         return build_split_command(config, input_path, output_path)
 
-    command_parts = ["ffmpeg", "-y"]
-    
-    # Manejo de Multi-corte (trim)
     if trim_times := config.get('trim_times'):
         if ',' in trim_times:
             return build_multi_trim_command(trim_times, input_path, output_path)
-        else:
-            start, _, end = trim_times.partition('-')
-            if start.strip(): command_parts.extend(["-ss", start.strip()])
-            if end.strip(): command_parts.extend(["-to", end.strip()])
+
+    command_parts = ["ffmpeg", "-y"]
+    
+    if trim_times:
+        start, _, end = trim_times.partition('-')
+        if start.strip(): command_parts.extend(["-ss", start.strip()])
+        if end.strip(): command_parts.extend(["-to", end.strip()])
     
     command_parts.extend(["-i", shlex.quote(input_path)])
     input_count = 1
@@ -133,41 +162,6 @@ def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnai
     final_command = " ".join(command_parts)
     logger.info(f"Comando FFmpeg estándar construido: {final_command}")
     return [final_command], output_path
-
-def build_multi_trim_command(trim_times_str: str, input_path: str, output_path: str) -> tuple[list[str], str]:
-    segments = [s.strip() for s in trim_times_str.split(',') if s.strip()]
-    
-    filter_chains = []
-    concat_inputs = []
-    
-    for i, segment in enumerate(segments):
-        start, _, end = segment.partition('-')
-        if not start or not end: continue
-        
-        filter_chains.append(f"[0:v]trim=start={start.strip()}:end={end.strip()},setpts=PTS-STARTPTS[v{i}]")
-        filter_chains.append(f"[0:a]atrim=start={start.strip()}:end={end.strip()},asetpts=PTS-STARTPTS[a{i}]")
-        concat_inputs.append(f"[v{i}][a{i}]")
-
-    if not filter_chains:
-        raise ValueError("Formato de multi-corte inválido.")
-
-    concat_str = "".join(concat_inputs)
-    filter_chains.append(f"{concat_str}concat=n={len(segments)}:v=1:a=1[outv][outa]")
-    
-    final_filter_complex = ";".join(filter_chains)
-
-    command = [
-        "ffmpeg", "-y",
-        "-i", shlex.quote(input_path),
-        "-filter_complex", final_filter_complex,
-        "-map", "[outv]",
-        "-map", "[outa]",
-        shlex.quote(output_path)
-    ]
-    
-    final_command_str = " ".join(command)
-    logger.info(f"Comando FFmpeg de multi-corte construido: {final_command_str}")
-    return [final_command_str], output_path
 
 def build_join_command(file_list_path: str, output_path: str) -> tuple[list[str], str]:
     command = f"ffmpeg -y -f concat -safe 0 -i {shlex.quote(file_list_path)} -c copy {shlex.quote(output_path)}"
