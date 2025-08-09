@@ -1,3 +1,5 @@
+# --- START OF FILE src/db/mongo_manager.py ---
+
 import os
 import motor.motor_asyncio
 import logging
@@ -44,11 +46,8 @@ class Database:
             return
         logger.info("Asegurando índices de la base de datos...")
         try:
-            # Índices TTL para sesiones de búsqueda (expiran después de 1 hora)
             await self.search_sessions.create_index("created_at", expireAfterSeconds=3600, name="search_sessions_ttl")
             await self.search_results.create_index("created_at", expireAfterSeconds=3600, name="search_results_ttl")
-            
-            # Índices para acelerar consultas comunes de tareas
             await self.tasks.create_index([("user_id", ASCENDING), ("status", ASCENDING)], name="user_status_index")
             await self.tasks.create_index([("status", ASCENDING), ("created_at", ASCENDING)], name="worker_queue_index")
 
@@ -66,7 +65,6 @@ class Database:
                          url_info: Dict = None, status: str = "pending_processing", metadata: Dict = None,
                          custom_fields: Dict = None) -> ObjectId:
         
-        # Lógica de nombre de archivo final mejorada
         if final_filename:
             final_name = final_filename
         elif file_name:
@@ -81,7 +79,7 @@ class Database:
             "original_filename": file_name,
             "final_filename": final_name,
             "file_type": file_type,
-            "status": status, # ej: pending_processing, queued, processing, completed, failed
+            "status": status,
             "created_at": datetime.utcnow(),
             "processed_at": None,
             "processing_config": processing_config or {},
@@ -103,10 +101,6 @@ class Database:
             return None
 
     async def get_pending_tasks(self, user_id: int, file_type_filter: str = None, status_filter: str = "pending_processing") -> List[Dict]:
-        """
-        Obtiene tareas de un usuario, con filtros opcionales.
-        Por defecto, obtiene las tareas en el "panel" (pending_processing).
-        """
         query = {"user_id": int(user_id)}
         if status_filter:
             query["status"] = status_filter
@@ -114,7 +108,14 @@ class Database:
             query["file_type"] = file_type_filter
             
         cursor = self.tasks.find(query).sort("created_at", ASCENDING)
-        return await cursor.to_list(length=100) # Límite de 100 tareas en panel
+        return await cursor.to_list(length=100)
+
+    # [COMPATIBILITY FIX]
+    # Se añade la función `update_task` que es idéntica a `update_task_field`
+    # para mantener la compatibilidad con el worker.py proporcionado.
+    async def update_task(self, task_id: str, field: str, value: Any):
+        """Alias para update_task_field por compatibilidad."""
+        return await self.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": {field: value}})
 
     async def update_task_config(self, task_id: str, key: str, value: Any):
         """Actualiza una clave específica dentro del diccionario 'processing_config'."""
@@ -132,7 +133,6 @@ class Database:
         return await self.tasks.delete_one({"_id": ObjectId(task_id)})
 
     async def delete_all_pending_tasks(self, user_id: int):
-        """Elimina todas las tareas que están en el panel (pending_processing)."""
         return await self.tasks.delete_many({"user_id": user_id, "status": "pending_processing"})
     
     async def add_preset(self, user_id: int, preset_name: str, config_data: Dict):
@@ -151,7 +151,7 @@ class Database:
 
     async def get_user_presets(self, user_id: int) -> List[Dict]:
         cursor = self.user_presets.find({"user_id": user_id}).sort("preset_name", ASCENDING)
-        return await cursor.to_list(length=50) # Límite de 50 perfiles por usuario
+        return await cursor.to_list(length=50)
 
     async def get_preset_by_id(self, preset_id: str) -> Dict | None:
         try:

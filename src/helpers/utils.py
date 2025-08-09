@@ -9,13 +9,43 @@ from pyrogram.enums import ParseMode
 import logging
 import re
 from typing import Dict
+from pyrogram.errors import MessageNotModified, FloodWait
 
 logger = logging.getLogger(__name__)
 
 try:
     ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))
 except (TypeError, ValueError):
-    ADMIN_USER_ID = None 
+    ADMIN_USER_ID = 0
+
+# [COMPATIBILITY FIX]
+# Esta función es requerida por el nuevo worker.py
+async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
+    """Edita el mensaje de estado de un usuario de forma segura."""
+    ctx = progress_tracker.get(user_id)
+    if not ctx or not ctx.message:
+        return
+
+    # Evitar editar si el texto es el mismo
+    if text == ctx.last_update_text:
+        return
+    ctx.last_update_text = text
+    
+    try:
+        await ctx.bot.edit_message_text(
+            chat_id=ctx.message.chat.id,
+            message_id=ctx.message.id,
+            text=text,
+            parse_mode=ParseMode.HTML
+        )
+    except MessageNotModified:
+        pass
+    except FloodWait as e:
+        logger.warning(f"FloodWait de {e.value} segundos al editar mensaje para el usuario {user_id}.")
+        await asyncio.sleep(e.value + 1)
+    except Exception as e:
+        logger.error(f"Error al editar mensaje de estado para el usuario {user_id}: {e}")
+
 
 def get_greeting(user_id: int) -> str:
     """Devuelve un saludo personalizado para el admin."""
@@ -63,52 +93,28 @@ def format_time(seconds: float) -> str:
         return f"{hours:02}:{minutes:02}:{seconds_part:02}"
     return f"{minutes:02}:{seconds_part:02}"
 
-# [FINAL FIX - CORRECT SANITIZATION]
-# Esta es la versión final y correcta de la función.
-# 1. Separa el nombre base y la extensión.
-# 2. Sanea SOLO el nombre base, eliminando caracteres problemáticos.
-# 3. Vuelve a unir el nombre saneado con su extensión original.
-# Esto previene los errores de 'Invalid Argument' en FFmpeg de forma definitiva.
 def sanitize_filename(filename: str) -> str:
     """
     Limpia un nombre de archivo de forma segura, preservando su extensión.
     """
     if not isinstance(filename, str):
         return "archivo_invalido"
-
-    # Separar el nombre base de la extensión
     name_base, extension = os.path.splitext(filename)
-
-    # Sanear SOLO el nombre base
-    # Eliminar cualquier carácter que NO sea alfanumérico (Unicode), espacio, guion o guion bajo.
     sanitized_base = re.sub(r'[^\w\s-]', '', name_base, flags=re.UNICODE)
-    
-    # Reemplazar múltiples espacios/guiones por un solo espacio y limpiar extremos.
     sanitized_base = re.sub(r'[\s-]+', ' ', sanitized_base).strip()
-    
-    # Si el nombre base queda vacío, usar un nombre por defecto.
     if not sanitized_base:
         sanitized_base = "archivo_procesado"
+    return f"{sanitized_base[:240]}{extension}"
 
-    # Limitar la longitud del nombre base
-    sanitized_base = sanitized_base[:240]
-
-    # Devolvemos el nombre base saneado. La extensión se manejará por separado en el worker.
-    # El propósito de esta función es preparar el NOMBRE, no el nombre.extension completo.
-    return sanitized_base
-
-
+# Esta es la función de formateo requerida por el nuevo worker.py
 def format_status_message(operation: str, filename: str, percentage: float,
                           processed_bytes: float, total_bytes: float, speed: float, eta: float,
-                          elapsed_time: float, is_processing: bool = False) -> str:
+                          engine: str, user_id: int, user_mention: str, is_processing: bool = False, file_size: int = 0) -> str:
     """Genera el mensaje de estado completo para descargas, subidas y procesamiento."""
-    short_filename = (filename[:45] + '...') if len(filename) > 48 else filename
+    short_filename = (filename[:35] + '...') if len(filename) > 38 else filename
     
-    op_map = {"📥 Descargando": "#Downloading", "⚙️ Procesando": "#Processing", "⬆️ Subiendo": "#Uploading"}
-    status_tag = op_map.get(operation.strip().replace("...", ""), "#Working")
-
     lines = [f"<b>{operation}</b>", f"<code>{escape_html(short_filename)}</code>\n"]
-
+    
     if total_bytes > 0:
         bar = _create_text_bar(percentage)
         lines.append(f"Progreso: [{bar}] {percentage:.1f}%")
@@ -119,7 +125,8 @@ def format_status_message(operation: str, filename: str, percentage: float,
         processed_str = format_time(processed_bytes)
         total_str = format_time(total_bytes) if total_bytes > 0 else "??:??"
         speed_str = f"{speed:.2f}x" if speed else "N/A"
-        lines.append(f"┠ 🎞️ {processed_str} de {total_str}")
+        size_str = f"({format_bytes(file_size)})" if file_size > 0 else ""
+        lines.append(f"┠ 🎞️ {processed_str} de {total_str} {size_str}")
     else:
         processed_str = format_bytes(processed_bytes)
         total_str = format_bytes(total_bytes) if total_bytes > 0 else "---"
@@ -129,62 +136,23 @@ def format_status_message(operation: str, filename: str, percentage: float,
     lines.extend([
         f"┠ 🚀 Velocidad: {speed_str}",
         f"┠ ⏳ ETA: {format_time(eta)}",
-        f"┖ ⏱️ Transcurrido: {int(elapsed_time)}s"
+        f"┖ ⏱️ Transcurrido: {int(time.time() - (progress_tracker.get(user_id).start_time if user_id in progress_tracker else time.time()))}s"
     ])
     
     return "\n".join(lines)
 
-def format_task_details_rich(task: Dict, index: int) -> str:
-    """Genera una descripción detallada y rica de una tarea para el /panel."""
-    file_type = task.get('file_type', 'document')
-    emoji_map = {'video': '🎬', 'audio': '🎵', 'document': '📄', 'join_operation': '🔗', 'zip_operation': '📦'}
-    emoji = emoji_map.get(file_type, '📁')
-    
-    display_name = task.get('original_filename') or task.get('url', 'Tarea de URL')
-    short_name = (display_name[:50] + '...') if len(display_name) > 53 else display_name
-    
-    config = task.get('processing_config', {})
-    config_parts = []
-    
-    if rn := config.get('final_filename'):
-        original_name_base = os.path.splitext(task.get('original_filename', ''))[0]
-        # La sanitización puede alterar el nombre, así que comparamos versiones saneadas
-        if sanitize_filename(rn) != sanitize_filename(original_name_base):
-            config_parts.append("✏️ Renombrado")
-    if config.get('transcode'): config_parts.append(f"📉 {config['transcode'].get('resolution', '...')}")
-    if config.get('trim_times'): config_parts.append("✂️ Cortado")
-    if config.get('gif_options'): config_parts.append("🎞️ GIF")
-    if config.get('watermark'): config_parts.append("💧 Marca Agua")
-    if config.get('mute_audio'): config_parts.append("🔇 Silenciado")
-    if config.get('extract_audio'): config_parts.append("🎵 Extraer Audio")
-    
-    if config.get('audio_format') or config.get('audio_bitrate'):
-        config_parts.append(f"🔊 Convertido ({config.get('audio_format','mp3')})")
-    if config.get('slowed') or config.get('reverb'): config_parts.append("🎧 Efectos")
-    if config.get('audio_tags'): config_parts.append("📝 Metadatos")
-    if config.get('thumbnail_file_id') or config.get('thumbnail_url'): config_parts.append("🖼️ Carátula")
 
-    config_summary = ", ".join(config_parts) if config_parts else "<i>(Sin cambios)</i>"
-
-    metadata = task.get('file_metadata', {})
-    meta_parts = []
-    if size := metadata.get('size'): meta_parts.append(f"📦 {format_bytes(size)}")
-    if duration := metadata.get('duration'): meta_parts.append(f"⏱️ {format_time(duration)}")
-    if resolution := metadata.get('resolution'): meta_parts.append(f"🖥️ {resolution}")
-    meta_summary = " | ".join(meta_parts)
-
-    lines = [f"<b>{index}.</b> {emoji} <code>{escape_html(short_name)}</code>", f"   └ ⚙️ {config_summary}"]
-    if meta_summary:
-        lines.append(f"   └ 📊 {meta_summary}")
-    return "\n".join(lines)
-
+# Esta es la función de resumen requerida por el nuevo worker.py
 def generate_summary_caption(task: Dict, initial_size: int, final_size: int, final_filename: str) -> str:
     """Genera el caption final para el archivo procesado."""
     config = task.get('processing_config', {})
     ops = []
 
-    original_name_base = os.path.splitext(task.get('original_filename', ''))[0]
-    if sanitize_filename(config.get('final_filename', original_name_base)) != sanitize_filename(original_name_base):
+    # Se sanean ambos nombres antes de comparar para asegurar una comparación justa.
+    sanitized_original = sanitize_filename(os.path.splitext(task.get('original_filename', ''))[0])
+    sanitized_final = sanitize_filename(os.path.splitext(final_filename)[0])
+
+    if sanitized_final != sanitized_original:
         ops.append("✍️ Renombrado")
     if config.get('transcode'): ops.append(f"📉 Transcodificado a {config['transcode'].get('resolution', 'N/A')}")
     if config.get('trim_times'): ops.append("✂️ Cortado")
