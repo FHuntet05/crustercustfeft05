@@ -73,9 +73,6 @@ def sanitize_filename(filename: str) -> str:
     if not sanitized_base: sanitized_base = "archivo_procesado"
     return sanitized_base[:240]
 
-# [ABSOLUTE FINAL FIX - TypeError]
-# La lógica ha sido corregida para que las operaciones numéricas se realicen
-# SIEMPRE sobre las variables numéricas originales, ANTES de cualquier formateo.
 def format_status_message(
     operation_title: str, percentage: float, processed_bytes: float, total_bytes: float,
     speed: float, eta: float, elapsed: float, status_tag: str,
@@ -86,20 +83,14 @@ def format_status_message(
     lines = [f"<b>{operation_title}</b>", f"<code>[{bar}] {percentage:.2f}%</code>"]
     details = []
 
-    # Determinar el formato basado en el título ANTES de construir las líneas de detalle.
     is_processing = "Process" in operation_title
-
-    # Crear las representaciones en string una sola vez.
     processed_str = format_time(processed_bytes) if is_processing else format_bytes(processed_bytes)
     
-    # [LA CORRECCIÓN CLAVE ESTÁ AQUÍ]
-    # Comprobar el valor numérico de total_bytes ANTES de formatearlo.
-    if total_bytes > 0:
+    if isinstance(total_bytes, (int, float)) and total_bytes > 0:
         total_str = format_time(total_bytes) if is_processing else format_bytes(total_bytes)
     else:
         total_str = "??:??" if is_processing else "0 B"
 
-    # Construir la línea "Processed"
     line_label = "de" if is_processing else "of"
     details.append(f"Processed: {processed_str} {line_label} {total_str}")
 

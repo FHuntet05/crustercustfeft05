@@ -161,11 +161,12 @@ async def process_task(bot, task: dict):
         # Forzar una actualización de estado a "Procesando" ANTES de iniciar FFmpeg.
         ctx.reset_timer()
         processing_text = format_status_message(
-            operation_title="Task is being Processed!", percentage=0,
-            processed_bytes=0, total_bytes=get_media_info(actual_download_path).get("format", {}).get("duration", 0),
-            speed=0, eta=float('inf'), elapsed=0,
-            status_tag="#Processing", engine="FFmpeg", user_id=user_id
-        )
+    operation_title="Task is being Processed!", percentage=0,
+    processed_bytes=0, total_bytes=get_media_info(actual_download_path).get("format", {}).get("duration", 0),
+    speed=0, eta=float('inf'), elapsed=0,
+    status_tag="#Processing", engine="FFmpeg", user_id=user_id
+)
+
         await _edit_status_message(user_id, processing_text, progress_tracker)
 
         final_filename_base = sanitize_filename(config.get('final_filename', original_filename))
