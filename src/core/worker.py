@@ -32,6 +32,10 @@ class ProgressContext:
         self.last_update_time = 0
         self.last_update_text = ""
         self.loop = loop
+    
+    def reset_timer(self):
+        """Reinicia el temporizador para una nueva etapa (ej. de descarga a procesamiento)."""
+        self.start_time = time.time()
 
 progress_tracker: Dict[int, ProgressContext] = {}
 
@@ -39,9 +43,11 @@ def _progress_callback_pyrogram(current: int, total: int, user_id: int, title: s
     ctx = progress_tracker.get(user_id)
     if not ctx: return
 
-    # [DEFINITIVE FIX - DOWNLOAD PROGRESS]
-    # Si Pyrogram no provee el tamaño total (total=0), usamos el que guardamos en la DB.
     final_total = total if total > 0 else db_total_size
+    
+    # [VISUAL FIX] Asegurar que el progreso no supere el 100%
+    if current > final_total:
+        current = final_total
 
     now = time.time()
     if now - ctx.last_update_time < 1.5 and current < final_total:
@@ -62,16 +68,7 @@ def _progress_callback_pyrogram(current: int, total: int, user_id: int, title: s
     coro = _edit_status_message(user_id, text, progress_tracker)
     asyncio.run_coroutine_threadsafe(coro, ctx.loop)
 
-async def _read_stream(stream, callback):
-    """Lee un stream línea por línea y llama a una callback."""
-    while True:
-        line = await stream.readline()
-        if not line:
-            break
-        callback(line.decode('utf-8', 'ignore'))
-
 async def _run_command_with_progress(user_id: int, command: List[str], input_path: str):
-    """Ejecuta un comando de forma segura, capturando el progreso y los errores."""
     media_info = get_media_info(input_path)
     duration = float(media_info.get("format", {}).get("duration", 0))
 
@@ -79,22 +76,27 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
     
     ctx = progress_tracker.get(user_id)
     if not ctx: return
+    
+    # [STATUS FIX] Reiniciar el temporizador para la etapa de procesamiento
+    ctx.reset_timer()
 
     process = await asyncio.create_subprocess_exec(
         *command,
-        stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
 
-    all_stderr_lines = []
-    def handle_stderr(line):
-        all_stderr_lines.append(line)
-        if match := time_pattern.search(line):
+    async for line in process.stderr:
+        log_line = line.decode('utf-8', 'ignore')
+        if match := time_pattern.search(log_line):
             if duration > 0:
+                now = time.time()
+                if now - ctx.last_update_time < 1.5: continue
+                ctx.last_update_time = now
+
                 h, m, s, ms = map(int, match.groups())
                 processed_time = h * 3600 + m * 60 + s + ms / 100
                 percentage = (processed_time / duration) * 100
-                elapsed = time.time() - ctx.start_time
+                elapsed = now - ctx.start_time
                 speed = processed_time / elapsed if elapsed > 0 else 0
                 eta = (duration - processed_time) / speed if speed > 0 else float('inf')
 
@@ -104,14 +106,11 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
                     speed=speed, eta=eta, elapsed=elapsed,
                     status_tag="#Processing", engine="FFmpeg", user_id=user_id
                 )
-                asyncio.run_coroutine_threadsafe(_edit_status_message(user_id, text, progress_tracker), ctx.loop)
-
-    await _read_stream(process.stderr, handle_stderr)
+                await _edit_status_message(user_id, text, progress_tracker)
+    
     await process.wait()
-
     if process.returncode != 0:
-        error_log = "".join(all_stderr_lines)
-        raise Exception(f"FFmpeg falló. Log:\n{error_log}")
+        raise Exception(f"FFmpeg falló con código de salida {process.returncode}")
 
 
 async def process_task(bot, task: dict):
@@ -126,10 +125,11 @@ async def process_task(bot, task: dict):
         config = task.get('processing_config', {})
         original_filename = task.get('original_filename') or task.get('url', 'Tarea sin nombre')
         
-        status_message = await bot.send_message(user_id, "Preparando...", parse_mode=ParseMode.HTML)
+        status_message = await bot.send_message(user_id, "✅ Tarea recibida. Preparando...", parse_mode=ParseMode.HTML)
         
         global progress_tracker
         progress_tracker[user_id] = ProgressContext(bot, status_message, task, asyncio.get_running_loop())
+        ctx = progress_tracker[user_id]
 
         dl_dir = os.path.join(DOWNLOAD_DIR, task_id)
         os.makedirs(dl_dir, exist_ok=True)
@@ -138,7 +138,9 @@ async def process_task(bot, task: dict):
         if file_id := task.get('file_id'):
             actual_download_path = os.path.join(dl_dir, original_filename)
             db_total_size = task.get('file_metadata', {}).get('size', 0)
-
+            
+            # [STATUS FIX] Reiniciar temporizador para la etapa de descarga
+            ctx.reset_timer()
             await bot.download_media(
                 message=file_id,
                 file_name=actual_download_path,
@@ -159,10 +161,12 @@ async def process_task(bot, task: dict):
                 await _edit_status_message(user_id, "Descargando marca de agua...", progress_tracker)
                 watermark_path = await bot.download_media(wm_id, file_name=os.path.join(dl_dir, "watermark_img"))
                 files_to_clean.add(watermark_path)
-
-        final_filename_base = os.path.splitext(sanitize_filename(config.get('final_filename', original_filename)))[0]
-        ext = os.path.splitext(original_filename)[1] if not config.get('transcode') else ".mp4"
-        output_path = os.path.join(OUTPUT_DIR, f"{final_filename_base}{ext}")
+        
+        final_filename = sanitize_filename(config.get('final_filename', original_filename))
+        output_path = os.path.join(OUTPUT_DIR, final_filename)
+        
+        # [FFMPEG FIX] Asegurarse de que el directorio de salida exista
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
         files_to_clean.add(output_path)
         
         commands, definitive_output_path = ffmpeg.build_ffmpeg_command(
@@ -175,12 +179,13 @@ async def process_task(bot, task: dict):
         final_size = os.path.getsize(definitive_output_path)
         caption = generate_summary_caption(task, initial_size, final_size, os.path.basename(definitive_output_path))
         
-        db_upload_total_size = os.path.getsize(definitive_output_path)
-        prog_args_upload = (user_id, "Uploading...", "#TelegramUpload", db_upload_total_size)
-        
+        # [STATUS FIX] Reiniciar temporizador para la etapa de subida
+        ctx.reset_timer()
         await bot.send_video(
             user_id, video=definitive_output_path, caption=caption, 
-            parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=prog_args_upload
+            parse_mode=ParseMode.HTML, 
+            progress=_progress_callback_pyrogram, 
+            progress_args=(user_id, "Uploading...", "#TelegramUpload", final_size)
         )
 
         await db_instance.update_task(task_id, "status", "done")
