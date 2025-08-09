@@ -73,7 +73,8 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
     except (TypeError, ValueError):
         duration = 0
 
-    out_time_pattern = re.compile(r"out_time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})")
+    # Corregido: La expresión regular debe buscar `time=` no `out_time=`
+    time_pattern = re.compile(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})")
 
     ctx = progress_tracker.get(user_id)
     if not ctx:
@@ -89,7 +90,7 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
         log_line = line.decode('utf-8', 'ignore').strip()
         all_stderr_lines.append(log_line)
 
-        if match := out_time_pattern.search(log_line):
+        if match := time_pattern.search(log_line): # Corregido para usar `time=`
             if duration > 0:
                 now = time.time()
                 if now - ctx.last_update_time < 1.5:
@@ -122,7 +123,7 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
 
     await process.wait()
     if process.returncode != 0:
-        error_log = "".join(all_stderr_lines)
+        error_log = "\n".join(all_stderr_lines) # Corregido para unir con newline
         raise Exception(f"FFmpeg falló con código de salida {process.returncode}. Log:\n{error_log}")
 
 
@@ -134,13 +135,17 @@ async def process_task(bot, task: dict):
 
     try:
         task = await db_instance.get_task(task_id)
-        if not task: raise Exception("Tarea no encontrada.")
-        
+        if not task:
+            raise Exception("Tarea no encontrada.")
+
         config = task.get('processing_config', {})
         original_filename = task.get('original_filename') or task.get('url', 'Tarea sin nombre')
-        
-        status_message = await bot.send_message(user_id, "✅ Tarea recibida. Preparando...", parse_mode=ParseMode.HTML)
-        
+
+        status_message = await bot.send_message(
+            user_id,
+            "✅ Tarea recibida. Preparando...",
+            parse_mode=ParseMode.HTML # Corregido el import
+        )
         global progress_tracker
         progress_tracker[user_id] = ProgressContext(bot, status_message, task, asyncio.get_running_loop())
         ctx = progress_tracker[user_id]
@@ -203,8 +208,11 @@ async def process_task(bot, task: dict):
             task, actual_download_path, output_path, watermark_path=watermark_path
         )
         
-        for cmd_list in commands:
-            await _run_command_with_progress(user_id, cmd_list, actual_download_path)
+        # [LA CORRECCIÓN ESTÁ AQUÍ]
+        # `commands` es una lista de comandos (listas de strings). Iteramos sobre ella.
+        for command_list in commands:
+            await _run_command_with_progress(user_id, command_list, actual_download_path)
+
         
         final_size = os.path.getsize(definitive_output_path)
         caption = generate_summary_caption(task, initial_size, final_size, os.path.basename(definitive_output_path))

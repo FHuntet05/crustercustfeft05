@@ -26,6 +26,8 @@ def get_media_info(file_path: str) -> dict:
         logger.error(f"No se pudo obtener info de {file_path}: {e}")
         return {}
 
+from typing import Dict, List, Tuple
+
 def build_ffmpeg_command(task: Dict, input_path: str, output_path: str, watermark_path: str = None) -> Tuple[List[str], str]:
     config = task.get('processing_config', {})
 
@@ -73,11 +75,13 @@ def build_ffmpeg_command(task: Dict, input_path: str, output_path: str, watermar
     if config.get('mute_audio'):
         command = [arg for arg in command if not arg.startswith(("-c:a", "-b:a"))]
         command.append("-an")
+        # Eliminar mapeo de audio
         command = [arg for arg in command if arg != "0:a?"]
 
-    # ✅ Aquí se añade el flag para emitir progreso continuo
+    # ✅ Emitir progreso continuo a través de stderr
     command.extend(["-progress", "pipe:2"])
     command.append(output_path)
+
     return command, output_path
 
 
