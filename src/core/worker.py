@@ -78,7 +78,7 @@ async def _run_ffmpeg_process(cmd: str):
     _, stderr = await process.communicate()
     if process.returncode != 0: raise FFmpegProcessingError(log=stderr.decode('utf-8', 'ignore')[-1000:])
 
-async def _run_ffmpeg_with_progress(tracker: Tracker, cmd: str, input_path: str):
+async def _run_ffmpeg_with_progress(tracker: ProgressTracker, cmd: str, input_path: str):
     duration_info = get_media_info(input_path)
     total_sec = float(duration_info.get('format', {}).get('duration', 0))
     if total_sec <= 0:
@@ -87,18 +87,30 @@ async def _run_ffmpeg_with_progress(tracker: Tracker, cmd: str, input_path: str)
     tracker.set_operation("⚙️ Procesando...")
     time_pattern = re.compile(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})")
     process = await asyncio.create_subprocess_shell(cmd, stderr=asyncio.subprocess.PIPE)
-    while True:
-        chunk = await process.stderr.read(1024)
-        if not chunk: break
-        line = chunk.decode('utf-8', 'ignore').strip()
-        if match := time_pattern.search(line):
-            h, m, s, ms = map(int, match.groups())
-            processed_sec = h * 3600 + m * 60 + s + ms / 100
-            await tracker.update_progress(processed_sec, total_sec, is_processing=True)
+    
+    stderr_reader = asyncio.create_task(process.stderr.read())
+    
+    while not process.stderr.at_eof():
+        try:
+            chunk = await asyncio.wait_for(stderr_reader, timeout=1.0)
+            if not chunk: break
+            line = chunk.decode('utf-8', 'ignore')
+            if match := time_pattern.search(line):
+                h, m, s, ms = map(int, match.groups())
+                processed_sec = h * 3600 + m * 60 + s + ms / 100
+                await tracker.update_progress(processed_sec, total_sec, is_processing=True)
+            if not stderr_reader.done():
+                 stderr_reader = asyncio.create_task(process.stderr.read())
+        except asyncio.TimeoutError:
+            pass
+
     await process.wait()
     if process.returncode != 0:
-        full_log = (await process.stderr.read()).decode('utf-8', 'ignore')
+        # Re-read stderr if needed to get the final error message
+        remaining_err = await stderr_reader
+        full_log = remaining_err.decode('utf-8', 'ignore')
         raise FFmpegProcessingError(log=full_log[-1000:])
+
 
 async def process_task(bot: Client, task: dict):
     task_id, user_id, tracker = str(task['_id']), task['user_id'], None
@@ -163,11 +175,9 @@ async def process_task(bot: Client, task: dict):
         status_to_set = "paused_no_space" if isinstance(e, DiskSpaceError) else "failed"
         await db_instance.update_task_fields(task_id, {"status": status_to_set, "last_error": str(e)})
         try:
-            # Plan A: Intentar editar el mensaje de estado existente.
             if tracker: await tracker.message.edit_text(error_message, parse_mode=ParseMode.HTML)
             else: await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
         except Exception as notification_error:
-            # Plan B (Fallback): Si editar falla, enviar un nuevo mensaje.
             logger.error(f"No se pudo notificar al usuario editando el mensaje. Fallback a nuevo mensaje. Error: {notification_error}")
             try: await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
             except Exception as final_error: logger.critical(f"FALLO FINAL: No se pudo ni siquiera enviar un nuevo mensaje de error al usuario {user_id}. Error: {final_error}")
@@ -185,7 +195,7 @@ async def worker_loop(bot_instance: Client):
     while True:
         try:
             task_doc = await db_instance.tasks.find_one_and_update(
-                {"status": {"$in": ["queued"]}}, # Simplificado para solo procesar tareas en cola
+                {"status": {"$in": ["queued"]}},
                 {"$set": {"status": "processing", "processed_at": datetime.utcnow()}},
                 sort=[('created_at', 1)]
             )
