@@ -14,6 +14,7 @@ from src.helpers.keyboards import *
 from src.helpers.utils import get_greeting, escape_html, sanitize_filename, format_time
 
 logger = logging.getLogger(__name__)
+DOWNLOAD_DIR = "downloads"
 
 async def open_task_menu_from_p(client: Client, message_or_query, task_id: str):
     task = await db_instance.get_task(task_id)
@@ -59,7 +60,6 @@ async def handle_text_input_for_state(client: Client, message: Message, user_sta
         else: return
 
         await message.delete(); await db_instance.set_user_state(user_id, "idle"); source_message = await client.get_messages(user_id, source_message_id); await open_task_menu_from_p(client, source_message, task_id)
-        
     except Exception as e:
         logger.error(f"Error procesando entrada de config '{state}': {e}"); await message.reply(f"❌ Error: `{e}`", quote=True)
 
@@ -69,27 +69,45 @@ async def handle_media_input_for_state(client: Client, message: Message, user_st
     task_id, source_message_id = data.get('task_id'), data.get('source_message_id')
     
     if not source_message_id: return
-
     media = message.photo or message.document or message.audio
     if not media: return
-
     state_map = {"awaiting_audiothumb": "thumbnail_file_id", "awaiting_subs": "subs_file_id", "awaiting_watermark_image": "watermark", "awaiting_thumbnail_add": "thumbnail_file_id", "awaiting_replace_audio": "replace_audio_file_id"}
     if state not in state_map: return
-
     if state in ["awaiting_audiothumb", "awaiting_watermark_image", "awaiting_thumbnail_add"] and not (message.photo or (hasattr(media, 'mime_type') and media.mime_type.startswith("image/"))): return await message.reply("❌ No es una imagen válida.")
     
     key_to_update = state_map[state]
     value_to_set = {"type": "image", "file_id": media.file_id} if state == "awaiting_watermark_image" else media.file_id
-    
     update_query = {"$set": {f"processing_config.{key_to_update}": value_to_set}}
     if state == "awaiting_thumbnail_add": update_query["$unset"] = {"processing_config.extract_thumbnail": "", "processing_config.remove_thumbnail": ""}
-
     await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, update_query); await message.delete()
-
     if state == "awaiting_watermark_image":
         await db_instance.set_user_state(user_id, 'awaiting_watermark_position', data=data); await client.edit_message_text(user_id, source_message_id, "✅ Imagen recibida. Elija la posición:", reply_markup=build_position_menu(task_id, "config_watermark"))
     else:
         await db_instance.set_user_state(user_id, "idle"); source_message = await client.get_messages(user_id, source_message_id); await open_task_menu_from_p(client, source_message, task_id)
+
+@Client.on_callback_query(filters.regex(r"^(p_open_|task_|config_|set_)"))
+async def main_config_callbacks_router(client: Client, query: CallbackQuery):
+    data = query.data
+    if data.startswith("p_open_"): await open_task_menu_callback(client, query)
+    elif data.startswith("task_"): await handle_task_actions(client, query)
+    elif data.startswith("config_"): await show_config_menu_and_set_state(client, query)
+    elif data.startswith("set_"): await set_value_callback(client, query)
+
+@Client.on_callback_query(filters.regex(r"^(song_select_|search_page_|cancel_search_)"))
+async def search_callbacks_router(client: Client, query: CallbackQuery):
+    data = query.data
+    if data.startswith("song_select_"): await select_song_from_search(client, query)
+    elif data.startswith("search_page_"): await handle_search_pagination(client, query)
+    elif data.startswith("cancel_search_"): await cancel_search_session(client, query)
+
+@Client.on_callback_query(filters.regex(r"^(profile_|batch_|join_|zip_|panel_delete_all_)"))
+async def advanced_features_callbacks_router(client: Client, query: CallbackQuery):
+    data = query.data
+    if data.startswith("profile_"): await handle_profile_actions(client, query)
+    elif data.startswith("batch_"): await handle_batch_actions(client, query)
+    elif data.startswith("join_"): await handle_join_actions(client, query)
+    elif data.startswith("zip_"): await handle_zip_actions(client, query)
+    elif data.startswith("panel_delete_all_"): await handle_panel_delete_all(client, query)
 
 async def open_task_menu_callback(client: Client, query: CallbackQuery):
     await query.answer(); task_id = query.data.split("_")[2]; await db_instance.set_user_state(query.from_user.id, "idle"); await open_task_menu_from_p(client, query, task_id)
@@ -107,18 +125,14 @@ async def show_config_menu_and_set_state(client: Client, query: CallbackQuery):
     task = await db_instance.get_task(task_id)
     if not task: return
     config = task.get('processing_config', {})
-    
     if menu_type == "extract_audio":
         ref = {"chat_id": query.message.chat.id, "message_id": query.message.id}; await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$set": {"processing_config.extract_audio": True, "status": "queued", "status_message_ref": ref}}); return await query.message.edit_text("✅ Tarea de extracción de audio enviada.\n⏳ <b>En Cola...</b>", parse_mode=ParseMode.HTML)
-
     keyboards = {"transcode": build_transcode_menu(task_id), "tracks": build_tracks_menu(task_id, config), "audioconvert": build_audio_convert_menu(task_id), "audioeffects": build_audio_effects_menu(task_id, config), "audiometadata": build_audio_metadata_menu(task_id), "watermark": build_watermark_menu(task_id), "thumbnail": build_thumbnail_menu(task_id, config)}
     menu_messages = {"transcode": "📉 Seleccione resolución:", "tracks": "📜 Gestione pistas:", "audioconvert": "🔊 Convierta audio:", "audioeffects": "🎧 Aplique efectos:", "audiometadata": "🖼️ Edite metadatos:", "watermark": "💧 Añada marca de agua:", "thumbnail": "🖼️ Gestione miniatura:"}
     if menu_type in keyboards: return await query.message.edit_text(text=menu_messages[menu_type], reply_markup=keyboards[menu_type])
-
     state_map = {"rename": "awaiting_rename", "trim": "awaiting_trim", "split": "awaiting_split", "gif": "awaiting_gif", "audiotags": "awaiting_audiotags", "audiothumb": "awaiting_audiothumb", "addsubs": "awaiting_subs", "thumbnail_add": "awaiting_thumbnail_add", "replace_audio": "awaiting_replace_audio", "watermark_text": "awaiting_watermark_text", "watermark_image": "awaiting_watermark_image", "profile_save_request": "awaiting_profile_name"}
     if menu_type not in state_map: return
     await db_instance.set_user_state(user_id, state_map[menu_type], data={"task_id": task_id, "source_message_id": query.message.id})
-    
     menu_texts = {"rename": "✏️ Envíe el nuevo nombre.", "trim": "✂️ Envíe tiempos de corte (<code>INICIO-FIN</code>).", "split": "🧩 Envíe criterio de división (<code>300s</code>).", "gif": "🎞️ Envíe duración y FPS (<code>5 15</code>).", "audiotags": "✍️ Envíe nuevos metadatos (<code>Título: X</code>).", "audiothumb": "🖼️ Envíe la carátula.", "addsubs": "➕ Envíe el archivo <code>.srt</code>.", "thumbnail_add": "🖼️ Envíe la nueva miniatura.", "replace_audio": "🎼 Envíe el nuevo audio.", "watermark_text": "💧 Envíe el texto de la marca.", "watermark_image": "🖼️ Envíe la imagen de la marca.", "profile_save_request": "✏️ Envíe un nombre para este perfil."}
     back_callbacks = {"audiotags": "config_audiometadata_", "audiothumb": "config_audiometadata_", "addsubs": "config_tracks_", "thumbnail_add": "config_thumbnail_", "replace_audio": "config_tracks_", "watermark_text": "config_watermark_", "watermark_image": "config_watermark_", "profile_save_request": "p_open_"}
     await query.message.edit_text(menu_texts[menu_type], reply_markup=build_back_button(f"{back_callbacks.get(menu_type, 'p_open_')}{task_id}"), parse_mode=ParseMode.HTML)
@@ -128,7 +142,6 @@ async def set_value_callback(client: Client, query: CallbackQuery):
     task = await db_instance.get_task(task_id)
     if not task: return await query.message.delete()
     config = task.get('processing_config', {})
-    
     if config_type == "watermark" and parts[3] == "position": await db_instance.update_task_config(task_id, "watermark.position", parts[4].replace('-', '_')); await db_instance.set_user_state(user_id, "idle")
     else:
         if config_type == "transcode": value = "_".join(parts[3:]); await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$unset": {"processing_config.transcode": ""}}) if value == "remove_all" else await db_instance.update_task_config(task_id, f"transcode.{value.split('_', 1)[0]}", value.split('_', 1)[1])
@@ -149,8 +162,7 @@ async def handle_profile_actions(client: Client, query: CallbackQuery):
     elif action == "delete" and parts[2] == "req":
         preset_id = parts[3]; await query.message.edit_text("¿Seguro que desea eliminar este perfil?", reply_markup=build_profile_delete_confirmation_keyboard(preset_id))
     elif action == "delete" and parts[2] == "confirm":
-        preset_id = parts[3]; await db_instance.delete_preset_by_id(preset_id); presets = await db_instance.get_user_presets(user_id)
-        await query.message.edit_text("✅ Perfil eliminado.", reply_markup=build_profiles_management_keyboard(presets))
+        preset_id = parts[3]; await db_instance.delete_preset_by_id(preset_id); presets = await db_instance.get_user_presets(user_id); await query.message.edit_text("✅ Perfil eliminado.", reply_markup=build_profiles_management_keyboard(presets))
     elif action == "open" and parts[2] == "main": presets = await db_instance.get_user_presets(user_id); await query.message.edit_text("<b>Gestión de Perfiles:</b>", reply_markup=build_profiles_management_keyboard(presets), parse_mode=ParseMode.HTML)
     elif action == "close": await query.message.delete()
 

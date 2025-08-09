@@ -5,6 +5,7 @@ import math
 # --- Teclados de Gestión de Perfiles ---
 
 def build_profiles_keyboard(task_id: str, presets: list) -> InlineKeyboardMarkup:
+    """Construye el teclado para aplicar un perfil a una tarea."""
     keyboard = []
     row = []
     for preset in presets:
@@ -18,19 +19,21 @@ def build_profiles_keyboard(task_id: str, presets: list) -> InlineKeyboardMarkup
     return InlineKeyboardMarkup(keyboard)
 
 def build_profiles_management_keyboard(presets: list) -> InlineKeyboardMarkup:
+    """Construye el teclado para ver y eliminar perfiles existentes."""
     keyboard = []
     if not presets:
         keyboard.append([InlineKeyboardButton("No tienes perfiles guardados.", callback_data="noop")])
-        return InlineKeyboardMarkup(keyboard)
-
-    for preset in presets:
-        preset_id = str(preset['_id'])
-        preset_name = preset.get('preset_name', 'Perfil sin nombre').capitalize()
-        keyboard.append([InlineKeyboardButton(f"🗑️ {preset_name}", callback_data=f"profile_delete_req_{preset_id}")])
+    else:
+        for preset in presets:
+            preset_id = str(preset['_id'])
+            preset_name = preset.get('preset_name', 'Perfil sin nombre').capitalize()
+            keyboard.append([InlineKeyboardButton(f"🗑️ {preset_name}", callback_data=f"profile_delete_req_{preset_id}")])
+    
     keyboard.append([InlineKeyboardButton("🔙 Volver", callback_data="profiles_close")])
     return InlineKeyboardMarkup(keyboard)
 
 def build_profile_delete_confirmation_keyboard(preset_id: str) -> InlineKeyboardMarkup:
+    """Pide confirmación antes de eliminar un perfil."""
     return InlineKeyboardMarkup([[InlineKeyboardButton("✅ Sí, eliminar", callback_data=f"profile_delete_confirm_{preset_id}"), InlineKeyboardButton("❌ No", callback_data="profiles_open_main")]])
 
 # --- Teclados del Panel de Procesamiento ---

@@ -24,11 +24,20 @@ URL_REGEX = r'(https?://[^\s]+)'
 try: ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))
 except (TypeError, ValueError): ADMIN_USER_ID = 0
 
+async def reset_user_state_if_needed(client: Client, user_id: int):
+    user_state = await db_instance.get_user_state(user_id)
+    if user_state.get("status") != "idle":
+        logger.warning(f"Reseteando estado obsoleto '{user_state.get('status')}' para {user_id}.")
+        if source_id := user_state.get("data", {}).get("source_message_id"):
+            try: await client.delete_messages(user_id, source_id)
+            except Exception: pass
+        await db_instance.set_user_state(user_id, "idle")
+
 @Client.on_message(filters.command("start") & filters.private)
 async def start_command(client: Client, message: Message):
     await reset_user_state_if_needed(client, message.from_user.id)
     greeting = get_greeting(message.from_user.id)
-    start_message = (f"A sus órdenes, {greeting}, bienvenido a la <b>Suite de Medios v16.0 (Estable)</b>.\n\n"
+    start_message = (f"A sus órdenes, {greeting}, bienvenido a la <b>Suite de Medios v16.1 (Estable)</b>.\n\n"
                      "Sistema de estado reiniciado y listo para nuevas tareas.\n\n"
                      "<b>Comandos Principales:</b>\n"
                      "• /panel - Muestra su mesa de trabajo.\n"
@@ -91,15 +100,6 @@ async def process_all_command(client: Client, message: Message):
     presets = await db_instance.get_user_presets(user_id)
     await message.reply(f"Va a procesar en lote <b>{len(tasks)}</b> tareas.\nSeleccione un perfil para aplicar a todas:", reply_markup=build_batch_profiles_keyboard(presets), parse_mode=ParseMode.HTML)
 
-async def reset_user_state_if_needed(client: Client, user_id: int):
-    user_state = await db_instance.get_user_state(user_id)
-    if user_state.get("status") != "idle":
-        logger.warning(f"Reseteando estado obsoleto '{user_state.get('status')}' para {user_id}.")
-        if source_id := user_state.get("data", {}).get("source_message_id"):
-            try: await client.delete_messages(user_id, source_id)
-            except Exception: pass
-        await db_instance.set_user_state(user_id, "idle")
-
 @Client.on_message(filters.media & filters.private, group=1)
 async def media_gatekeeper(client: Client, message: Message):
     user_id = message.from_user.id; user_state = await db_instance.get_user_state(user_id)
@@ -139,7 +139,8 @@ async def handle_url_input(client: Client, message: Message, url: str):
         await status_msg.delete()
         if info.get('thumbnail'): await client.send_photo(message.from_user.id, photo=info['thumbnail'], caption=caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
         else: await client.send_message(message.from_user.id, caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
-    except Exception as e: logger.error(f"Error procesando URL {url}: {e}", exc_info=True); await status_msg.edit_text(f"❌ Error: <code>{escape_html(str(e))}</code>")
+    except Exception as e:
+        logger.error(f"Error procesando URL {url}: {e}", exc_info=True); await status_msg.edit_text(f"❌ Error: <code>{escape_html(str(e))}</code>")
 
 async def handle_music_search(client: Client, message: Message, query: str):
     status_msg = await message.reply(f"🔎 Buscando: <code>{escape_html(query)}</code>...", parse_mode=ParseMode.HTML)
