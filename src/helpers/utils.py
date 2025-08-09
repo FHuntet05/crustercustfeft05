@@ -1,3 +1,5 @@
+# --- START OF FILE src/helpers/utils.py ---
+
 import os
 import time
 import asyncio
@@ -5,6 +7,7 @@ from html import escape
 from datetime import datetime, timedelta
 from pyrogram.enums import ParseMode
 import logging
+import re  # Importar re para la nueva función de sanitización
 from typing import Dict
 
 logger = logging.getLogger(__name__)
@@ -60,16 +63,32 @@ def format_time(seconds: float) -> str:
         return f"{hours:02}:{minutes:02}:{seconds_part:02}"
     return f"{minutes:02}:{seconds_part:02}"
 
+# [FIX 2 - STRICT SANITIZATION]
+# La función ha sido reescrita para ser mucho más estricta.
+# Ahora utiliza una expresión regular para eliminar CUALQUIER carácter que no esté en la
+# "lista blanca" (letras, números, espacios, guiones, guiones bajos, puntos).
+# Esto previene errores de "Invalid argument" en FFmpeg con nombres de archivo complejos.
 def sanitize_filename(filename: str) -> str:
-    """Limpia un nombre de archivo de caracteres inválidos y limita su longitud."""
+    """
+    Limpia un nombre de archivo de caracteres inválidos de forma estricta
+    y limita su longitud.
+    """
     if not isinstance(filename, str):
         return "archivo_invalido"
-    # Caracteres inválidos en Windows y Linux/macOS
-    invalid_chars = r'<>:"/\|?*' + ''.join(chr(i) for i in range(32))
-    # Reemplazar caracteres inválidos por guion bajo
-    sanitized = "".join(c if c not in invalid_chars else '_' for c in filename)
+    
+    # Eliminar cualquier carácter que NO sea alfanumérico, espacio, guion, guion bajo o punto.
+    sanitized = re.sub(r'[^\w\s\._-]', '', filename, flags=re.UNICODE)
+    
+    # Reemplazar múltiples espacios/puntos/guiones por uno solo y limpiar espacios al inicio/final
+    sanitized = re.sub(r'[\s._-]+', ' ', sanitized).strip()
+    
+    # Si después de sanear no queda nada, usar un nombre por defecto
+    if not sanitized:
+        return "archivo_procesado"
+        
     # Limitar la longitud a un valor razonable para sistemas de archivos
-    return " ".join(sanitized.split())[:240]
+    return sanitized[:240]
+
 
 def format_status_message(operation: str, filename: str, percentage: float,
                           processed_bytes: float, total_bytes: float, speed: float, eta: float,
@@ -86,7 +105,8 @@ def format_status_message(operation: str, filename: str, percentage: float,
         bar = _create_text_bar(percentage)
         lines.append(f"Progreso: [{bar}] {percentage:.1f}%")
     else:
-        lines.append(f"Progreso: [ <i>Calculando...</i> ]")
+        # [UX FIX] Mensaje más claro cuando el tamaño es desconocido
+        lines.append(f"Progreso: [ <i>Tamaño total no disponible</i> ]")
 
     if is_processing:
         # Para FFmpeg, 'processed_bytes' es el tiempo procesado
@@ -96,7 +116,8 @@ def format_status_message(operation: str, filename: str, percentage: float,
         lines.append(f"┠ 🎞️ {processed_str} de {total_str}")
     else:
         processed_str = format_bytes(processed_bytes)
-        total_str = format_bytes(total_bytes) if total_bytes > 0 else "???"
+        # [UX FIX] Mensaje más claro cuando el tamaño es desconocido
+        total_str = format_bytes(total_bytes) if total_bytes > 0 else "---"
         speed_str = f"{format_bytes(speed)}/s" if speed else "N/A"
         lines.append(f"┠ 📦 {processed_str} de {total_str}")
 
@@ -122,7 +143,9 @@ def format_task_details_rich(task: Dict, index: int) -> str:
     
     # Video & Común
     if rn := config.get('final_filename'):
-        if rn != os.path.splitext(task.get('original_filename', ''))[0]:
+        # Comprobar si el nombre final es diferente del original (sin extensión)
+        original_name_base = os.path.splitext(task.get('original_filename', ''))[0]
+        if rn != original_name_base:
             config_parts.append("✏️ Renombrado")
     if config.get('transcode'): config_parts.append(f"📉 {config['transcode'].get('resolution', '...')}")
     if config.get('trim_times'): config_parts.append("✂️ Cortado")

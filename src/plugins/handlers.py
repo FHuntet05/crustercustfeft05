@@ -28,11 +28,11 @@ try:
 except (TypeError, ValueError):
     ADMIN_USER_ID = 0
 
-# [FIX 1 - STATE GUARDIAN]
-# Este manejador tiene prioridad (group=-1) y se ejecuta ANTES que cualquier otro manejador de comandos.
-# Su propósito es interceptar comandos cuando el usuario está en un estado de espera (ej. "awaiting_rename").
-# Cancela la operación anterior de forma limpia, evitando los "bucles" de estado y la confusión del usuario.
-@Client.on_message(filters.private & filters.command, group=-1)
+# [FIX 1 - INVALID FILTER]
+# El filtro ha sido cambiado de `filters.command` a `filters.regex(r"^/")`.
+# `filters.command` sin argumentos causaba un crash. `filters.regex(r"^/")`
+# captura correctamente cualquier mensaje que empiece con '/', es decir, todos los comandos.
+@Client.on_message(filters.private & filters.regex(r"^/"), group=-1)
 async def state_guardian(client: Client, message: Message):
     """
     State Guardian: Resets user state if a command is issued during an operation.
@@ -51,27 +51,27 @@ async def state_guardian(client: Client, message: Message):
         # Intentamos borrar el mensaje que pedía el input (ej. "Envíe el nuevo nombre...")
         if source_id := user_state.get("data", {}).get("source_message_id"):
             try:
-                await client.delete_messages(user_id, source_id)
+                # [ROBUSTNESS FIX] Editar el mensaje a "Cancelado" antes de borrarlo.
+                # A veces la eliminación es lenta y esto da feedback inmediato.
+                await client.edit_message_text(user_id, source_id, "✖️ Operación cancelada.")
             except Exception:
-                # El mensaje puede no existir, no es crítico.
-                pass 
+                pass
                 
         await db_instance.set_user_state(user_id, "idle")
-        await message.reply("⚠️ Operación anterior cancelada.")
         
-        # Si el comando es /start, queremos que se detenga aquí para no mostrar el mensaje de bienvenida
-        # encima del mensaje de cancelación. Para otros comandos, dejamos que continúen.
-        if message.text.startswith("/start"):
-            raise StopPropagation
+        # Detenemos la propagación para que el comando no se ejecute inmediatamente después de cancelar.
+        # El usuario puede volver a intentarlo si lo desea.
+        # Esto evita un comportamiento confuso como /panel apareciendo después de cancelar.
+        await message.reply("✔️ Operación anterior cancelada. Puede continuar.")
+        raise StopPropagation
 
 
 @Client.on_message(filters.command("start") & filters.private)
 async def start_command(client: Client, message: Message):
-    # Ya no es necesario el reseteo aquí, el guardián lo maneja.
     greeting = get_greeting(message.from_user.id)
     start_message = (
-        f"¡A sus órdenes, {greeting}! Bienvenido a la <b>Suite de Medios v17.1 (Estable y Segura)</b>.\n\n"
-        "He reseteado su estado si era necesario y estoy listo para nuevas tareas.\n\n"
+        f"¡A sus órdenes, {greeting}! Bienvenido a la <b>Suite de Medios v17.2 (Estable y Segura)</b>.\n\n"
+        "Su estado es monitoreado constantemente para prevenir bloqueos.\n\n"
         "<b>📋 Comandos Principales:</b>\n"
         "• /panel - Muestra su mesa de trabajo con las tareas pendientes.\n"
         "• /p <code>[ID]</code> - Abre el menú de configuración para una tarea específica.\n"
@@ -193,7 +193,6 @@ async def media_gatekeeper(client: Client, message: Message):
     media = message.video or message.audio or message.document
     file_type = 'video' if message.video else 'audio' if message.audio else 'document'
     
-    # Simplificación: Todos los archivos se ponen en 'pending_processing'
     status = "pending_processing"
     
     metadata = {}
@@ -204,7 +203,8 @@ async def media_gatekeeper(client: Client, message: Message):
     elif file_type == 'audio':
         metadata = {"duration": media.duration}
     
-    metadata['size'] = media.file_size
+    # [ROBUSTNESS FIX] Obtener file_size de forma segura
+    metadata['size'] = getattr(media, 'file_size', 0)
     
     task_id = await db_instance.add_task(
         user_id=user_id, file_type=file_type, file_name=file_name,
@@ -213,13 +213,11 @@ async def media_gatekeeper(client: Client, message: Message):
     if not task_id:
         return await message.reply("❌ Error al registrar la tarea en la base de datos.")
     
-    # [ROBUST FIX] Contar tareas DESPUÉS de añadir la nueva para un número preciso.
     count = await db_instance.tasks.count_documents({'user_id': user_id, 'status': 'pending_processing'})
     
     reply_text = f"✅ Añadido al panel como tarea <b>#{count}</b>."
     status_msg = await message.reply(reply_text, parse_mode=ParseMode.HTML)
     
-    # Ofrecer perfiles si existen
     if presets := await db_instance.get_user_presets(user_id):
         await status_msg.edit("¿Desea aplicar un perfil de configuración a esta tarea?", reply_markup=build_profiles_keyboard(str(task_id), presets))
 
@@ -229,8 +227,8 @@ async def text_gatekeeper(client: Client, message: Message):
     user_id = message.from_user.id
     text = message.text.strip()
     
-    # Ignorar comandos (el guardián ya los manejó si era necesario)
     if text.startswith('/'):
+        # No hacer nada, el guardián y los manejadores de comandos ya hicieron su trabajo.
         return
         
     user_state = await db_instance.get_user_state(user_id)
@@ -240,7 +238,6 @@ async def text_gatekeeper(client: Client, message: Message):
     if re.search(URL_REGEX, text):
         return await handle_url_input(client, message, text)
     
-    # Si no es un comando, ni un estado, ni una URL, asumimos que es una búsqueda de música.
     await handle_music_search(client, message, text)
 
 
@@ -253,7 +250,6 @@ async def handle_url_input(client: Client, message: Message, url: str):
             
         caption = f"<b>📝 Título:</b> {escape_html(info['title'])}\n<b>🕓 Duración:</b> {format_time(info.get('duration'))}"
         
-        # Guardar la info completa en una colección temporal con TTL
         temp_info_id = str((await db_instance.search_results.insert_one({
             'user_id': message.from_user.id,
             'data': info,
@@ -293,7 +289,6 @@ async def handle_music_search(client: Client, message: Message, query: str):
         
         search_id = str((await db_instance.search_sessions.insert_one({'user_id': message.from_user.id, 'created_at': datetime.utcnow()})).inserted_id)
         
-        # Preparar documentos para inserción masiva
         docs = [{'search_id': search_id, 'created_at': datetime.utcnow(), **res} for res in results]
         await db_instance.search_results.insert_many(docs)
         
@@ -321,7 +316,7 @@ async def set_download_format_callback(client: Client, query: CallbackQuery):
         user_id=query.from_user.id,
         file_type=file_type,
         file_name=sanitize_filename(info['title']),
-        final_filename=sanitize_filename(info['title']), # Mismo nombre inicial
+        final_filename=sanitize_filename(info['title']),
         url=info.get('webpage_url') or info.get('url'),
         processing_config={"download_format_id": format_id},
         url_info=info,
@@ -330,7 +325,6 @@ async def set_download_format_callback(client: Client, query: CallbackQuery):
     
     await query.message.edit_text(f"✅ <b>¡Enviado a la cola!</b>\n🔗 <code>{escape_html(info['title'])}</code>", parse_mode=ParseMode.HTML)
 
-# Este router es necesario para las callbacks de búsqueda de música que no están en processing_handler
 @Client.on_callback_query(filters.regex(r"^(song_select_|search_page_|cancel_search_)"))
 async def search_callbacks_router(client: Client, query: CallbackQuery):
     try:
@@ -366,7 +360,7 @@ async def select_song_from_search(client: Client, query: CallbackQuery):
         task_id = await db_instance.add_task(
             user_id=query.from_user.id,
             file_type='audio',
-            file_name=f"{final_filename}.mp3", # Nombre esperado
+            file_name=f"{final_filename}.mp3",
             final_filename=final_filename,
             url=url_info.get('webpage_url'),
             status="queued",
@@ -378,7 +372,6 @@ async def select_song_from_search(client: Client, query: CallbackQuery):
         )
         
         if thumbnail_url := search_result.get('thumbnail'):
-            # El worker se encargará de descargar esto si es necesario.
             await db_instance.update_task_config(str(task_id), "thumbnail_url", thumbnail_url)
         
         await query.message.edit_text(f"✅ <b>¡Enviado a la cola!</b>\n🎧 <code>{escape_html(display_title)}</code>", parse_mode=ParseMode.HTML)

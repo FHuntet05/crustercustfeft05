@@ -1,3 +1,5 @@
+# --- START OF FILE src/core/worker.py ---
+
 import logging
 import time
 import os
@@ -35,6 +37,8 @@ class ProgressTracker:
         self.last_text = ""
         self.operation = "Iniciando..."
         self.filename = task.get('original_filename') or task.get('url', 'archivo')
+        # [ROBUSTNESS FIX] Guardar el loop de asyncio para corutinas seguras en hilos
+        self.loop = asyncio.get_event_loop()
 
     def set_operation(self, operation: str, filename: str = None):
         self.operation = operation
@@ -43,6 +47,7 @@ class ProgressTracker:
 
     async def update_progress(self, current: float, total: float, is_processing: bool = False):
         current_time = time.time()
+        # Actualizar cada 1.5 segundos o al final.
         if current_time - self.last_update_time < 1.5 and current < total:
             return
         
@@ -70,7 +75,10 @@ class ProgressTracker:
         except Exception as e:
             logger.warning(f"No se pudo editar mensaje de estado: {e}")
 
-    async def pyrogram_callback(self, current: int, total: int, *args):
+    # [FIX 3 - PYROGRAM PROGRESS]
+    # La firma de la callback de Pyrogram es (current, total). Usamos esto directamente
+    # para no depender de metadatos potencialmente ausentes.
+    async def pyrogram_callback(self, current: int, total: int):
         await self.update_progress(current, total, is_processing=False)
 
     def ytdlp_hook(self, d: Dict):
@@ -78,67 +86,95 @@ class ProgressTracker:
             total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
             downloaded = d.get('downloaded_bytes', 0)
             if total > 0:
-                asyncio.run_coroutine_threadsafe(self.update_progress(downloaded, total, is_processing=False), self.bot.loop)
+                # Usar el loop guardado para llamar a la corutina desde un hilo diferente de forma segura.
+                asyncio.run_coroutine_threadsafe(self.update_progress(downloaded, total, is_processing=False), self.loop)
 
 async def _run_shell_command(cmd: str, tracker: ProgressTracker):
-    tracker.set_operation("⚙️ Procesando...")
-    await tracker.update_progress(0, 0, is_processing=True)
-
+    # Ya no se necesita actualizar aquí, se hace en el bucle principal
     logger.info(f"Ejecutando comando de shell: {cmd}")
     process = await asyncio.create_subprocess_shell(cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     stdout, stderr = await process.communicate()
 
     if process.returncode != 0:
         error_log = stderr.decode('utf-8', 'ignore').strip()
+        logger.error(f"Error en comando FFmpeg. Log:\n{error_log}")
         raise FFmpegProcessingError(log=error_log)
     
     logger.info(f"Comando '{cmd.split()[0]}...' ejecutado con éxito.")
 
+
+# [FIX 3 - REFACTOR]
+# Refactorización de la lógica de descarga para mayor claridad y robustez.
 async def _download_source_files(bot: Client, task: Dict, dl_dir: str, tracker: ProgressTracker) -> List[str]:
-    file_type = task.get('file_type')
+    """Descarga todos los archivos fuente necesarios para una tarea (normal, join, zip)."""
+    if task.get('file_type') in ['join_operation', 'zip_operation']:
+        return await _download_batch_files(bot, task, dl_dir, tracker)
+    else:
+        return await _download_single_file(bot, task, dl_dir, tracker)
+
+async def _download_single_file(bot: Client, task: Dict, dl_dir: str, tracker: ProgressTracker) -> List[str]:
+    """Descarga un único archivo, ya sea de URL o de Telegram."""
+    tracker.set_operation("📥 Descargando")
+    download_path = ""
+    
+    if url := task.get('url'):
+        output_template = os.path.join(dl_dir, str(task['_id']))
+        format_id = task.get('processing_config', {}).get('download_format_id')
+        download_path = await asyncio.to_thread(
+            downloader.download_from_url, url, output_template, format_id, tracker
+        )
+    elif file_id := task.get('file_id'):
+        original_filename = task.get('original_filename', 'input_file')
+        _, ext = os.path.splitext(original_filename)
+        # Nombre de archivo local más descriptivo
+        safe_local_filename = f"input_{task['_id']}{ext}"
+        download_path = os.path.join(dl_dir, safe_local_filename)
+        
+        await bot.download_media(
+            message=file_id, 
+            file_name=download_path, 
+            progress=tracker.pyrogram_callback
+        )
+    
+    if not download_path or not os.path.exists(download_path):
+        raise NetworkError("La descarga del archivo principal falló.")
+        
+    return [download_path]
+
+async def _download_batch_files(bot: Client, task: Dict, dl_dir: str, tracker: ProgressTracker) -> List[str]:
+    """Descarga una lista de archivos fuente para operaciones de lote."""
+    source_task_ids = task.get('source_task_ids', [])
     downloaded_paths = []
 
-    if file_type in ['join_operation', 'zip_operation']:
-        source_task_ids = task.get('source_task_ids', [])
-        for i, source_id in enumerate(source_task_ids):
-            source_task = await db_instance.get_task(str(source_id))
-            if not source_task: continue
-            
-            filename = source_task.get('original_filename', f"source_{i}")
-            tracker.set_operation(f"📥 Descargando ({i+1}/{len(source_task_ids)})", filename)
-            
-            path = None
-            if source_url := source_task.get('url'):
-                path = await asyncio.to_thread(downloader.download_from_url, source_url, os.path.join(dl_dir, str(source_id)), source_task.get('processing_config', {}).get('download_format_id'), tracker)
-            elif source_file_id := source_task.get('file_id'):
-                _, ext = os.path.splitext(filename)
-                safe_local_filename = f"source_{i}{ext}"
-                path = os.path.join(dl_dir, safe_local_filename)
-                total_size = source_task.get('file_metadata', {}).get('size', 0)
-                # [FINAL FIX] Reintroducir progress_args
-                await bot.download_media(message=source_file_id, file_name=path, progress=tracker.pyrogram_callback, progress_args=(total_size,))
-            
-            if path and os.path.exists(path): downloaded_paths.append(path)
-            else: raise NetworkError(f"La descarga del archivo fuente '{filename}' falló.")
-        return downloaded_paths
-    else:
-        tracker.set_operation("📥 Descargando", task.get('original_filename', 'archivo'))
-        actual_download_path = ""
-        if url := task.get('url'):
-            actual_download_path = await asyncio.to_thread(downloader.download_from_url, url, os.path.join(dl_dir, str(task['_id'])), task.get('processing_config', {}).get('download_format_id'), tracker)
-        elif file_id := task.get('file_id'):
-            original_filename = task.get('original_filename', 'input_file')
-            _, ext = os.path.splitext(original_filename)
-            safe_local_filename = f"input{ext}"
-            actual_download_path = os.path.join(dl_dir, safe_local_filename)
-            
-            total_size = task.get('file_metadata', {}).get('size', 0)
-            # [FINAL FIX] Reintroducir progress_args
-            await bot.download_media(message=file_id, file_name=actual_download_path, progress=tracker.pyrogram_callback, progress_args=(total_size,))
+    for i, source_id in enumerate(source_task_ids):
+        source_task = await db_instance.get_task(str(source_id))
+        if not source_task:
+            logger.warning(f"Tarea fuente {source_id} para operación de lote no encontrada. Saltando.")
+            continue
         
-        if not actual_download_path or not os.path.exists(actual_download_path):
-            raise NetworkError("La descarga del archivo principal falló.")
-        return [actual_download_path]
+        filename = source_task.get('original_filename', f"source_{i}")
+        tracker.set_operation(f"📥 Descargando Lote ({i+1}/{len(source_task_ids)})", filename)
+        
+        path = None
+        if source_url := source_task.get('url'):
+            output_template = os.path.join(dl_dir, str(source_id))
+            format_id = source_task.get('processing_config', {}).get('download_format_id')
+            path = await asyncio.to_thread(
+                downloader.download_from_url, source_url, output_template, format_id, tracker
+            )
+        elif source_file_id := source_task.get('file_id'):
+            _, ext = os.path.splitext(filename)
+            safe_local_filename = f"source_{i}{ext}"
+            path = os.path.join(dl_dir, safe_local_filename)
+            await bot.download_media(message=source_file_id, file_name=path, progress=tracker.pyrogram_callback)
+        
+        if path and os.path.exists(path):
+            downloaded_paths.append(path)
+        else:
+            raise NetworkError(f"La descarga del archivo fuente '{filename}' falló.")
+            
+    return downloaded_paths
+
 
 async def process_task(bot: Client, task: Dict):
     task_id, user_id, tracker = str(task['_id']), task['user_id'], None
@@ -147,13 +183,16 @@ async def process_task(bot: Client, task: Dict):
 
     try:
         if ref := task.get('status_message_ref'):
-            try: status_message = await bot.get_messages(ref['chat_id'], ref['message_id'])
+            try:
+                status_message = await bot.get_messages(ref['chat_id'], ref['message_id'])
             except Exception: pass
         if not status_message:
             status_message = await bot.send_message(user_id, f"Iniciando: <code>{escape_html(filename)}</code>", parse_mode=ParseMode.HTML)
         
         tracker = ProgressTracker(bot, status_message, task)
-        dl_dir = os.path.join(DOWNLOAD_DIR, task_id); os.makedirs(dl_dir, exist_ok=True); files_to_clean.add(dl_dir)
+        dl_dir = os.path.join(DOWNLOAD_DIR, task_id)
+        os.makedirs(dl_dir, exist_ok=True)
+        files_to_clean.add(dl_dir)
         
         input_paths = await _download_source_files(bot, task, dl_dir, tracker)
         if not input_paths:
@@ -161,42 +200,71 @@ async def process_task(bot: Client, task: Dict):
 
         config = task.get('processing_config', {})
         watermark_path = None
+        
+        # [FIX 3 - THUMBNAIL DOWNLOAD]
+        # Descargar carátula/marca de agua antes del procesamiento
         if config.get('watermark', {}).get('type') == 'image' and (wm_id := config['watermark'].get('file_id')):
-            watermark_path = os.path.join(dl_dir, f"watermark_{wm_id}"); files_to_clean.add(watermark_path)
+            watermark_path = os.path.join(dl_dir, f"watermark_{wm_id}")
+            files_to_clean.add(watermark_path)
             await bot.download_media(wm_id, file_name=watermark_path)
 
+        if thumb_url := config.get('thumbnail_url'):
+            thumb_path = os.path.join(dl_dir, f"thumb_{task_id}.jpg")
+            if await asyncio.to_thread(downloader.download_thumbnail, thumb_url, thumb_path):
+                # El worker de ffmpeg se encargará de usar esta carátula si es necesario
+                # Aquí solo nos aseguramos de que se descargue y se limpie.
+                files_to_clean.add(thumb_path)
+
         main_input_path = input_paths[0]
-        initial_size = os.path.getsize(main_input_path) if input_paths else 0
+        initial_size = os.path.getsize(main_input_path) if os.path.exists(main_input_path) else 0
+
+        # Iniciar slot de procesamiento y procesar
         await resource_manager.acquire_ffmpeg_slot()
         try:
-            output_dir = os.path.join(OUTPUT_DIR, task_id); os.makedirs(output_dir, exist_ok=True); files_to_clean.add(output_dir)
+            tracker.set_operation("⚙️ Procesando...")
+            await tracker.update_progress(0, 0, is_processing=True)
+            
+            output_dir = os.path.join(OUTPUT_DIR, task_id)
+            os.makedirs(output_dir, exist_ok=True)
+            files_to_clean.add(output_dir)
+
             final_filename_base = sanitize_filename(config.get('final_filename', os.path.splitext(filename)[0]))
             output_path_base = os.path.join(output_dir, final_filename_base)
             
-            commands, definitive_output_path = ffmpeg.build_command_for_task(task, main_input_path, output_path_base, watermark_path)
+            commands, _ = ffmpeg.build_command_for_task(task, main_input_path, output_path_base, watermark_path)
             
             for cmd in commands:
-                if cmd: await _run_shell_command(cmd, tracker)
+                if cmd:
+                    await _run_shell_command(cmd, tracker)
         finally:
             resource_manager.release_ffmpeg_slot()
 
-        output_files = [f for f in glob.glob(os.path.join(output_dir, "*")) if not f.endswith((".txt", ".palette.png"))]
+        output_files = [f for f in glob.glob(os.path.join(output_dir, "*")) if not f.endswith((".txt", ".part", ".ytdl"))]
         if not output_files:
             raise FFmpegProcessingError("El procesamiento finalizó pero no se encontró ningún archivo de salida válido.")
         
-        for final_path in output_files:
-             final_size = os.path.getsize(final_path)
-             final_filename_up = os.path.basename(final_path)
-             caption = generate_summary_caption(task, initial_size, final_size, final_filename_up)
-             tracker.set_operation("⬆️ Subiendo", final_filename_up)
+        # Subir todos los archivos de salida
+        for i, final_path in enumerate(output_files):
+            final_size = os.path.getsize(final_path)
+            final_filename_up = os.path.basename(final_path)
+            
+            # Solo generar caption detallado para el primer archivo de salida
+            caption = generate_summary_caption(task, initial_size, final_size, final_filename_up) if i == 0 else ""
+            
+            tracker.set_operation(f"⬆️ Subiendo ({i+1}/{len(output_files)})", final_filename_up)
              
-             total_upload_size = os.path.getsize(final_path)
-             if task.get('file_type') == 'video' and not config.get('extract_audio'):
-                 await bot.send_video(user_id, video=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(total_upload_size,))
-             elif task.get('file_type') == 'audio' or config.get('extract_audio'):
-                 await bot.send_audio(user_id, audio=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(total_upload_size,))
-             else:
-                 await bot.send_document(user_id, document=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(total_upload_size,))
+            total_upload_size = os.path.getsize(final_path)
+            
+            # Determinar el tipo de archivo para enviar
+            file_type = task.get('file_type')
+            if config.get('extract_audio'): file_type = 'audio'
+            
+            if file_type == 'video':
+                await bot.send_video(user_id, video=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback)
+            elif file_type == 'audio':
+                await bot.send_audio(user_id, audio=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback)
+            else: # document, zip_operation, etc.
+                await bot.send_document(user_id, document=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback)
 
         await db_instance.update_task_field(task_id, "status", "completed")
         await tracker.message.delete()
@@ -211,17 +279,23 @@ async def process_task(bot: Client, task: Dict):
         await db_instance.update_task_fields(task_id, {"status": "failed", "last_error": str(e)})
         
         try:
-            if tracker: await tracker.message.edit_text(error_message, parse_mode=ParseMode.HTML)
-            else: await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
+            if tracker and tracker.message:
+                await tracker.message.edit_text(error_message, parse_mode=ParseMode.HTML)
+            else:
+                await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
         except Exception as notification_error:
-            logger.error(f"No se pudo editar el mensaje de estado. Fallback a nuevo mensaje. Error: {notification_error}")
-            try: await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
-            except Exception as final_error: logger.critical(f"FALLO FINAL de notificación al usuario {user_id}. Error: {final_error}")
+            logger.error(f"No se pudo notificar al usuario del error. Fallback. Error: {notification_error}")
+            try:
+                await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
+            except Exception as final_error:
+                logger.critical(f"FALLO FINAL de notificación al usuario {user_id}. Error: {final_error}")
     finally:
         for fpath in files_to_clean:
             try:
-                if os.path.isdir(fpath): shutil.rmtree(fpath, ignore_errors=True)
-                elif os.path.exists(fpath): os.remove(fpath)
+                if os.path.isdir(fpath):
+                    shutil.rmtree(fpath, ignore_errors=True)
+                elif os.path.exists(fpath):
+                    os.remove(fpath)
             except Exception as e:
                 logger.error(f"No se pudo limpiar {fpath}: {e}")
 
@@ -240,8 +314,10 @@ async def worker_loop(bot_instance: Client):
             if task_doc:
                 task_id = task_doc['_id']
                 logger.info(f"Tomando tarea {task_id} para procesar.")
+                # Crear una tarea de asyncio para que el bucle no se bloquee
                 asyncio.create_task(process_task(bot_instance, task_doc))
             else:
+                # Esperar un poco si no hay tareas para no sobrecargar la DB
                 await asyncio.sleep(2)
         except Exception as e:
             logger.critical(f"[WORKER] Bucle del worker falló críticamente: {e}", exc_info=True)
