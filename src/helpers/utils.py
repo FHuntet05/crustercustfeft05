@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from pyrogram.enums import ParseMode
 import logging
 import re
-from typing import Dict
+from typing import Dict, Optional
 from pyrogram.errors import MessageNotModified, FloodWait
 
 logger = logging.getLogger(__name__)
@@ -24,6 +24,7 @@ async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
     if not ctx or not ctx.message:
         return
 
+    # Evitar editar si el texto es el mismo
     if text == ctx.last_update_text:
         return
     ctx.last_update_text = text
@@ -69,18 +70,21 @@ def escape_html(text: str) -> str:
         return ""
     return escape(text, quote=False)
 
-def _create_text_bar(percentage: float, length: int = 10, fill_char: str = '█', empty_char: str = '░') -> str:
-    """Crea una barra de progreso de texto simple y robusta."""
+def _create_text_bar(percentage: float, length: int = 12, fill_char: str = '■', empty_char: str = '□') -> str:
+    """Crea una barra de progreso de texto mejorada."""
     if not 0 <= percentage <= 100:
         percentage = 0
     filled_len = int(length * percentage / 100)
     return fill_char * filled_len + empty_char * (length - filled_len)
 
 def format_time(seconds: float) -> str:
-    """Convierte segundos a un formato HH:MM:SS o MM:SS."""
+    """Convierte segundos a un formato HH:MM:SS o MM:SS o Xs."""
     if not isinstance(seconds, (int, float)) or seconds < 0 or seconds == float('inf'):
         return "∞"
-    td = timedelta(seconds=int(seconds))
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    td = timedelta(seconds=seconds)
     hours, remainder = divmod(td.seconds, 3600)
     minutes, seconds_part = divmod(remainder, 60)
     if td.days > 0:
@@ -100,48 +104,52 @@ def sanitize_filename(filename: str) -> str:
     sanitized_base = re.sub(r'[\s-]+', ' ', sanitized_base).strip()
     if not sanitized_base:
         sanitized_base = "archivo_procesado"
+    # Devuelve el nombre completo, ya que el worker ahora lo espera así.
     return f"{sanitized_base[:240]}{extension}"
 
-def format_status_message(operation: str, filename: str, percentage: float,
-                          processed_bytes: float, total_bytes: float, speed: float, eta: float,
-                          engine: str, user_id: int, user_mention: str, is_processing: bool = False, file_size: int = 0) -> str:
-    """Genera el mensaje de estado completo para descargas, subidas y procesamiento."""
-    short_filename = (filename[:35] + '...') if len(filename) > 38 else filename
+def format_status_message(
+    operation_title: str, percentage: float, processed_bytes: float, total_bytes: float,
+    speed: float, eta: float, elapsed: float, status_tag: str,
+    engine: str, user_id: int, file_info: Optional[str] = None
+) -> str:
+    """Genera el mensaje de estado con el nuevo formato visual detallado."""
     
-    lines = [f"<b>{operation}</b>", f"<code>{escape_html(short_filename)}</code>\n"]
+    bar = _create_text_bar(percentage)
     
-    if total_bytes > 0:
-        bar = _create_text_bar(percentage)
-        lines.append(f"Progreso: [{bar}] {percentage:.1f}%")
-    else:
-        lines.append(f"Progreso: [ <i>Calculando...</i> ]")
-
-    if is_processing:
+    details = []
+    
+    # Línea de Procesado (bytes o tiempo)
+    if "Process" in operation_title:
         processed_str = format_time(processed_bytes)
         total_str = format_time(total_bytes) if total_bytes > 0 else "??:??"
-        speed_str = f"{speed:.2f}x" if speed else "N/A"
-        size_str = f"({format_bytes(file_size)})" if file_size > 0 else ""
-        lines.append(f"┠ 🎞️ {processed_str} de {total_str} {size_str}")
+        details.append(f"Processed: {processed_str} de {total_str}")
     else:
         processed_str = format_bytes(processed_bytes)
-        total_str = format_bytes(total_bytes) if total_bytes > 0 else "---"
-        speed_str = f"{format_bytes(speed)}/s" if speed else "N/A"
-        lines.append(f"┠ 📦 {processed_str} de {total_str}")
+        total_str = format_bytes(total_bytes)
+        details.append(f"Processed: {processed_str} of {total_str}")
 
-    # Este código asume que progress_tracker es una variable global en worker.py
-    # Para hacerlo más robusto, se podría pasar el start_time a la función.
-    # Por ahora, se deja así por compatibilidad.
-    start_time = time.time() # Fallback
-    # from src.core.worker import progress_tracker # Evitar importación circular
-    # if user_id in progress_tracker:
-    #     start_time = progress_tracker.get(user_id).start_time
+    if file_info:
+        details.append(f"File: {file_info}")
     
-    lines.extend([
-        f"┠ 🚀 Velocidad: {speed_str}",
-        f"┠ ⏳ ETA: {format_time(eta)}",
-        f"┖ ⏱️ Transcurrido: {int(time.time() - start_time)}s"
-    ])
-    
+    details.append(f"Status: {status_tag}")
+    details.append(f"ETA: {format_time(eta)}")
+
+    # Formato de velocidad
+    if "Process" in operation_title:
+        details.append(f"Speed: {speed:.2f}x")
+    else:
+        details.append(f"Speed: {format_bytes(speed)}/s")
+
+    details.append(f"Elapsed: {format_time(elapsed)}")
+    details.append(f"Engine: {engine}")
+    details.append(f"ID: {user_id}")
+
+    # Construcción final del mensaje
+    lines = [f"<b>{operation_title}</b>", f"<code>[{bar}] {percentage:.2f}%</code>"]
+    for i, detail in enumerate(details):
+        prefix = '┖' if i == len(details) - 1 else '┠'
+        lines.append(f"{prefix} {detail}")
+        
     return "\n".join(lines)
 
 
@@ -190,8 +198,7 @@ def generate_summary_caption(task: Dict, initial_size: int, final_size: int, fin
         
     return "\n".join(caption_parts)
 
-# [IMPORT FIX]
-# Reintroduciendo la función que faltaba, requerida por handlers.py
+
 def format_task_details_rich(task: Dict, index: int) -> str:
     """Genera una descripción detallada y rica de una tarea para el /panel."""
     file_type = task.get('file_type', 'document')
@@ -212,8 +219,8 @@ def format_task_details_rich(task: Dict, index: int) -> str:
     if config.get('trim_times'): config_parts.append("✂️ Cortado")
     if config.get('gif_options'): config_parts.append("🎞️ GIF")
     if config.get('watermark'): config_parts.append("💧 Marca Agua")
-    if config.get('mute_audio'): config_parts.append("🔇 Silenciado")
-    if config.get('extract_audio'): config_parts.append("🎵 Extraer Audio")
+    if config.get('mute_audio'): ops.append("🔇 Silenciado")
+    if config.get('extract_audio'): ops.append("🎵 Extraer Audio")
     
     if config.get('audio_format') or config.get('audio_bitrate'):
         config_parts.append(f"🔊 Convertido ({config.get('audio_format','mp3')})")
