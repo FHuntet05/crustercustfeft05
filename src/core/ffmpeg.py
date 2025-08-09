@@ -32,10 +32,6 @@ def build_ffmpeg_command(task: Dict, input_path: str, output_path: str, watermar
     if config.get('extract_audio'):
         return build_extract_audio_command(input_path, output_path)
 
-    # [DEFINITIVE FIX - FFMPEG PROGRESS]
-    # Se elimina el flag "-loglevel error". El flag "-hide_banner" ya oculta la información
-    # innecesaria del inicio. Sin "-loglevel error", FFmpeg volverá a emitir las
-    # actualizaciones de progreso "time=..." que el worker necesita para funcionar.
     command: List[str] = ["ffmpeg", "-y", "-hide_banner"]
     
     command.extend(["-i", input_path])
@@ -53,7 +49,6 @@ def build_ffmpeg_command(task: Dict, input_path: str, output_path: str, watermar
         if res := transcode.get('resolution'):
             video_filters.append(f"scale=-2:{res.replace('p', '')}")
 
-    # (La lógica de filtros y marcas de agua se mantiene igual)
     if video_filters:
         filter_str = f"{current_video_chain}{','.join(video_filters)}{video_chain_out}"
         filter_complex_parts.append(filter_str)
@@ -80,11 +75,10 @@ def build_ffmpeg_command(task: Dict, input_path: str, output_path: str, watermar
         command.append("-an")
         command = [arg for arg in command if arg != "0:a?"]
 
+    # ✅ Aquí se añade el flag para emitir progreso continuo
+    command.extend(["-progress", "pipe:2"])
     command.append(output_path)
-    
-    logger.info(f"Comando FFmpeg construido (como lista): {command}")
-    return [command], output_path
-
+    return command
 
 def build_extract_audio_command(input_path: str, output_path_base: str) -> tuple[List[List[str]], str]:
     media_info = get_media_info(input_path)

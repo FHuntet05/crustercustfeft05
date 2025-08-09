@@ -73,10 +73,11 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
     except (TypeError, ValueError):
         duration = 0
 
-    time_pattern = re.compile(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})")
-    
+    out_time_pattern = re.compile(r"out_time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})")
+
     ctx = progress_tracker.get(user_id)
-    if not ctx: return
+    if not ctx:
+        return
 
     process = await asyncio.create_subprocess_exec(
         *command,
@@ -85,17 +86,20 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
 
     all_stderr_lines = []
     async for line in process.stderr:
-        log_line = line.decode('utf-8', 'ignore')
+        log_line = line.decode('utf-8', 'ignore').strip()
         all_stderr_lines.append(log_line)
-        if match := time_pattern.search(log_line):
+
+        if match := out_time_pattern.search(log_line):
             if duration > 0:
                 now = time.time()
-                if now - ctx.last_update_time < 1.5: continue
+                if now - ctx.last_update_time < 1.5:
+                    continue
                 ctx.last_update_time = now
 
-                h, m, s, ms = map(int, match.groups())
-                processed_time = h * 3600 + m * 60 + s + ms / 100
-                if processed_time > duration: processed_time = duration
+                h, m, s, cs = map(int, match.groups())
+                processed_time = h * 3600 + m * 60 + s + cs / 100
+                if processed_time > duration:
+                    processed_time = duration
 
                 percentage = (processed_time / duration) * 100
                 elapsed = now - ctx.start_time
@@ -103,17 +107,24 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
                 eta = (duration - processed_time) / speed if speed > 0 else float('inf')
 
                 text = format_status_message(
-                    operation_title="Task is being Processed!", percentage=percentage,
-                    processed_bytes=processed_time, total_bytes=duration,
-                    speed=speed, eta=eta, elapsed=elapsed,
-                    status_tag="#Processing", engine="FFmpeg", user_id=user_id
+                    operation_title="Task is being Processed!",
+                    percentage=percentage,
+                    processed_bytes=processed_time,
+                    total_bytes=duration,
+                    speed=speed,
+                    eta=eta,
+                    elapsed=elapsed,
+                    status_tag="#Processing",
+                    engine="FFmpeg",
+                    user_id=user_id
                 )
                 await _edit_status_message(user_id, text, progress_tracker)
-    
+
     await process.wait()
     if process.returncode != 0:
         error_log = "".join(all_stderr_lines)
         raise Exception(f"FFmpeg falló con código de salida {process.returncode}. Log:\n{error_log}")
+
 
 async def process_task(bot, task: dict):
     task_id, user_id = str(task['_id']), task['user_id']
