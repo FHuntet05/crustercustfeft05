@@ -74,7 +74,7 @@ class ProgressTracker:
             asyncio.run_coroutine_threadsafe(self.update_progress(downloaded, total, is_processing=False), self.bot.loop)
 
 async def _run_ffmpeg_process(cmd: str):
-    process = await asyncio.create_subprocess_shell(cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    process = await asyncio.create_subprocess_shell(cmd, stderr=asyncio.subprocess.PIPE)
     _, stderr = await process.communicate()
     if process.returncode != 0: raise FFmpegProcessingError(log=stderr.decode('utf-8', 'ignore')[-1000:])
 
@@ -87,30 +87,15 @@ async def _run_ffmpeg_with_progress(tracker: ProgressTracker, cmd: str, input_pa
     tracker.set_operation("⚙️ Procesando...")
     time_pattern = re.compile(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})")
     process = await asyncio.create_subprocess_shell(cmd, stderr=asyncio.subprocess.PIPE)
-    
-    stderr_reader = asyncio.create_task(process.stderr.read())
-    
-    while not process.stderr.at_eof():
-        try:
-            chunk = await asyncio.wait_for(stderr_reader, timeout=1.0)
-            if not chunk: break
-            line = chunk.decode('utf-8', 'ignore')
-            if match := time_pattern.search(line):
-                h, m, s, ms = map(int, match.groups())
-                processed_sec = h * 3600 + m * 60 + s + ms / 100
-                await tracker.update_progress(processed_sec, total_sec, is_processing=True)
-            if not stderr_reader.done():
-                 stderr_reader = asyncio.create_task(process.stderr.read())
-        except asyncio.TimeoutError:
-            pass
-
+    async for line_bytes in process.stderr:
+        line = line_bytes.decode('utf-8', 'ignore').strip()
+        if match := time_pattern.search(line):
+            h, m, s, ms = map(int, match.groups())
+            processed_sec = h * 3600 + m * 60 + s + ms / 100
+            await tracker.update_progress(processed_sec, total_sec, is_processing=True)
     await process.wait()
     if process.returncode != 0:
-        # Re-read stderr if needed to get the final error message
-        remaining_err = await stderr_reader
-        full_log = remaining_err.decode('utf-8', 'ignore')
-        raise FFmpegProcessingError(log=full_log[-1000:])
-
+        raise FFmpegProcessingError("Error durante el procesamiento FFmpeg.")
 
 async def process_task(bot: Client, task: dict):
     task_id, user_id, tracker = str(task['_id']), task['user_id'], None
@@ -126,9 +111,7 @@ async def process_task(bot: Client, task: dict):
         
         tracker = ProgressTracker(bot, status_message, task)
         dl_dir = os.path.join(DOWNLOAD_DIR, task_id); os.makedirs(dl_dir, exist_ok=True); files_to_clean.add(dl_dir)
-        resource_manager.check_disk_space(task.get('file_metadata', {}).get('size', 0))
-
-        # --- Descarga ---
+        
         tracker.set_operation("📥 Descargando")
         actual_download_path = ""
         if url := task.get('url'):
@@ -136,13 +119,15 @@ async def process_task(bot: Client, task: dict):
             actual_download_path = await asyncio.to_thread(downloader.download_from_url, url, os.path.join(dl_dir, task_id), format_id, tracker)
         elif file_id := task.get('file_id'):
             actual_download_path = os.path.join(dl_dir, filename)
-            await bot.download_media(message=file_id, file_name=actual_download_path, progress=tracker.pyrogram_callback)
+            total_size = task.get('file_metadata', {}).get('size', 0)
+            await bot.download_media(message=file_id, file_name=actual_download_path, progress=tracker.pyrogram_callback, progress_args=(total_size,))
         if not actual_download_path or not os.path.exists(actual_download_path): raise NetworkError("La descarga del archivo principal falló.")
         
-        # --- Procesamiento ---
         config = task.get('processing_config', {}); watermark_path, subs_path, new_audio_path = None, None, None
         if thumb_id := config.get('thumbnail_file_id'):
             path = os.path.join(dl_dir, f"thumb_{thumb_id}"); await bot.download_media(thumb_id, file_name=path); config['thumbnail_path'] = path; files_to_clean.add(path)
+        if config.get('watermark', {}).get('type') == 'image' and (wm_id := config['watermark'].get('file_id')):
+            watermark_path = os.path.join(dl_dir, f"watermark_{wm_id}"); await bot.download_media(wm_id, file_name=watermark_path); files_to_clean.add(watermark_path)
         initial_size = os.path.getsize(actual_download_path)
         await resource_manager.acquire_ffmpeg_slot()
         try:
@@ -156,17 +141,18 @@ async def process_task(bot: Client, task: dict):
                 else: await _run_ffmpeg_process(cmd)
         finally: resource_manager.release_ffmpeg_slot()
 
-        # --- Subida ---
         found_files = glob.glob(definitive_output_path) if "*" in definitive_output_path else ([definitive_output_path] if os.path.exists(definitive_output_path) else [])
         if not found_files: raise FFmpegProcessingError("FFmpeg finalizó pero no se encontró el archivo de salida.")
+        
         for final_path in found_files:
             final_size, final_filename_up = os.path.getsize(final_path), os.path.basename(final_path)
             caption = generate_summary_caption(task, initial_size, final_size, final_filename_up)
             tracker.set_operation("⬆️ Subiendo", final_filename_up)
-            if final_path.endswith(('.mp4', '.mkv')): await bot.send_video(user_id, video=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback)
-            elif final_path.endswith(('.mp3', '.flac')): await bot.send_audio(user_id, audio=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback)
-            else: await bot.send_document(user_id, document=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback)
-
+            total_size_up = os.path.getsize(final_path)
+            if final_path.endswith(('.mp4', '.mkv')): await bot.send_video(user_id, video=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(total_size_up,))
+            elif final_path.endswith(('.mp3', '.flac', 'm4a', 'opus')): await bot.send_audio(user_id, audio=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(total_size_up,))
+            else: await bot.send_document(user_id, document=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(total_size_up,))
+        
         await db_instance.update_task_field(task_id, "status", "completed")
         await tracker.message.delete()
     except Exception as e:
@@ -176,7 +162,6 @@ async def process_task(bot: Client, task: dict):
         await db_instance.update_task_fields(task_id, {"status": status_to_set, "last_error": str(e)})
         try:
             if tracker: await tracker.message.edit_text(error_message, parse_mode=ParseMode.HTML)
-            else: await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
         except Exception as notification_error:
             logger.error(f"No se pudo notificar al usuario editando el mensaje. Fallback a nuevo mensaje. Error: {notification_error}")
             try: await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
@@ -195,7 +180,7 @@ async def worker_loop(bot_instance: Client):
     while True:
         try:
             task_doc = await db_instance.tasks.find_one_and_update(
-                {"status": {"$in": ["queued"]}},
+                {"status": "queued"},
                 {"$set": {"status": "processing", "processed_at": datetime.utcnow()}},
                 sort=[('created_at', 1)]
             )
