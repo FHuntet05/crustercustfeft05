@@ -34,7 +34,6 @@ class ProgressContext:
         self.loop = loop
     
     def reset_timer(self):
-        """Reinicia el temporizador para una nueva etapa (ej. de descarga a procesamiento)."""
         self.start_time = time.time()
 
 progress_tracker: Dict[int, ProgressContext] = {}
@@ -44,10 +43,7 @@ def _progress_callback_pyrogram(current: int, total: int, user_id: int, title: s
     if not ctx: return
 
     final_total = total if total > 0 else db_total_size
-    
-    # [VISUAL FIX] Asegurar que el progreso no supere el 100%
-    if current > final_total:
-        current = final_total
+    if current > final_total: current = final_total
 
     now = time.time()
     if now - ctx.last_update_time < 1.5 and current < final_total:
@@ -77,7 +73,6 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
     ctx = progress_tracker.get(user_id)
     if not ctx: return
     
-    # [STATUS FIX] Reiniciar el temporizador para la etapa de procesamiento
     ctx.reset_timer()
 
     process = await asyncio.create_subprocess_exec(
@@ -85,8 +80,10 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
         stderr=asyncio.subprocess.PIPE
     )
 
+    all_stderr_lines = []
     async for line in process.stderr:
         log_line = line.decode('utf-8', 'ignore')
+        all_stderr_lines.append(log_line)
         if match := time_pattern.search(log_line):
             if duration > 0:
                 now = time.time()
@@ -110,13 +107,15 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
     
     await process.wait()
     if process.returncode != 0:
-        raise Exception(f"FFmpeg falló con código de salida {process.returncode}")
+        error_log = "".join(all_stderr_lines)
+        raise Exception(f"FFmpeg falló con código de salida {process.returncode}. Log:\n{error_log}")
 
 
 async def process_task(bot, task: dict):
     task_id, user_id = str(task['_id']), task['user_id']
     status_message, files_to_clean = None, set()
     actual_download_path = None
+    original_filename = "Tarea sin nombre"
 
     try:
         task = await db_instance.get_task(task_id)
@@ -139,7 +138,6 @@ async def process_task(bot, task: dict):
             actual_download_path = os.path.join(dl_dir, original_filename)
             db_total_size = task.get('file_metadata', {}).get('size', 0)
             
-            # [STATUS FIX] Reiniciar temporizador para la etapa de descarga
             ctx.reset_timer()
             await bot.download_media(
                 message=file_id,
@@ -162,10 +160,20 @@ async def process_task(bot, task: dict):
                 watermark_path = await bot.download_media(wm_id, file_name=os.path.join(dl_dir, "watermark_img"))
                 files_to_clean.add(watermark_path)
         
-        final_filename = sanitize_filename(config.get('final_filename', original_filename))
-        output_path = os.path.join(OUTPUT_DIR, final_filename)
+        # [DEFINITIVE FIX - EXTENSION HANDLING]
+        # 1. Obtener el nombre base, ya sea del original o del renombrado, y sanearlo.
+        final_filename_base = sanitize_filename(config.get('final_filename', original_filename))
+
+        # 2. Determinar la extensión de salida correcta.
+        if config.get('transcode'):
+            output_extension = ".mp4"
+        else:
+            _, output_extension = os.path.splitext(original_filename)
+
+        # 3. Construir la ruta de salida final y válida.
+        final_output_filename = f"{final_filename_base}{output_extension}"
+        output_path = os.path.join(OUTPUT_DIR, final_output_filename)
         
-        # [FFMPEG FIX] Asegurarse de que el directorio de salida exista
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         files_to_clean.add(output_path)
         
@@ -179,7 +187,6 @@ async def process_task(bot, task: dict):
         final_size = os.path.getsize(definitive_output_path)
         caption = generate_summary_caption(task, initial_size, final_size, os.path.basename(definitive_output_path))
         
-        # [STATUS FIX] Reiniciar temporizador para la etapa de subida
         ctx.reset_timer()
         await bot.send_video(
             user_id, video=definitive_output_path, caption=caption, 
@@ -193,7 +200,6 @@ async def process_task(bot, task: dict):
 
     except Exception as e:
         logger.critical(f"Error al procesar la tarea {task_id}: {e}", exc_info=True)
-        original_filename = task.get('original_filename', 'N/A')
         error_message = f"❌ <b>Error Fatal en Tarea</b>\n<code>{escape_html(original_filename)}</code>\n\n<b>Motivo:</b>\n<pre>{escape_html(str(e))}</pre>"
         
         await db_instance.update_task(task_id, "status", "error")
