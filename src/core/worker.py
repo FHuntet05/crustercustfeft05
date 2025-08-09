@@ -17,7 +17,7 @@ from src.helpers.utils import format_status_message, sanitize_filename, escape_h
 from src.core import ffmpeg
 from src.core import downloader
 from src.core.resource_manager import resource_manager
-from src.core.exceptions import (DiskSpaceError, FFmpegProcessingError, 
+from src.core.exceptions import (DiskSpaceError, FFmpegProcessingError,
                                  InvalidMediaError, NetworkError, AuthenticationError)
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,6 @@ class ProgressTracker:
         except Exception as e:
             logger.warning(f"No se pudo editar mensaje de estado: {e}")
 
-    # [CRITICAL FIX] Añadir *args para aceptar argumentos extra de Pyrogram sin causar un TypeError.
     async def pyrogram_callback(self, current: int, total: int, *args):
         await self.update_progress(current, total, is_processing=False)
 
@@ -85,15 +84,8 @@ async def _run_shell_command(cmd: str, tracker: ProgressTracker):
     tracker.set_operation("⚙️ Procesando...")
     await tracker.update_progress(0, 0, is_processing=True)
 
-    # Loguear el comando completo para una mejor depuración
     logger.info(f"Ejecutando comando de shell: {cmd}")
-
-    process = await asyncio.create_subprocess_shell(
-        cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
-    
+    process = await asyncio.create_subprocess_shell(cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     stdout, stderr = await process.communicate()
 
     if process.returncode != 0:
@@ -108,46 +100,42 @@ async def _download_source_files(bot: Client, task: Dict, dl_dir: str, tracker: 
 
     if file_type in ['join_operation', 'zip_operation']:
         source_task_ids = task.get('source_task_ids', [])
-        logger.info(f"Tarea de '{file_type}' detectada. Descargando {len(source_task_ids)} archivos fuente.")
         for i, source_id in enumerate(source_task_ids):
             source_task = await db_instance.get_task(str(source_id))
-            if not source_task:
-                logger.warning(f"No se encontró la tarea fuente con ID {source_id}. Omitiendo.")
-                continue
+            if not source_task: continue
             
             filename = source_task.get('original_filename', f"source_{i}")
             tracker.set_operation(f"📥 Descargando ({i+1}/{len(source_task_ids)})", filename)
             
             path = None
             if source_url := source_task.get('url'):
-                path = await asyncio.to_thread(
-                    downloader.download_from_url,
-                    source_url,
-                    os.path.join(dl_dir, str(source_id)),
-                    source_task.get('processing_config', {}).get('download_format_id'),
-                    tracker # [FIX] Pasar el tracker a descargas de URL
-                )
+                path = await asyncio.to_thread(downloader.download_from_url, source_url, os.path.join(dl_dir, str(source_id)), source_task.get('processing_config', {}).get('download_format_id'), tracker)
             elif source_file_id := source_task.get('file_id'):
-                path = os.path.join(dl_dir, filename)
+                # [CRITICAL FIX #2.1] Usar un nombre de archivo seguro para las fuentes de join/zip
+                _, ext = os.path.splitext(filename)
+                safe_local_filename = f"source_{i}{ext}"
+                path = os.path.join(dl_dir, safe_local_filename)
                 total_size = source_task.get('file_metadata', {}).get('size', 0)
-                await bot.download_media(message=source_file_id, file_name=path, progress=tracker.pyrogram_callback)
+                await bot.download_media(message=source_file_id, file_name=path, progress=tracker.pyrogram_callback, progress_args=(total_size,))
             
-            if path and os.path.exists(path):
-                downloaded_paths.append(path)
-            else:
-                raise NetworkError(f"La descarga del archivo fuente '{filename}' falló.")
+            if path and os.path.exists(path): downloaded_paths.append(path)
+            else: raise NetworkError(f"La descarga del archivo fuente '{filename}' falló.")
         return downloaded_paths
-
     else:
-        tracker.set_operation("📥 Descargando")
+        tracker.set_operation("📥 Descargando", task.get('original_filename', 'archivo'))
         actual_download_path = ""
         if url := task.get('url'):
-            format_id = task.get('processing_config', {}).get('download_format_id')
-            actual_download_path = await asyncio.to_thread(downloader.download_from_url, url, os.path.join(dl_dir, str(task['_id'])), format_id, tracker)
+            actual_download_path = await asyncio.to_thread(downloader.download_from_url, url, os.path.join(dl_dir, str(task['_id'])), task.get('processing_config', {}).get('download_format_id'), tracker)
         elif file_id := task.get('file_id'):
-            actual_download_path = os.path.join(dl_dir, task.get('original_filename', 'archivo'))
+            # [CRITICAL FIX #2.2] Usar un nombre de archivo local seguro en lugar del original de Telegram
+            original_filename = task.get('original_filename', 'input_file')
+            _, ext = os.path.splitext(original_filename)
+            safe_local_filename = f"input{ext}" # ej: input.mkv
+            actual_download_path = os.path.join(dl_dir, safe_local_filename)
+            
+            # [CRITICAL FIX #1] Re-añadir progress_args para que la barra de progreso funcione
             total_size = task.get('file_metadata', {}).get('size', 0)
-            await bot.download_media(message=file_id, file_name=actual_download_path, progress=tracker.pyrogram_callback)
+            await bot.download_media(message=file_id, file_name=actual_download_path, progress=tracker.pyrogram_callback, progress_args=(total_size,))
         
         if not actual_download_path or not os.path.exists(actual_download_path):
             raise NetworkError("La descarga del archivo principal falló.")
@@ -207,11 +195,11 @@ async def process_task(bot: Client, task: Dict):
              
              file_type = task.get('file_type')
              if file_type == 'video' and not config.get('extract_audio'):
-                 await bot.send_video(user_id, video=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback)
+                 await bot.send_video(user_id, video=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(final_size,))
              elif file_type == 'audio' or config.get('extract_audio'):
-                 await bot.send_audio(user_id, audio=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback)
+                 await bot.send_audio(user_id, audio=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(final_size,))
              else:
-                 await bot.send_document(user_id, document=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback)
+                 await bot.send_document(user_id, document=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(final_size,))
 
         await db_instance.update_task_field(task_id, "status", "completed")
         await tracker.message.delete()
