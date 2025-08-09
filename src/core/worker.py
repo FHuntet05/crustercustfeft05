@@ -160,17 +160,16 @@ async def process_task(bot, task: dict):
                 watermark_path = await bot.download_media(wm_id, file_name=os.path.join(dl_dir, "watermark_img"))
                 files_to_clean.add(watermark_path)
         
-        # [DEFINITIVE FIX - EXTENSION HANDLING]
-        # 1. Obtener el nombre base, ya sea del original o del renombrado, y sanearlo.
+        # [DEFINITIVE FIX - EXTENSION LOGIC]
         final_filename_base = sanitize_filename(config.get('final_filename', original_filename))
 
-        # 2. Determinar la extensión de salida correcta.
         if config.get('transcode'):
             output_extension = ".mp4"
         else:
-            _, output_extension = os.path.splitext(original_filename)
+            _, original_ext = os.path.splitext(original_filename)
+            # Si el archivo original no tiene extensión, usar .mkv como un contenedor seguro.
+            output_extension = original_ext if original_ext else ".mkv"
 
-        # 3. Construir la ruta de salida final y válida.
         final_output_filename = f"{final_filename_base}{output_extension}"
         output_path = os.path.join(OUTPUT_DIR, final_output_filename)
         
