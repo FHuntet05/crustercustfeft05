@@ -59,10 +59,9 @@ class ProgressTracker:
             eta = (total - current) / speed if speed > 0 else float('inf')
             percentage = (current / total) * 100
         else:
-            # Manejar caso de tamaño total desconocido
             speed = current / elapsed if elapsed > 0 else 0
             eta = float('inf')
-            percentage = 0  # No se puede calcular el porcentaje
+            percentage = 0 
 
         text = format_status_message(
             operation=self.operation,
@@ -97,7 +96,7 @@ class ProgressTracker:
             logger.error(f"Error al editar mensaje de estado para la tarea {self.task['_id']}: {e}")
 
     # Callback para Pyrogram (descargas/subidas)
-    async def pyrogram_callback(self, current: int, total: int):
+    async def pyrogram_callback(self, current: int, total: int, *args):
         await self.update_progress(current, total, is_processing=False)
 
     # Hook para yt-dlp (descargas de URL)
@@ -105,9 +104,6 @@ class ProgressTracker:
         if d['status'] == 'downloading':
             total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
             downloaded_bytes = d.get('downloaded_bytes', 0)
-            
-            # El loop de eventos puede no estar corriendo en el hilo de yt-dlp,
-            # así que programamos la corutina de forma segura.
             asyncio.run_coroutine_threadsafe(
                 self.update_progress(downloaded_bytes, total_bytes, is_processing=False),
                 self.bot.loop
@@ -135,10 +131,7 @@ async def _run_ffmpeg_with_progress(tracker: ProgressTracker, cmd: str, input_pa
     
     stderr_buffer, all_stderr_lines = "", []
 
-    while True:
-        chunk = await process.stderr.read(1024)
-        if not chunk: break
-        
+    async for chunk in process.stderr:
         decoded_chunk = chunk.decode('utf-8', 'ignore')
         stderr_buffer += decoded_chunk
 
@@ -166,62 +159,70 @@ async def process_media_task(bot: Client, task: dict):
         task = await db_instance.get_task(task_id)
         if not task: raise InvalidMediaError("Tarea no encontrada después de recargar.")
         
-        if thumbnail_path := task.get('processing_config', {}).get('thumbnail_path'):
-            if os.path.exists(thumbnail_path):
-                files_to_clean.add(thumbnail_path)
-        
         if ref := task.get('status_message_ref'):
-            try:
-                status_message = await bot.get_messages(ref['chat_id'], ref['message_id'])
-                logger.info(f"Mensaje de estado {status_message.id} adoptado para la tarea {task_id}.")
-            except Exception as e:
-                logger.warning(f"No se pudo adoptar mensaje {ref['message_id']} para la tarea {task_id}: {e}")
+            try: status_message = await bot.get_messages(ref['chat_id'], ref['message_id'])
+            except Exception as e: logger.warning(f"No se pudo adoptar mensaje {ref['message_id']}: {e}")
         
         if not status_message:
             status_message = await bot.send_message(user_id, f"Iniciando: <code>{escape_html(filename)}</code>", parse_mode=ParseMode.HTML)
-            logger.info(f"Nuevo mensaje de estado {status_message.id} creado para la tarea {task_id}.")
         
         tracker = ProgressTracker(bot, status_message, task)
         await tracker.update_progress(0, 1)
 
-        dl_dir = os.path.join(DOWNLOAD_DIR, task_id)
-        os.makedirs(dl_dir, exist_ok=True)
-        files_to_clean.add(dl_dir)
-        
+        dl_dir = os.path.join(DOWNLOAD_DIR, task_id); os.makedirs(dl_dir, exist_ok=True); files_to_clean.add(dl_dir)
         resource_manager.check_disk_space(task.get('file_metadata', {}).get('size', 0))
 
+        # 1. Descargar archivo principal
         actual_download_path = ""
         if url := task.get('url'):
             tracker.set_operation("📥 Descargando")
             format_id = task.get('processing_config', {}).get('download_format_id')
             if not format_id: raise InvalidMediaError("Tarea de URL sin 'download_format_id'.")
             actual_download_path = await asyncio.to_thread(downloader.download_from_url, url, os.path.join(dl_dir, task_id), format_id, tracker)
-            if not actual_download_path: raise NetworkError("La descarga desde la URL falló.")
         elif file_id := task.get('file_id'):
             tracker.set_operation("📥 Descargando")
             actual_download_path = os.path.join(dl_dir, filename)
-            # Pyrogram no nos da el tamaño total aquí, así que lo obtenemos de la tarea
             total_size = task.get('file_metadata', {}).get('size', 0)
             await bot.download_media(message=file_id, file_name=actual_download_path, progress=tracker.pyrogram_callback, progress_args=(total_size,))
-        
-        initial_size = os.path.getsize(actual_download_path) if os.path.exists(actual_download_path) else 0
+        if not actual_download_path or not os.path.exists(actual_download_path): raise NetworkError("La descarga del archivo principal falló.")
 
+        # 2. Descargar assets adicionales (marcas de agua, miniaturas, etc.)
+        config = task.get('processing_config', {})
+        watermark_path, subs_path, new_audio_path = None, None, None
+        
+        # Inyectar la ruta de la miniatura en la config para que ffmpeg la vea
+        if thumb_id := config.get('thumbnail_file_id'):
+            path = os.path.join(dl_dir, f"thumb_{thumb_id}")
+            await bot.download_media(thumb_id, file_name=path)
+            config['thumbnail_path'] = path
+            files_to_clean.add(path)
+
+        if config.get('watermark', {}).get('type') == 'image' and (wm_id := config['watermark'].get('file_id')):
+            watermark_path = os.path.join(dl_dir, f"watermark_{wm_id}")
+            await bot.download_media(wm_id, file_name=watermark_path); files_to_clean.add(watermark_path)
+        
+        if sub_id := config.get('subs_file_id'):
+            subs_path = os.path.join(dl_dir, f"subs_{sub_id}.srt")
+            await bot.download_media(sub_id, file_name=subs_path); files_to_clean.add(subs_path)
+
+        if audio_id := config.get('replace_audio_file_id'):
+            new_audio_path = os.path.join(dl_dir, f"new_audio_{audio_id}")
+            await bot.download_media(audio_id, file_name=new_audio_path); files_to_clean.add(new_audio_path)
+
+        initial_size = os.path.getsize(actual_download_path)
+        
         await resource_manager.acquire_ffmpeg_slot()
         try:
             output_dir = os.path.join(OUTPUT_DIR, task_id); os.makedirs(output_dir, exist_ok=True); files_to_clean.add(output_dir)
-            final_filename_base = sanitize_filename(task.get('processing_config', {}).get('final_filename', os.path.splitext(filename)[0]))
+            final_filename_base = sanitize_filename(config.get('final_filename', os.path.splitext(filename)[0]))
             output_path_base = os.path.join(output_dir, f"{final_filename_base}")
             
-            await tracker.update_progress(0,1, is_processing=True)
-            
-            commands, definitive_output_path = ffmpeg.build_ffmpeg_command(task, actual_download_path, output_path_base)
+            commands, definitive_output_path = ffmpeg.build_ffmpeg_command(task, actual_download_path, output_path_base, watermark_path, subs_path, new_audio_path)
             
             for i, cmd in enumerate(commands):
                 if not cmd: continue
-                if i == len(commands) - 1:
-                    await _run_ffmpeg_with_progress(tracker, cmd, actual_download_path)
-                else:
-                    await _run_ffmpeg_process(cmd)
+                if i == len(commands) - 1: await _run_ffmpeg_with_progress(tracker, cmd, actual_download_path)
+                else: await _run_ffmpeg_process(cmd)
         finally:
             resource_manager.release_ffmpeg_slot()
 
@@ -231,17 +232,16 @@ async def process_media_task(bot: Client, task: dict):
         for final_path in found_files:
             final_size, final_filename = os.path.getsize(final_path), os.path.basename(final_path)
             caption = generate_summary_caption(task, initial_size, final_size, final_filename)
-            
             tracker.set_operation("⬆️ Subiendo", final_filename)
             
             upload_args = {'caption': caption, 'parse_mode': ParseMode.HTML, 'progress': tracker.pyrogram_callback, 'progress_args': (final_size,)}
             
             if final_path.endswith(('.mp4', '.mkv', '.webm')): await bot.send_video(user_id, video=final_path, **upload_args)
-            elif final_path.endswith(('.mp3', '.flac', 'm4a', '.opus')): await bot.send_audio(user_id, audio=final_path, **upload_args)
+            elif final_path.endswith(('.mp3', '.flac', '.m4a', '.opus')): await bot.send_audio(user_id, audio=final_path, **upload_args)
             else: await bot.send_document(user_id, document=final_path, **upload_args)
 
         await db_instance.update_task_field(task_id, "status", "completed")
-        if tracker: await tracker.message.delete()
+        await tracker.message.delete()
 
     except Exception as e:
         error_message = f"❌ <b>Error en Tarea</b>\n<code>{escape_html(filename)}</code>\n\n<b>Motivo:</b>\n<pre>{escape_html(str(e))}</pre>"
@@ -282,6 +282,7 @@ async def process_metadata_task(bot: Client, task: dict):
                       next((s for s in media_info.get('streams', []) if s.get('codec_type') == 'audio'), {}))
         
         metadata_update = {
+            "size": task.get('file_metadata', {}).get('size', 0), # Preservar tamaño original
             "duration": float(stream.get('duration', 0)) or float(media_info.get('format', {}).get('duration', 0)),
             "resolution": f"{stream.get('width')}x{stream.get('height')}" if stream.get('width') else None,
             "streams": [{"codec_type": s.get("codec_type"), "codec_name": s.get("codec_name")} for s in media_info.get('streams', [])]
@@ -297,8 +298,7 @@ async def process_metadata_task(bot: Client, task: dict):
         if tracker: await tracker.message.edit_text(error_message, parse_mode=ParseMode.HTML)
         else: await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
     finally:
-        if os.path.exists(dl_dir):
-            shutil.rmtree(dl_dir, ignore_errors=True)
+        if os.path.exists(dl_dir): shutil.rmtree(dl_dir, ignore_errors=True)
 
 async def worker_loop(bot_instance: Client):
     logger.info("[WORKER] Bucle del worker iniciado.")
@@ -311,25 +311,29 @@ async def worker_loop(bot_instance: Client):
     while True:
         try:
             query = {"status": {"$in": ["queued", "pending_metadata"]}, "_id": {"$nin": list(active_tasks)}}
-            task = await db_instance.tasks.find_one_and_update(
+            task_doc = await db_instance.tasks.find_one_and_update(
                 query, {"$set": {"status": "processing", "processed_at": datetime.utcnow()}},
-                sort=[('created_at', 1)]
+                sort=[('created_at', 1)],
+                return_document=True # Devuelve el documento ANTES de la actualización
             )
-            if task:
-                task_id, status = task['_id'], task['status']
+            if task_doc:
+                task_id, status = task_doc['_id'], task_doc['status']
                 active_tasks.add(task_id)
-                logger.info(f"Tomando tarea {task_id} con estado '{status}' para el usuario {task['user_id']}")
+                logger.info(f"Tomando tarea {task_id} con estado '{status}' para el usuario {task_doc['user_id']}")
                 
-                async def task_wrapper(task_doc):
+                async def task_wrapper(current_task):
                     try:
-                        if task_doc.get('status') == 'pending_metadata' or (not task_doc.get('processed_at') and task_doc.get('status') != 'completed'):
-                            await process_metadata_task(bot_instance, task_doc)
+                        # Lógica de despacho simple y correcta basada en el estado de la tarea al ser recogida
+                        if current_task['status'] == 'pending_metadata':
+                            await process_metadata_task(bot_instance, current_task)
+                        elif current_task['status'] == 'queued':
+                            await process_media_task(bot_instance, current_task)
                         else:
-                            await process_media_task(bot_instance, task_doc)
+                            logger.warning(f"Worker recogió tarea {current_task['_id']} con estado inesperado '{current_task['status']}'. Ignorando.")
                     finally:
-                        active_tasks.discard(task_doc['_id'])
+                        active_tasks.discard(current_task['_id'])
 
-                asyncio.create_task(task_wrapper(task))
+                asyncio.create_task(task_wrapper(task_doc))
             else:
                 await asyncio.sleep(2)
         except Exception as e:
