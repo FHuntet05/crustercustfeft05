@@ -21,47 +21,21 @@ def format_bytes(size_in_bytes) -> str:
         return "0 B"
     try:
         size = float(size_in_bytes)
-        power = 1024
-        n = 0
+        power = 1024; n = 0
         power_labels = {0: 'B', 1: 'KB', 2: 'MB', 3: 'GB', 4: 'TB'}
         while size >= power and n < len(power_labels) - 1:
-            size /= power
-            n += 1
+            size /= power; n += 1
         return f"{size:.2f} {power_labels[n]}"
     except (ValueError, TypeError):
         return "N/A"
-
-def format_view_count(count) -> str:
-    if count is None: return "N/A"
-    try:
-        num = float(count)
-        if num < 1000: return str(int(num))
-        if num < 1_000_000: return f"{num/1000:.1f}K"
-        return f"{num/1_000_000:.1f}M"
-    except (ValueError, TypeError): return "N/A"
-
-def format_upload_date(date_str) -> str:
-    if date_str is None or len(date_str) != 8: return "N/A"
-    try: return datetime.strptime(date_str, "%Y%m%d").strftime("%d-%m-%Y")
-    except ValueError: return "N/A"
 
 def escape_html(text: str) -> str:
     if not isinstance(text, str): return ""
     return escape(text, quote=False)
 
-def _create_text_bar(percentage: float, length: int = 12, fill_char: str = '■', empty_char: str = '□', spinner_chars: list = ['■', '□']) -> str:
-    """Crea una barra de progreso o un spinner."""
+def _create_text_bar(percentage: float, length: int = 12, fill_char: str = '■', empty_char: str = '□') -> str:
+    """Crea una barra de progreso simple y robusta."""
     if not 0 <= percentage <= 100: percentage = 0
-
-    # Si el progreso es 0 pero hay actividad, mostrar un spinner
-    if percentage == 0 and spinner_chars:
-        spinner_pos = int(time.time() * 2) % length
-        bar = list(empty_char * length)
-        bar[spinner_pos] = spinner_chars[0]
-        if spinner_pos > 0:
-            bar[spinner_pos - 1] = spinner_chars[1]
-        return "".join(bar)
-
     filled_len = int(length * percentage / 100)
     return fill_char * filled_len + empty_char * (length - filled_len)
 
@@ -88,40 +62,35 @@ def format_status_message(
 ) -> str:
     short_filename = (filename[:50] + '...') if len(filename) > 53 else filename
     
-    # Lógica para el spinner: si el total es 0 pero ya se ha procesado algo
-    use_spinner = total_bytes == 0 and processed_bytes > 0
-    spinner_chars = ['■', '□'] if use_spinner else None
-    bar_percentage = 0 if use_spinner else percentage
-    
-    bar = _create_text_bar(bar_percentage, spinner_chars=spinner_chars)
-    
     op_map = {"📥 Descargando": "#Downloading", "⚙️ Procesando": "#Processing", "⬆️ Subiendo": "#Uploading"}
     status_tag = op_map.get(operation.strip().replace("...", ""), "#Working")
 
     lines = [f"<b>{operation}</b>", f"<code>{escape_html(short_filename)}</code>\n"]
 
-    if use_spinner:
-        lines.append(f"[{bar}] --.--%")
-    else:
+    if total_bytes > 0:
+        bar = _create_text_bar(percentage)
         lines.append(f"[{bar}] {percentage:.2f}%")
+    else:
+        # Si el tamaño total es desconocido, no mostramos barra ni porcentaje.
+        lines.append(f"[ <i>Calculando...</i> ]")
 
     if is_processing:
         processed_str = format_time(processed_bytes)
         total_str = format_time(total_bytes) if total_bytes > 0 else "??:??"
         speed_str = f"{speed:.2f}x"
-        lines.append(f"┠ Processed: {processed_str} of {total_str}")
+        lines.append(f"┠ Procesado: {processed_str} de {total_str}")
     else:
         processed_str = format_bytes(processed_bytes)
         total_str = format_bytes(total_bytes) if total_bytes > 0 else "???"
         speed_str = f"{format_bytes(speed)}/s"
-        lines.append(f"┠ Processed: {processed_str} of {total_str}")
+        lines.append(f"┠ Procesado: {processed_str} de {total_str}")
 
     lines.extend([
-        f"┠ Status: {status_tag}",
+        f"┠ Estado: {status_tag}",
         f"┠ ETA: {format_time(eta)}",
-        f"┠ Speed: {speed_str}",
-        f"┠ Elapsed: {int(elapsed_time)}s",
-        f"┖ Engine: JefesMediaSuite"
+        f"┠ Velocidad: {speed_str}",
+        f"┠ Transcurrido: {int(elapsed_time)}s",
+        f"┖ Motor: JefesMediaSuite"
     ])
     
     return "\n".join(lines)
@@ -165,12 +134,7 @@ def generate_summary_caption(task: dict, initial_size: int, final_size: int, fin
     if config.get('gif_options'): ops.append(f"🎞️ Convertido a GIF")
     if config.get('watermark'): ops.append(f"💧 Marca de agua añadida")
     if config.get('mute_audio'): ops.append(f"🔇 Audio silenciado")
-    if config.get('remove_subtitles'): ops.append(f"📜 Subtítulos eliminados")
-    if config.get('subs_file_id'): ops.append(f"📜 Subtítulos añadidos")
-    if config.get('remove_thumbnail'): ops.append(f"🖼️ Miniatura eliminada")
-    if config.get('thumbnail_file_id') and task.get('file_type') == 'video': ops.append(f"🖼️ Miniatura cambiada")
     if config.get('extract_audio'): ops.append(f"🎵 Audio extraído")
-    if config.get('replace_audio_file_id'): ops.append(f"🎼 Audio reemplazado")
 
     if task.get('file_type') == 'audio':
         if config.get('audio_format') or config.get('audio_bitrate'):
