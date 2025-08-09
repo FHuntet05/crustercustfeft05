@@ -33,19 +33,18 @@ def _build_standard_ffmpeg_command(task: Dict, input_path: str, output_path_base
     file_type = task.get('file_type')
     
     # Asegurar extensión correcta
-    ext = ".mp3" if file_type == 'audio' else ".mp4"
+    if file_type == 'audio':
+        ext = f".{config.get('audio_format', 'mp3')}"
+    else:
+        ext = ".mp4"
     final_output_path = f"{os.path.splitext(output_path_base)[0]}{ext}"
 
-    command = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
-    
-    # Input principal
-    command.extend(["-i", shlex.quote(input_path)])
+    command = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", shlex.quote(input_path)]
     
     filter_complex_parts = []
     video_filters = []
     video_chain = "[0:v]"
 
-    # Filtros de video (transcodificación, marca de agua de texto)
     if file_type == 'video':
         if transcode_config := config.get('transcode'):
             if res := transcode_config.get('resolution'):
@@ -53,15 +52,14 @@ def _build_standard_ffmpeg_command(task: Dict, input_path: str, output_path_base
         
         if watermark_config := config.get('watermark'):
             if watermark_config.get('type') == 'text':
-                text = watermark_config.get('text', '').replace("'", "’").replace(':', r'\:')
+                text = watermark_config.get('text', '').replace("'", "’").replace(':', r'\\:').replace('%', r'\%')
                 pos_map = {'top_left': 'x=10:y=10', 'top_right': 'x=w-text_w-10:y=10', 'bottom_left': 'x=10:y=h-text_h-10', 'bottom_right': 'x=w-text_w-10:y=h-text_h-10'}
                 video_filters.append(f"drawtext=text='{text}':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.5:boxborderw=5:{pos_map.get(watermark_config.get('position', 'top_right'))}")
 
     if video_filters:
         filter_complex_parts.append(f"{video_chain}{','.join(video_filters)}[v_filtered]")
-        video_chain = "[v_filtered]" # La salida del filtro se convierte en la nueva entrada
+        video_chain = "[v_filtered]"
 
-    # Marca de agua de imagen (necesita su propio input)
     if watermark_path and config.get('watermark', {}).get('type') == 'image':
         command.extend(["-i", shlex.quote(watermark_path)])
         pos_map = {'top_left': '10:10', 'top_right': 'W-w-10:10', 'bottom_left': '10:H-h-10', 'bottom_right': 'W-w-10:H-h-10'}
@@ -71,15 +69,12 @@ def _build_standard_ffmpeg_command(task: Dict, input_path: str, output_path_base
     if filter_complex_parts:
         command.extend(["-filter_complex", ";".join(filter_complex_parts)])
 
-    # [CRITICAL FIX] Lógica de mapeo y códecs inspirada en el código funcional
+    # [CRITICAL FIX] Lógica de mapeo robusta
     if file_type == 'video':
-        # Mapear la salida final de la cadena de filtros de video
         command.extend(["-map", video_chain])
-        # Mapear el audio del archivo original (si existe)
         if not config.get('mute_audio'):
-            command.extend(["-map", "0:a?"]) # El '?' es clave
+            command.extend(["-map", "0:a?"]) # Mapear audio del input original, si existe
         
-        # Codecs
         if config.get('transcode'):
             command.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "28"])
         else:
@@ -91,13 +86,13 @@ def _build_standard_ffmpeg_command(task: Dict, input_path: str, output_path_base
             command.append("-an")
     
     elif file_type == 'audio':
-        command.extend(["-map", "0:a?"]) # Solo mapear el audio
+        command.extend(["-map", "0:a?"])
         fmt, bitrate = config.get('audio_format', 'mp3'), config.get('audio_bitrate', '192k')
         codec_map = {'mp3': 'libmp3lame', 'flac': 'flac', 'opus': 'libopus'}
         command.extend(["-c:a", codec_map.get(fmt, 'libmp3lame')])
         if fmt != 'flac':
             command.extend(["-b:a", bitrate])
-        command.append("-vn") # Sin video
+        command.append("-vn")
 
     command.append(shlex.quote(final_output_path))
     

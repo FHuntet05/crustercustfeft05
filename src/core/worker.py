@@ -115,7 +115,7 @@ async def _download_source_files(bot: Client, task: Dict, dl_dir: str, tracker: 
                 safe_local_filename = f"source_{i}{ext}"
                 path = os.path.join(dl_dir, safe_local_filename)
                 total_size = source_task.get('file_metadata', {}).get('size', 0)
-                # [FINAL FIX #1] Re-añadir progress_args
+                # [FINAL FIX] Reintroducir progress_args
                 await bot.download_media(message=source_file_id, file_name=path, progress=tracker.pyrogram_callback, progress_args=(total_size,))
             
             if path and os.path.exists(path): downloaded_paths.append(path)
@@ -133,7 +133,7 @@ async def _download_source_files(bot: Client, task: Dict, dl_dir: str, tracker: 
             actual_download_path = os.path.join(dl_dir, safe_local_filename)
             
             total_size = task.get('file_metadata', {}).get('size', 0)
-            # [FINAL FIX #1] Re-añadir progress_args
+            # [FINAL FIX] Reintroducir progress_args
             await bot.download_media(message=file_id, file_name=actual_download_path, progress=tracker.pyrogram_callback, progress_args=(total_size,))
         
         if not actual_download_path or not os.path.exists(actual_download_path):
@@ -165,7 +165,6 @@ async def process_task(bot: Client, task: Dict):
             watermark_path = os.path.join(dl_dir, f"watermark_{wm_id}"); files_to_clean.add(watermark_path)
             await bot.download_media(wm_id, file_name=watermark_path)
 
-        # Aquí input_path es el archivo principal que se va a procesar
         main_input_path = input_paths[0]
         initial_size = os.path.getsize(main_input_path) if input_paths else 0
         await resource_manager.acquire_ffmpeg_slot()
@@ -174,7 +173,6 @@ async def process_task(bot: Client, task: Dict):
             final_filename_base = sanitize_filename(config.get('final_filename', os.path.splitext(filename)[0]))
             output_path_base = os.path.join(output_dir, final_filename_base)
             
-            # Pasamos solo el input principal a build_command_for_task (excepto para join/zip)
             commands, definitive_output_path = ffmpeg.build_command_for_task(task, main_input_path, output_path_base, watermark_path)
             
             for cmd in commands:
@@ -192,7 +190,6 @@ async def process_task(bot: Client, task: Dict):
              caption = generate_summary_caption(task, initial_size, final_size, final_filename_up)
              tracker.set_operation("⬆️ Subiendo", final_filename_up)
              
-             # [FINAL FIX #1] Re-añadir progress_args
              total_upload_size = os.path.getsize(final_path)
              if task.get('file_type') == 'video' and not config.get('extract_audio'):
                  await bot.send_video(user_id, video=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(total_upload_size,))
