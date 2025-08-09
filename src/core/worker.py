@@ -17,7 +17,7 @@ from src.helpers.utils import format_status_message, sanitize_filename, escape_h
 from src.core import ffmpeg
 from src.core import downloader
 from src.core.resource_manager import resource_manager
-from src.core.exceptions import (DiskSpaceError, FFmpegProcessingError,
+from src.core.exceptions import (DiskSpaceError, FFmpegProcessingError, 
                                  InvalidMediaError, NetworkError, AuthenticationError)
 
 logger = logging.getLogger(__name__)
@@ -111,11 +111,11 @@ async def _download_source_files(bot: Client, task: Dict, dl_dir: str, tracker: 
             if source_url := source_task.get('url'):
                 path = await asyncio.to_thread(downloader.download_from_url, source_url, os.path.join(dl_dir, str(source_id)), source_task.get('processing_config', {}).get('download_format_id'), tracker)
             elif source_file_id := source_task.get('file_id'):
-                # [CRITICAL FIX #2.1] Usar un nombre de archivo seguro para las fuentes de join/zip
                 _, ext = os.path.splitext(filename)
                 safe_local_filename = f"source_{i}{ext}"
                 path = os.path.join(dl_dir, safe_local_filename)
                 total_size = source_task.get('file_metadata', {}).get('size', 0)
+                # [FINAL FIX #1] Re-añadir progress_args
                 await bot.download_media(message=source_file_id, file_name=path, progress=tracker.pyrogram_callback, progress_args=(total_size,))
             
             if path and os.path.exists(path): downloaded_paths.append(path)
@@ -127,14 +127,13 @@ async def _download_source_files(bot: Client, task: Dict, dl_dir: str, tracker: 
         if url := task.get('url'):
             actual_download_path = await asyncio.to_thread(downloader.download_from_url, url, os.path.join(dl_dir, str(task['_id'])), task.get('processing_config', {}).get('download_format_id'), tracker)
         elif file_id := task.get('file_id'):
-            # [CRITICAL FIX #2.2] Usar un nombre de archivo local seguro en lugar del original de Telegram
             original_filename = task.get('original_filename', 'input_file')
             _, ext = os.path.splitext(original_filename)
-            safe_local_filename = f"input{ext}" # ej: input.mkv
+            safe_local_filename = f"input{ext}"
             actual_download_path = os.path.join(dl_dir, safe_local_filename)
             
-            # [CRITICAL FIX #1] Re-añadir progress_args para que la barra de progreso funcione
             total_size = task.get('file_metadata', {}).get('size', 0)
+            # [FINAL FIX #1] Re-añadir progress_args
             await bot.download_media(message=file_id, file_name=actual_download_path, progress=tracker.pyrogram_callback, progress_args=(total_size,))
         
         if not actual_download_path or not os.path.exists(actual_download_path):
@@ -166,17 +165,17 @@ async def process_task(bot: Client, task: Dict):
             watermark_path = os.path.join(dl_dir, f"watermark_{wm_id}"); files_to_clean.add(watermark_path)
             await bot.download_media(wm_id, file_name=watermark_path)
 
-        initial_size = os.path.getsize(input_paths[0]) if input_paths else 0
+        # Aquí input_path es el archivo principal que se va a procesar
+        main_input_path = input_paths[0]
+        initial_size = os.path.getsize(main_input_path) if input_paths else 0
         await resource_manager.acquire_ffmpeg_slot()
         try:
             output_dir = os.path.join(OUTPUT_DIR, task_id); os.makedirs(output_dir, exist_ok=True); files_to_clean.add(output_dir)
             final_filename_base = sanitize_filename(config.get('final_filename', os.path.splitext(filename)[0]))
             output_path_base = os.path.join(output_dir, final_filename_base)
             
-            commands, definitive_output_path = ffmpeg.build_command_for_task(task, input_paths, output_path_base, watermark_path)
-            
-            for list_file in glob.glob(os.path.join(output_dir, "*_concat_list.txt")):
-                files_to_clean.add(list_file)
+            # Pasamos solo el input principal a build_command_for_task (excepto para join/zip)
+            commands, definitive_output_path = ffmpeg.build_command_for_task(task, main_input_path, output_path_base, watermark_path)
             
             for cmd in commands:
                 if cmd: await _run_shell_command(cmd, tracker)
@@ -193,13 +192,14 @@ async def process_task(bot: Client, task: Dict):
              caption = generate_summary_caption(task, initial_size, final_size, final_filename_up)
              tracker.set_operation("⬆️ Subiendo", final_filename_up)
              
-             file_type = task.get('file_type')
-             if file_type == 'video' and not config.get('extract_audio'):
-                 await bot.send_video(user_id, video=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(final_size,))
-             elif file_type == 'audio' or config.get('extract_audio'):
-                 await bot.send_audio(user_id, audio=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(final_size,))
+             # [FINAL FIX #1] Re-añadir progress_args
+             total_upload_size = os.path.getsize(final_path)
+             if task.get('file_type') == 'video' and not config.get('extract_audio'):
+                 await bot.send_video(user_id, video=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(total_upload_size,))
+             elif task.get('file_type') == 'audio' or config.get('extract_audio'):
+                 await bot.send_audio(user_id, audio=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(total_upload_size,))
              else:
-                 await bot.send_document(user_id, document=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(final_size,))
+                 await bot.send_document(user_id, document=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(total_upload_size,))
 
         await db_instance.update_task_field(task_id, "status", "completed")
         await tracker.message.delete()
