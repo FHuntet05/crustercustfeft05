@@ -7,7 +7,7 @@ from html import escape
 from datetime import datetime, timedelta
 from pyrogram.enums import ParseMode
 import logging
-import re  # Importar re para la nueva función de sanitización
+import re
 from typing import Dict
 
 logger = logging.getLogger(__name__)
@@ -63,31 +63,39 @@ def format_time(seconds: float) -> str:
         return f"{hours:02}:{minutes:02}:{seconds_part:02}"
     return f"{minutes:02}:{seconds_part:02}"
 
-# [FIX 2 - STRICT SANITIZATION]
-# La función ha sido reescrita para ser mucho más estricta.
-# Ahora utiliza una expresión regular para eliminar CUALQUIER carácter que no esté en la
-# "lista blanca" (letras, números, espacios, guiones, guiones bajos, puntos).
-# Esto previene errores de "Invalid argument" en FFmpeg con nombres de archivo complejos.
+# [FINAL FIX - CORRECT SANITIZATION]
+# Esta es la versión final y correcta de la función.
+# 1. Separa el nombre base y la extensión.
+# 2. Sanea SOLO el nombre base, eliminando caracteres problemáticos.
+# 3. Vuelve a unir el nombre saneado con su extensión original.
+# Esto previene los errores de 'Invalid Argument' en FFmpeg de forma definitiva.
 def sanitize_filename(filename: str) -> str:
     """
-    Limpia un nombre de archivo de caracteres inválidos de forma estricta
-    y limita su longitud.
+    Limpia un nombre de archivo de forma segura, preservando su extensión.
     """
     if not isinstance(filename, str):
         return "archivo_invalido"
+
+    # Separar el nombre base de la extensión
+    name_base, extension = os.path.splitext(filename)
+
+    # Sanear SOLO el nombre base
+    # Eliminar cualquier carácter que NO sea alfanumérico (Unicode), espacio, guion o guion bajo.
+    sanitized_base = re.sub(r'[^\w\s-]', '', name_base, flags=re.UNICODE)
     
-    # Eliminar cualquier carácter que NO sea alfanumérico, espacio, guion, guion bajo o punto.
-    sanitized = re.sub(r'[^\w\s\._-]', '', filename, flags=re.UNICODE)
+    # Reemplazar múltiples espacios/guiones por un solo espacio y limpiar extremos.
+    sanitized_base = re.sub(r'[\s-]+', ' ', sanitized_base).strip()
     
-    # Reemplazar múltiples espacios/puntos/guiones por uno solo y limpiar espacios al inicio/final
-    sanitized = re.sub(r'[\s._-]+', ' ', sanitized).strip()
-    
-    # Si después de sanear no queda nada, usar un nombre por defecto
-    if not sanitized:
-        return "archivo_procesado"
-        
-    # Limitar la longitud a un valor razonable para sistemas de archivos
-    return sanitized[:240]
+    # Si el nombre base queda vacío, usar un nombre por defecto.
+    if not sanitized_base:
+        sanitized_base = "archivo_procesado"
+
+    # Limitar la longitud del nombre base
+    sanitized_base = sanitized_base[:240]
+
+    # Devolvemos el nombre base saneado. La extensión se manejará por separado en el worker.
+    # El propósito de esta función es preparar el NOMBRE, no el nombre.extension completo.
+    return sanitized_base
 
 
 def format_status_message(operation: str, filename: str, percentage: float,
@@ -105,18 +113,15 @@ def format_status_message(operation: str, filename: str, percentage: float,
         bar = _create_text_bar(percentage)
         lines.append(f"Progreso: [{bar}] {percentage:.1f}%")
     else:
-        # [UX FIX] Mensaje más claro cuando el tamaño es desconocido
-        lines.append(f"Progreso: [ <i>Tamaño total no disponible</i> ]")
+        lines.append(f"Progreso: [ <i>Calculando...</i> ]")
 
     if is_processing:
-        # Para FFmpeg, 'processed_bytes' es el tiempo procesado
         processed_str = format_time(processed_bytes)
         total_str = format_time(total_bytes) if total_bytes > 0 else "??:??"
         speed_str = f"{speed:.2f}x" if speed else "N/A"
         lines.append(f"┠ 🎞️ {processed_str} de {total_str}")
     else:
         processed_str = format_bytes(processed_bytes)
-        # [UX FIX] Mensaje más claro cuando el tamaño es desconocido
         total_str = format_bytes(total_bytes) if total_bytes > 0 else "---"
         speed_str = f"{format_bytes(speed)}/s" if speed else "N/A"
         lines.append(f"┠ 📦 {processed_str} de {total_str}")
@@ -141,11 +146,10 @@ def format_task_details_rich(task: Dict, index: int) -> str:
     config = task.get('processing_config', {})
     config_parts = []
     
-    # Video & Común
     if rn := config.get('final_filename'):
-        # Comprobar si el nombre final es diferente del original (sin extensión)
         original_name_base = os.path.splitext(task.get('original_filename', ''))[0]
-        if rn != original_name_base:
+        # La sanitización puede alterar el nombre, así que comparamos versiones saneadas
+        if sanitize_filename(rn) != sanitize_filename(original_name_base):
             config_parts.append("✏️ Renombrado")
     if config.get('transcode'): config_parts.append(f"📉 {config['transcode'].get('resolution', '...')}")
     if config.get('trim_times'): config_parts.append("✂️ Cortado")
@@ -154,7 +158,6 @@ def format_task_details_rich(task: Dict, index: int) -> str:
     if config.get('mute_audio'): config_parts.append("🔇 Silenciado")
     if config.get('extract_audio'): config_parts.append("🎵 Extraer Audio")
     
-    # Audio
     if config.get('audio_format') or config.get('audio_bitrate'):
         config_parts.append(f"🔊 Convertido ({config.get('audio_format','mp3')})")
     if config.get('slowed') or config.get('reverb'): config_parts.append("🎧 Efectos")
@@ -180,9 +183,8 @@ def generate_summary_caption(task: Dict, initial_size: int, final_size: int, fin
     config = task.get('processing_config', {})
     ops = []
 
-    # Añadir operaciones a la lista
     original_name_base = os.path.splitext(task.get('original_filename', ''))[0]
-    if config.get('final_filename', original_name_base) != original_name_base:
+    if sanitize_filename(config.get('final_filename', original_name_base)) != sanitize_filename(original_name_base):
         ops.append("✍️ Renombrado")
     if config.get('transcode'): ops.append(f"📉 Transcodificado a {config['transcode'].get('resolution', 'N/A')}")
     if config.get('trim_times'): ops.append("✂️ Cortado")
