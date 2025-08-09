@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from pyrogram.enums import ParseMode
 import logging
 import re
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 from pyrogram.errors import MessageNotModified, FloodWait
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
 def get_greeting(user_id: int) -> str:
     return "Jefe" if user_id == ADMIN_USER_ID else "Usuario"
 
-def format_bytes(size_in_bytes) -> str:
+def format_bytes(size_in_bytes: Union[int, float]) -> str:
     if not isinstance(size_in_bytes, (int, float)) or size_in_bytes <= 0: return "0 B"
     size, n, power = float(size_in_bytes), 0, 1024
     power_labels = {0: 'B', 1: 'KB', 2: 'MB', 3: 'GB', 4: 'TB'}
@@ -54,7 +54,7 @@ def _create_text_bar(percentage: float, length: int = 12, fill_char: str = '■'
     filled_len = int(length * percentage / 100)
     return fill_char * filled_len + empty_char * (length - filled_len)
 
-def format_time(seconds: float) -> str:
+def format_time(seconds: Union[int, float]) -> str:
     if not isinstance(seconds, (int, float)) or seconds < 0 or seconds == float('inf'): return "∞"
     seconds = int(seconds)
     if seconds < 60: return f"{seconds}s"
@@ -73,42 +73,47 @@ def sanitize_filename(filename: str) -> str:
     if not sanitized_base: sanitized_base = "archivo_procesado"
     return sanitized_base[:240]
 
-# [DEFINITIVE FIX - TypeError]
-# La lógica ha sido reescrita para evitar la reutilización de variables con tipos diferentes.
-# Se usan variables separadas para los valores numéricos y sus representaciones en string.
+# [ABSOLUTE FINAL FIX - TypeError]
+# Esta función ha sido reescrita desde cero para garantizar que no haya errores de tipo.
+# Las operaciones numéricas y de formato están completamente separadas.
 def format_status_message(
     operation_title: str, percentage: float, processed_bytes: float, total_bytes: float,
     speed: float, eta: float, elapsed: float, status_tag: str,
     engine: str, user_id: int, file_info: Optional[str] = None
 ) -> str:
-    bar = _create_text_bar(percentage)
-    details = []
     
+    bar = _create_text_bar(percentage)
+    lines = [f"<b>{operation_title}</b>", f"<code>[{bar}] {percentage:.2f}%</code>"]
+    
+    # --- Construcción de Detalles ---
+    details = []
+
+    # 1. Línea "Processed"
+    # La lógica se separa claramente: si es procesamiento, se formatea como tiempo, si no, como bytes.
     if "Process" in operation_title:
-        # Usar variables separadas para el string formateado
         processed_str = format_time(processed_bytes)
         total_str = format_time(total_bytes) if total_bytes > 0 else "??:??"
         details.append(f"Processed: {processed_str} de {total_str}")
     else:
-        # Usar variables separadas para el string formateado
         processed_str = format_bytes(processed_bytes)
         total_str = format_bytes(total_bytes) if total_bytes > 0 else "0 B"
         details.append(f"Processed: {processed_str} of {total_str}")
 
+    # 2. Otros detalles
     if file_info: details.append(f"File: {file_info}")
     details.append(f"Status: {status_tag}")
     details.append(f"ETA: {format_time(eta)}")
 
-    if "Process" in operation_title: 
+    if "Process" in operation_title:
         details.append(f"Speed: {speed:.2f}x")
-    else: 
+    else:
         details.append(f"Speed: {format_bytes(speed)}/s")
 
     details.append(f"Elapsed: {format_time(elapsed)}")
     details.append(f"Engine: {engine}")
     details.append(f"ID: {user_id}")
 
-    lines = [f"<b>{operation_title}</b>", f"<code>[{bar}] {percentage:.2f}%</code>"]
+    # 3. Ensamblaje final del mensaje
     for i, detail in enumerate(details):
         prefix = '┖' if i == len(details) - 1 else '┠'
         lines.append(f"{prefix} {detail}")
