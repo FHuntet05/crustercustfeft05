@@ -18,15 +18,12 @@ try:
 except (TypeError, ValueError):
     ADMIN_USER_ID = 0
 
-# [COMPATIBILITY FIX]
-# Esta función es requerida por el nuevo worker.py
 async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
     """Edita el mensaje de estado de un usuario de forma segura."""
     ctx = progress_tracker.get(user_id)
     if not ctx or not ctx.message:
         return
 
-    # Evitar editar si el texto es el mismo
     if text == ctx.last_update_text:
         return
     ctx.last_update_text = text
@@ -45,7 +42,6 @@ async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
         await asyncio.sleep(e.value + 1)
     except Exception as e:
         logger.error(f"Error al editar mensaje de estado para el usuario {user_id}: {e}")
-
 
 def get_greeting(user_id: int) -> str:
     """Devuelve un saludo personalizado para el admin."""
@@ -106,7 +102,6 @@ def sanitize_filename(filename: str) -> str:
         sanitized_base = "archivo_procesado"
     return f"{sanitized_base[:240]}{extension}"
 
-# Esta es la función de formateo requerida por el nuevo worker.py
 def format_status_message(operation: str, filename: str, percentage: float,
                           processed_bytes: float, total_bytes: float, speed: float, eta: float,
                           engine: str, user_id: int, user_mention: str, is_processing: bool = False, file_size: int = 0) -> str:
@@ -133,24 +128,30 @@ def format_status_message(operation: str, filename: str, percentage: float,
         speed_str = f"{format_bytes(speed)}/s" if speed else "N/A"
         lines.append(f"┠ 📦 {processed_str} de {total_str}")
 
+    # Este código asume que progress_tracker es una variable global en worker.py
+    # Para hacerlo más robusto, se podría pasar el start_time a la función.
+    # Por ahora, se deja así por compatibilidad.
+    start_time = time.time() # Fallback
+    # from src.core.worker import progress_tracker # Evitar importación circular
+    # if user_id in progress_tracker:
+    #     start_time = progress_tracker.get(user_id).start_time
+    
     lines.extend([
         f"┠ 🚀 Velocidad: {speed_str}",
         f"┠ ⏳ ETA: {format_time(eta)}",
-        f"┖ ⏱️ Transcurrido: {int(time.time() - (progress_tracker.get(user_id).start_time if user_id in progress_tracker else time.time()))}s"
+        f"┖ ⏱️ Transcurrido: {int(time.time() - start_time)}s"
     ])
     
     return "\n".join(lines)
 
 
-# Esta es la función de resumen requerida por el nuevo worker.py
 def generate_summary_caption(task: Dict, initial_size: int, final_size: int, final_filename: str) -> str:
     """Genera el caption final para el archivo procesado."""
     config = task.get('processing_config', {})
     ops = []
 
-    # Se sanean ambos nombres antes de comparar para asegurar una comparación justa.
-    sanitized_original = sanitize_filename(os.path.splitext(task.get('original_filename', ''))[0])
-    sanitized_final = sanitize_filename(os.path.splitext(final_filename)[0])
+    sanitized_original = os.path.splitext(sanitize_filename(task.get('original_filename', '')))[0]
+    sanitized_final = os.path.splitext(sanitize_filename(final_filename))[0]
 
     if sanitized_final != sanitized_original:
         ops.append("✍️ Renombrado")
@@ -188,3 +189,48 @@ def generate_summary_caption(task: Dict, initial_size: int, final_size: int, fin
         caption_parts.extend([f"  • {op}" for op in ops])
         
     return "\n".join(caption_parts)
+
+# [IMPORT FIX]
+# Reintroduciendo la función que faltaba, requerida por handlers.py
+def format_task_details_rich(task: Dict, index: int) -> str:
+    """Genera una descripción detallada y rica de una tarea para el /panel."""
+    file_type = task.get('file_type', 'document')
+    emoji_map = {'video': '🎬', 'audio': '🎵', 'document': '📄', 'join_operation': '🔗', 'zip_operation': '📦'}
+    emoji = emoji_map.get(file_type, '📁')
+    
+    display_name = task.get('original_filename') or task.get('url', 'Tarea de URL')
+    short_name = (display_name[:50] + '...') if len(display_name) > 53 else display_name
+    
+    config = task.get('processing_config', {})
+    config_parts = []
+    
+    if rn := config.get('final_filename'):
+        original_name_base = os.path.splitext(task.get('original_filename', ''))[0]
+        if sanitize_filename(rn) != sanitize_filename(original_name_base):
+            config_parts.append("✏️ Renombrado")
+    if config.get('transcode'): config_parts.append(f"📉 {config['transcode'].get('resolution', '...')}")
+    if config.get('trim_times'): config_parts.append("✂️ Cortado")
+    if config.get('gif_options'): config_parts.append("🎞️ GIF")
+    if config.get('watermark'): config_parts.append("💧 Marca Agua")
+    if config.get('mute_audio'): config_parts.append("🔇 Silenciado")
+    if config.get('extract_audio'): config_parts.append("🎵 Extraer Audio")
+    
+    if config.get('audio_format') or config.get('audio_bitrate'):
+        config_parts.append(f"🔊 Convertido ({config.get('audio_format','mp3')})")
+    if config.get('slowed') or config.get('reverb'): config_parts.append("🎧 Efectos")
+    if config.get('audio_tags'): config_parts.append("📝 Metadatos")
+    if config.get('thumbnail_file_id') or config.get('thumbnail_url'): config_parts.append("🖼️ Carátula")
+
+    config_summary = ", ".join(config_parts) if config_parts else "<i>(Sin cambios)</i>"
+
+    metadata = task.get('file_metadata', {})
+    meta_parts = []
+    if size := metadata.get('size'): meta_parts.append(f"📦 {format_bytes(size)}")
+    if duration := metadata.get('duration'): meta_parts.append(f"⏱️ {format_time(duration)}")
+    if resolution := metadata.get('resolution'): meta_parts.append(f"🖥️ {resolution}")
+    meta_summary = " | ".join(meta_parts)
+
+    lines = [f"<b>{index}.</b> {emoji} <code>{escape_html(short_name)}</code>", f"   └ ⚙️ {config_summary}"]
+    if meta_summary:
+        lines.append(f"   └ 📊 {meta_summary}")
+    return "\n".join(lines)
