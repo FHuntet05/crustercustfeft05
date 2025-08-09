@@ -49,8 +49,19 @@ def escape_html(text: str) -> str:
     if not isinstance(text, str): return ""
     return escape(text, quote=False)
 
-def _create_text_bar(percentage: float, length: int = 12, fill_char: str = '■', empty_char: str = '□') -> str:
+def _create_text_bar(percentage: float, length: int = 12, fill_char: str = '■', empty_char: str = '□', spinner_chars: list = ['■', '□']) -> str:
+    """Crea una barra de progreso o un spinner."""
     if not 0 <= percentage <= 100: percentage = 0
+
+    # Si el progreso es 0 pero hay actividad, mostrar un spinner
+    if percentage == 0 and spinner_chars:
+        spinner_pos = int(time.time() * 2) % length
+        bar = list(empty_char * length)
+        bar[spinner_pos] = spinner_chars[0]
+        if spinner_pos > 0:
+            bar[spinner_pos - 1] = spinner_chars[1]
+        return "".join(bar)
+
     filled_len = int(length * percentage / 100)
     return fill_char * filled_len + empty_char * (length - filled_len)
 
@@ -60,10 +71,8 @@ def format_time(seconds: float) -> str:
     td = timedelta(seconds=int(seconds))
     hours, remainder = divmod(td.seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
-    if td.days > 0:
-        return f"{td.days}d {hours:02}:{minutes:02}:{seconds:02}"
-    if hours > 0:
-        return f"{hours:02}:{minutes:02}:{seconds:02}"
+    if td.days > 0: return f"{td.days}d {hours:02}:{minutes:02}:{seconds:02}"
+    if hours > 0: return f"{hours:02}:{minutes:02}:{seconds:02}"
     return f"{minutes:02}:{seconds:02}"
 
 def sanitize_filename(filename: str) -> str:
@@ -73,34 +82,28 @@ def sanitize_filename(filename: str) -> str:
     return " ".join(sanitized.split())[:200]
 
 def format_status_message(
-    operation: str,
-    filename: str,
-    percentage: float,
-    processed_bytes: float,
-    total_bytes: float,
-    speed: float,
-    eta: float,
-    elapsed_time: float,
-    is_processing: bool = False
+    operation: str, filename: str, percentage: float,
+    processed_bytes: float, total_bytes: float, speed: float, eta: float,
+    elapsed_time: float, is_processing: bool = False
 ) -> str:
-    """
-    Formatea el mensaje de estado con el nuevo diseño solicitado y lógica robusta.
-    """
     short_filename = (filename[:50] + '...') if len(filename) > 53 else filename
-    bar = _create_text_bar(percentage)
     
-    op_map = {
-        "📥 Descargando": "#Downloading",
-        "⚙️ Procesando": "#Processing",
-        "⬆️ Subiendo": "#Uploading"
-    }
+    # Lógica para el spinner: si el total es 0 pero ya se ha procesado algo
+    use_spinner = total_bytes == 0 and processed_bytes > 0
+    spinner_chars = ['■', '□'] if use_spinner else None
+    bar_percentage = 0 if use_spinner else percentage
+    
+    bar = _create_text_bar(bar_percentage, spinner_chars=spinner_chars)
+    
+    op_map = {"📥 Descargando": "#Downloading", "⚙️ Procesando": "#Processing", "⬆️ Subiendo": "#Uploading"}
     status_tag = op_map.get(operation.strip().replace("...", ""), "#Working")
 
-    lines = [
-        f"<b>{operation}</b>",
-        f"<code>{escape_html(short_filename)}</code>\n",
-        f"[{bar}] {percentage:.2f}%"
-    ]
+    lines = [f"<b>{operation}</b>", f"<code>{escape_html(short_filename)}</code>\n"]
+
+    if use_spinner:
+        lines.append(f"[{bar}] --.--%")
+    else:
+        lines.append(f"[{bar}] {percentage:.2f}%")
 
     if is_processing:
         processed_str = format_time(processed_bytes)
@@ -122,7 +125,6 @@ def format_status_message(
     ])
     
     return "\n".join(lines)
-
 
 def format_task_details_rich(task: dict, index: int) -> str:
     file_type = task.get('file_type', 'document')
@@ -150,19 +152,12 @@ def format_task_details_rich(task: dict, index: int) -> str:
     if resolution := metadata.get('resolution'): meta_parts.append(f"🖥️ {resolution}")
     meta_summary = " | ".join(meta_parts)
 
-    lines = [
-        f"<b>{index}.</b> {emoji} <code>{escape_html(short_name)}</code>",
-        f"   └ ⚙️ {config_summary}"
-    ]
-    if meta_summary:
-        lines.append(f"   └ 📊 {meta_summary}")
-    
+    lines = [f"<b>{index}.</b> {emoji} <code>{escape_html(short_name)}</code>", f"   └ ⚙️ {config_summary}"]
+    if meta_summary: lines.append(f"   └ 📊 {meta_summary}")
     return "\n".join(lines)
 
 def generate_summary_caption(task: dict, initial_size: int, final_size: int, final_filename: str) -> str:
-    config = task.get('processing_config', {})
-    ops = []
-
+    config = task.get('processing_config', {}); ops = []
     if config.get('final_filename'): ops.append(f"✍️ Renombrado")
     if config.get('transcode'): ops.append(f"📉 Transcodificado a {config['transcode'].get('resolution', 'N/A')}")
     if config.get('trim_times'): ops.append(f"✂️ Cortado")
@@ -179,14 +174,11 @@ def generate_summary_caption(task: dict, initial_size: int, final_size: int, fin
 
     if task.get('file_type') == 'audio':
         if config.get('audio_format') or config.get('audio_bitrate'):
-            fmt = config.get('audio_format', 'mp3').upper()
-            br = config.get('audio_bitrate', '192k')
-            ops.append(f"🔊 Convertido a {fmt} ({br})")
+            ops.append(f"🔊 Convertido a {config.get('audio_format', 'mp3').upper()} ({config.get('audio_bitrate', '192k')})")
         if config.get('audio_tags'): ops.append(f"✍️ Metadatos editados")
         if config.get('thumbnail_file_id'): ops.append(f"🖼️ Carátula cambiada")
 
     caption_parts = [f"✅ <b>Proceso Completado</b>"]
-    
     size_reduction_str = ""
     if final_size > 0 and initial_size > 0:
         diff = final_size - initial_size
@@ -197,8 +189,5 @@ def generate_summary_caption(task: dict, initial_size: int, final_size: int, fin
     caption_parts.append(f"💾 <b>Tamaño:</b> {format_bytes(initial_size)} ➞ {format_bytes(final_size)}{size_reduction_str}")
 
     if ops:
-        caption_parts.append("\n<b>Operaciones Realizadas:</b>")
-        for op in ops:
-            caption_parts.append(f"  • {op}")
-            
+        caption_parts.append("\n<b>Operaciones Realizadas:</b>"); caption_parts.extend([f"  • {op}" for op in ops])
     return "\n".join(caption_parts)

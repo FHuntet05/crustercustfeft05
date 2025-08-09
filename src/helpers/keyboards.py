@@ -68,12 +68,23 @@ def build_processing_menu(task_id: str, file_type: str, task_data: dict) -> Inli
     return InlineKeyboardMarkup(keyboard)
 
 def build_transcode_menu(task_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("1080p", callback_data=f"set_transcode_{task_id}_resolution_1080p"), InlineKeyboardButton("720p", callback_data=f"set_transcode_{task_id}_resolution_720p")],
-        [InlineKeyboardButton("480p", callback_data=f"set_transcode_{task_id}_resolution_480p"), InlineKeyboardButton("360p", callback_data=f"set_transcode_{task_id}_resolution_360p")],
+    keyboard = [
+        [
+            InlineKeyboardButton("1080p", callback_data=f"set_transcode_{task_id}_resolution_1080p"),
+            InlineKeyboardButton("720p", callback_data=f"set_transcode_{task_id}_resolution_720p")
+        ],
+        [
+            InlineKeyboardButton("480p", callback_data=f"set_transcode_{task_id}_resolution_480p"),
+            InlineKeyboardButton("360p", callback_data=f"set_transcode_{task_id}_resolution_360p")
+        ],
+        [
+            InlineKeyboardButton("240p", callback_data=f"set_transcode_{task_id}_resolution_240p"),
+            InlineKeyboardButton("144p", callback_data=f"set_transcode_{task_id}_resolution_144p")
+        ],
         [InlineKeyboardButton("❌ Quitar Transcodificación", callback_data=f"set_transcode_{task_id}_remove_all")],
         [InlineKeyboardButton("🔙 Volver", callback_data=f"p_open_{task_id}")]
-    ])
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
 def build_tracks_menu(task_id: str, config: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([

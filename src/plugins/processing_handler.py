@@ -31,7 +31,8 @@ async def open_task_menu_from_p(client: Client, message_or_query, task_id: str):
             await message_or_query.message.edit_text(text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
         else:
             await message_or_query.reply(text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
-    except MessageNotModified: pass
+    except MessageNotModified:
+        pass
 
 async def handle_text_input_for_state(client: Client, message: Message, user_state: dict):
     user_id = message.from_user.id
@@ -40,15 +41,13 @@ async def handle_text_input_for_state(client: Client, message: Message, user_sta
     task_id, source_message_id = data.get('task_id'), data.get('source_message_id')
     
     if not source_message_id: return
-
     try:
         if state == "awaiting_profile_name":
             task = await db_instance.get_task(task_id)
             if not task: return
             await db_instance.add_preset(user_id, user_input, task.get('processing_config', {}))
             await message.reply(f"✅ Perfil '<b>{escape_html(user_input)}</b>' guardado.", parse_mode=ParseMode.HTML, quote=True)
-        elif state == "awaiting_rename":
-            await db_instance.update_task_config(task_id, "final_filename", sanitize_filename(user_input))
+        elif state == "awaiting_rename": await db_instance.update_task_config(task_id, "final_filename", sanitize_filename(user_input))
         elif state == "awaiting_trim": await db_instance.update_task_config(task_id, "trim_times", user_input)
         elif state == "awaiting_split": await db_instance.update_task_config(task_id, "split_criteria", user_input)
         elif state == "awaiting_gif":
@@ -58,7 +57,6 @@ async def handle_text_input_for_state(client: Client, message: Message, user_sta
         elif state == "awaiting_watermark_text":
             await db_instance.update_task_config(task_id, "watermark", {"type": "text", "text": user_input}); await message.delete(); await db_instance.set_user_state(user_id, 'awaiting_watermark_position', data=data); return await client.edit_message_text(user_id, source_message_id, text="✅ Texto recibido. Elija la posición:", reply_markup=build_position_menu(task_id, "config_watermark"))
         else: return
-
         await message.delete(); await db_instance.set_user_state(user_id, "idle"); source_message = await client.get_messages(user_id, source_message_id); await open_task_menu_from_p(client, source_message, task_id)
     except Exception as e:
         logger.error(f"Error procesando entrada de config '{state}': {e}"); await message.reply(f"❌ Error: `{e}`", quote=True)
@@ -67,14 +65,12 @@ async def handle_media_input_for_state(client: Client, message: Message, user_st
     user_id = message.from_user.id
     state, data = user_state['status'], user_state['data']
     task_id, source_message_id = data.get('task_id'), data.get('source_message_id')
-    
     if not source_message_id: return
     media = message.photo or message.document or message.audio
     if not media: return
     state_map = {"awaiting_audiothumb": "thumbnail_file_id", "awaiting_subs": "subs_file_id", "awaiting_watermark_image": "watermark", "awaiting_thumbnail_add": "thumbnail_file_id", "awaiting_replace_audio": "replace_audio_file_id"}
     if state not in state_map: return
     if state in ["awaiting_audiothumb", "awaiting_watermark_image", "awaiting_thumbnail_add"] and not (message.photo or (hasattr(media, 'mime_type') and media.mime_type.startswith("image/"))): return await message.reply("❌ No es una imagen válida.")
-    
     key_to_update = state_map[state]
     value_to_set = {"type": "image", "file_id": media.file_id} if state == "awaiting_watermark_image" else media.file_id
     update_query = {"$set": {f"processing_config.{key_to_update}": value_to_set}}
@@ -87,27 +83,36 @@ async def handle_media_input_for_state(client: Client, message: Message, user_st
 
 @Client.on_callback_query(filters.regex(r"^(p_open_|task_|config_|set_)"))
 async def main_config_callbacks_router(client: Client, query: CallbackQuery):
-    data = query.data
-    if data.startswith("p_open_"): await open_task_menu_callback(client, query)
-    elif data.startswith("task_"): await handle_task_actions(client, query)
-    elif data.startswith("config_"): await show_config_menu_and_set_state(client, query)
-    elif data.startswith("set_"): await set_value_callback(client, query)
+    try:
+        data = query.data
+        if data.startswith("p_open_"): await open_task_menu_callback(client, query)
+        elif data.startswith("task_"): await handle_task_actions(client, query)
+        elif data.startswith("config_"): await show_config_menu_and_set_state(client, query)
+        elif data.startswith("set_"): await set_value_callback(client, query)
+    except MessageNotModified: await query.answer("Nada que cambiar.")
+    except Exception as e: logger.error(f"Error en main_config_callbacks_router: {e}", exc_info=True)
 
 @Client.on_callback_query(filters.regex(r"^(song_select_|search_page_|cancel_search_)"))
 async def search_callbacks_router(client: Client, query: CallbackQuery):
-    data = query.data
-    if data.startswith("song_select_"): await select_song_from_search(client, query)
-    elif data.startswith("search_page_"): await handle_search_pagination(client, query)
-    elif data.startswith("cancel_search_"): await cancel_search_session(client, query)
+    try:
+        data = query.data
+        if data.startswith("song_select_"): await select_song_from_search(client, query)
+        elif data.startswith("search_page_"): await handle_search_pagination(client, query)
+        elif data.startswith("cancel_search_"): await cancel_search_session(client, query)
+    except MessageNotModified: await query.answer("Nada que cambiar.")
+    except Exception as e: logger.error(f"Error en search_callbacks_router: {e}", exc_info=True)
 
 @Client.on_callback_query(filters.regex(r"^(profile_|batch_|join_|zip_|panel_delete_all_)"))
 async def advanced_features_callbacks_router(client: Client, query: CallbackQuery):
-    data = query.data
-    if data.startswith("profile_"): await handle_profile_actions(client, query)
-    elif data.startswith("batch_"): await handle_batch_actions(client, query)
-    elif data.startswith("join_"): await handle_join_actions(client, query)
-    elif data.startswith("zip_"): await handle_zip_actions(client, query)
-    elif data.startswith("panel_delete_all_"): await handle_panel_delete_all(client, query)
+    try:
+        data = query.data
+        if data.startswith("profile_"): await handle_profile_actions(client, query)
+        elif data.startswith("batch_"): await handle_batch_actions(client, query)
+        elif data.startswith("join_"): await handle_join_actions(client, query)
+        elif data.startswith("zip_"): await handle_zip_actions(client, query)
+        elif data.startswith("panel_delete_all_"): await handle_panel_delete_all(client, query)
+    except MessageNotModified: await query.answer("Nada que cambiar.")
+    except Exception as e: logger.error(f"Error en advanced_features_callbacks_router: {e}", exc_info=True)
 
 async def open_task_menu_callback(client: Client, query: CallbackQuery):
     await query.answer(); task_id = query.data.split("_")[2]; await db_instance.set_user_state(query.from_user.id, "idle"); await open_task_menu_from_p(client, query, task_id)
