@@ -74,8 +74,8 @@ def sanitize_filename(filename: str) -> str:
     return sanitized_base[:240]
 
 # [ABSOLUTE FINAL FIX - TypeError]
-# Esta función ha sido reescrita desde cero para garantizar que no haya errores de tipo.
-# Las operaciones numéricas y de formato están completamente separadas.
+# La lógica ha sido corregida para que las operaciones numéricas se realicen
+# SIEMPRE sobre las variables numéricas originales, ANTES de cualquier formateo.
 def format_status_message(
     operation_title: str, percentage: float, processed_bytes: float, total_bytes: float,
     speed: float, eta: float, elapsed: float, status_tag: str,
@@ -84,27 +84,30 @@ def format_status_message(
     
     bar = _create_text_bar(percentage)
     lines = [f"<b>{operation_title}</b>", f"<code>[{bar}] {percentage:.2f}%</code>"]
-    
-    # --- Construcción de Detalles ---
     details = []
 
-    # 1. Línea "Processed"
-    # La lógica se separa claramente: si es procesamiento, se formatea como tiempo, si no, como bytes.
-    if "Process" in operation_title:
-        processed_str = format_time(processed_bytes)
-        total_str = format_time(total_bytes) if total_bytes > 0 else "??:??"
-        details.append(f"Processed: {processed_str} de {total_str}")
-    else:
-        processed_str = format_bytes(processed_bytes)
-        total_str = format_bytes(total_bytes) if total_bytes > 0 else "0 B"
-        details.append(f"Processed: {processed_str} of {total_str}")
+    # Determinar el formato basado en el título ANTES de construir las líneas de detalle.
+    is_processing = "Process" in operation_title
 
-    # 2. Otros detalles
+    # Crear las representaciones en string una sola vez.
+    processed_str = format_time(processed_bytes) if is_processing else format_bytes(processed_bytes)
+    
+    # [LA CORRECCIÓN CLAVE ESTÁ AQUÍ]
+    # Comprobar el valor numérico de total_bytes ANTES de formatearlo.
+    if total_bytes > 0:
+        total_str = format_time(total_bytes) if is_processing else format_bytes(total_bytes)
+    else:
+        total_str = "??:??" if is_processing else "0 B"
+
+    # Construir la línea "Processed"
+    line_label = "de" if is_processing else "of"
+    details.append(f"Processed: {processed_str} {line_label} {total_str}")
+
     if file_info: details.append(f"File: {file_info}")
     details.append(f"Status: {status_tag}")
     details.append(f"ETA: {format_time(eta)}")
 
-    if "Process" in operation_title:
+    if is_processing:
         details.append(f"Speed: {speed:.2f}x")
     else:
         details.append(f"Speed: {format_bytes(speed)}/s")
@@ -113,7 +116,6 @@ def format_status_message(
     details.append(f"Engine: {engine}")
     details.append(f"ID: {user_id}")
 
-    # 3. Ensamblaje final del mensaje
     for i, detail in enumerate(details):
         prefix = '┖' if i == len(details) - 1 else '┠'
         lines.append(f"{prefix} {detail}")
@@ -123,12 +125,9 @@ def format_status_message(
 def generate_summary_caption(task: Dict, initial_size: int, final_size: int, final_filename: str) -> str:
     config = task.get('processing_config', {})
     ops = []
-
     original_base = sanitize_filename(task.get('original_filename', ''))
     final_base = sanitize_filename(final_filename)
-
-    if final_base != original_base:
-        ops.append("✍️ Renombrado")
+    if final_base != original_base: ops.append("✍️ Renombrado")
     if config.get('transcode'): ops.append(f"📉 Transcodificado a {config['transcode'].get('resolution', 'N/A')}")
     if config.get('watermark'): ops.append("💧 Marca de agua añadida")
     if config.get('mute_audio'): ops.append("🔇 Audio silenciado")
