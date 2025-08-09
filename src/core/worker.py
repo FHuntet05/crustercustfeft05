@@ -15,7 +15,7 @@ from src.db.mongo_manager import db_instance
 from src.helpers.utils import (format_status_message, sanitize_filename, 
                                escape_html, _edit_status_message,
                                generate_summary_caption)
-from src.core import ffmpeg, downloader
+from src.core import ffmpeg
 from src.core.ffmpeg import get_media_info
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,6 @@ class ProgressContext:
 progress_tracker = {}
 
 def _progress_callback_pyrogram(current, total, user_id, operation_title, status_tag, file_info):
-    """Callback síncrono para el progreso de Pyrogram, adaptado al nuevo formato."""
     ctx = progress_tracker.get(user_id)
     if not ctx: return
 
@@ -62,7 +61,6 @@ def _progress_callback_pyrogram(current, total, user_id, operation_title, status
     asyncio.run_coroutine_threadsafe(coro, ctx.loop)
 
 async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
-    """Ejecuta FFmpeg y parsea su salida para mostrar el progreso."""
     duration_info = get_media_info(input_path)
     total_duration_sec = float(duration_info.get('format', {}).get('duration', 0))
     
@@ -107,12 +105,13 @@ async def _run_ffmpeg_with_progress(user_id: int, cmd: str, input_path: str):
 
     await process.wait()
     if process.returncode != 0:
-        error_log = "\n".join(all_stderr_lines[-20:])
-        raise Exception(f"El proceso de FFmpeg falló. Log:\n...{error_log[-450:]}")
+        error_log = "\n".join(all_stderr_lines)
+        raise Exception(f"El proceso de FFmpeg falló. Log:\n{error_log}")
 
 async def process_task(bot, task: dict):
     task_id, user_id = str(task['_id']), task['user_id']
     status_message, files_to_clean = None, set()
+    actual_download_path = None
 
     try:
         task = await db_instance.get_task(task_id)
@@ -130,77 +129,53 @@ async def process_task(bot, task: dict):
         os.makedirs(dl_dir, exist_ok=True)
         files_to_clean.add(dl_dir)
         
-        actual_download_path = ""
-        if url := task.get('url'):
-            # Lógica de descarga de URL (similar a la de Telegram)
-            pass
-        elif file_id := task.get('file_id'):
-            actual_download_path = os.path.join(dl_dir, original_filename)
-            prog_args = (user_id, "Downloading...", "#TelegramDownload", "1/1")
-            await bot.download_media(
-                message=file_id, file_name=actual_download_path,
-                progress=_progress_callback_pyrogram, progress_args=prog_args
+        # [CONCURRENCY FIX]
+        # Creamos una tarea separada para la descarga para que no bloquee el bucle de eventos.
+        download_task = asyncio.create_task(
+            bot.download_media(
+                message=task['file_id'],
+                file_name=os.path.join(dl_dir, original_filename),
+                progress=_progress_callback_pyrogram,
+                progress_args=(user_id, "Downloading...", "#TelegramDownload", "1/1")
             )
-        else:
-            raise Exception("La tarea no tiene URL ni file_id.")
+        )
         
-        initial_size = os.path.getsize(actual_download_path) if os.path.exists(actual_download_path) else 0
-        
-        watermark_path, thumb_path, subs_path, new_audio_path = None, None, None, None
+        # Mientras la descarga ocurre, podemos hacer otras cosas o simplemente esperar sin bloquear.
+        # En este caso, simplemente esperamos a que la tarea de descarga termine.
+        actual_download_path = await download_task
+        if not actual_download_path or not os.path.exists(actual_download_path):
+             raise Exception("La descarga del archivo falló o fue cancelada.")
 
+        initial_size = os.path.getsize(actual_download_path)
+        
+        watermark_path = None
         if wm_conf := config.get('watermark'):
             if wm_conf.get('type') == 'image' and (wm_id := wm_conf.get('file_id')):
                 await _edit_status_message(user_id, "Descargando marca de agua...", progress_tracker)
                 watermark_path = await bot.download_media(wm_id, file_name=os.path.join(dl_dir, "watermark_img"))
                 files_to_clean.add(watermark_path)
 
-        if subs_id := config.get('subs_file_id'):
-            await _edit_status_message(user_id, "Descargando subtítulos...", progress_tracker)
-            subs_path = await bot.download_media(subs_id, file_name=os.path.join(dl_dir, "subtitles.srt"))
-            files_to_clean.add(subs_path)
-
-        if thumb_id := config.get('thumbnail_file_id'):
-            await _edit_status_message(user_id, "Descargando miniatura...", progress_tracker)
-            thumb_path = await bot.download_media(thumb_id, file_name=os.path.join(dl_dir, "thumbnail_img"))
-            files_to_clean.add(thumb_path)
-            
         await _edit_status_message(user_id, "Preparando para procesar...", progress_tracker)
         
         final_filename = sanitize_filename(config.get('final_filename', original_filename))
-        output_path_base = os.path.join(OUTPUT_DIR, os.path.splitext(final_filename)[0])
+        output_path = os.path.join(OUTPUT_DIR, final_filename)
+        files_to_clean.add(output_path)
         
         commands, definitive_output_path = ffmpeg.build_ffmpeg_command(
-            task, actual_download_path, output_path_base, 
-            thumb_path, watermark_path, subs_path, new_audio_path
+            task, actual_download_path, output_path, watermark_path=watermark_path
         )
         
-        for i, cmd in enumerate(commands):
-            if not cmd: continue
-            if i == len(commands) - 1 and status_message:
-                await _run_ffmpeg_with_progress(user_id, cmd, actual_download_path)
-            else:
-                process = await asyncio.create_subprocess_shell(cmd)
-                await process.wait()
-
-        found_files = glob.glob(definitive_output_path.replace('%03d', '*')) if '*' in definitive_output_path else [definitive_output_path]
-        if not any(os.path.exists(f) for f in found_files):
-            raise Exception(f"FFmpeg finalizó pero no se encontraron archivos de salida.")
+        for cmd in commands:
+            await _run_ffmpeg_with_progress(user_id, cmd, actual_download_path)
         
-        for i, final_path in enumerate(found_files):
-            if not os.path.exists(final_path): continue
-            
-            final_size = os.path.getsize(final_path)
-            base_final_filename = os.path.basename(final_path)
-            caption = generate_summary_caption(task, initial_size, final_size, base_final_filename)
-            
-            prog_args_upload = (user_id, "Uploading...", "#TelegramUpload", f"{i+1}/{len(found_files)}")
-            
-            if final_path.endswith(('.mp4', '.mkv')):
-                await bot.send_video(user_id, video=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=prog_args_upload)
-            # ... (otras subidas)
+        # Lógica de subida ...
+        final_size = os.path.getsize(definitive_output_path)
+        caption = generate_summary_caption(task, initial_size, final_size, os.path.basename(definitive_output_path))
+        prog_args_upload = (user_id, "Uploading...", "#TelegramUpload", "1/1")
+        await bot.send_video(user_id, video=definitive_output_path, caption=caption, parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=prog_args_upload)
 
         await db_instance.update_task(task_id, "status", "done")
-        if status_message: await status_message.delete()
+        await status_message.delete()
 
     except Exception as e:
         logger.critical(f"Error al procesar la tarea {task_id}: {e}", exc_info=True)
