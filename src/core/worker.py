@@ -73,6 +73,8 @@ class ProgressTracker:
         except Exception as e:
             logger.warning(f"No se pudo editar mensaje de estado: {e}")
 
+    # [DEFINITIVE FIX - TypeError]
+    # La firma correcta de la callback es (current, total). No se necesitan args adicionales.
     async def pyrogram_callback(self, current: int, total: int):
         await self.update_progress(current, total, is_processing=False)
 
@@ -118,16 +120,13 @@ async def _download_single_file(bot: Client, task: Dict, dl_dir: str, tracker: P
         safe_local_filename = f"input_{task['_id']}{ext}"
         download_path = os.path.join(dl_dir, safe_local_filename)
         
-        # [FINAL FIX - PROGRESS ARGS]
-        # Reintroducimos los progress_args, pasando el tamaño total desde la DB
-        # a la callback de progreso.
-        total_size = task.get('file_metadata', {}).get('size', 0)
-        
+        # [DEFINITIVE FIX - TypeError]
+        # Se elimina el 'progress_args' que causaba el TypeError.
+        # La callback de Pyrogram ya recibe (current, total) automáticamente.
         await bot.download_media(
             message=file_id, 
             file_name=download_path, 
-            progress=tracker.pyrogram_callback,
-            progress_args=(total_size,)  # <--- ESTA ES LA CORRECCIÓN
+            progress=tracker.pyrogram_callback
         )
     
     if not download_path or not os.path.exists(download_path):
@@ -159,12 +158,10 @@ async def _download_batch_files(bot: Client, task: Dict, dl_dir: str, tracker: P
             _, ext = os.path.splitext(filename)
             safe_local_filename = f"source_{i}{ext}"
             path = os.path.join(dl_dir, safe_local_filename)
-            total_size = source_task.get('file_metadata', {}).get('size', 0)
             await bot.download_media(
                 message=source_file_id,
                 file_name=path,
-                progress=tracker.pyrogram_callback,
-                progress_args=(total_size,)
+                progress=tracker.pyrogram_callback
             )
         
         if path and os.path.exists(path):
@@ -205,7 +202,7 @@ async def process_task(bot: Client, task: Dict):
             if await asyncio.to_thread(downloader.download_thumbnail, thumb_url, thumb_path):
                 files_to_clean.add(thumb_path)
             else:
-                thumb_path = None # La descarga falló, no usarlo.
+                thumb_path = None
 
         main_input_path = input_paths[0]
         initial_size = os.path.getsize(main_input_path) if os.path.exists(main_input_path) else 0
@@ -217,7 +214,6 @@ async def process_task(bot: Client, task: Dict):
             
             output_dir = os.path.join(OUTPUT_DIR, task_id); os.makedirs(output_dir, exist_ok=True); files_to_clean.add(output_dir)
             
-            # El nombre final ahora se sanea aquí, justo antes de usarlo.
             final_filename_base = sanitize_filename(config.get('final_filename', os.path.splitext(filename)[0]))
             output_path_base = os.path.join(output_dir, final_filename_base)
             
@@ -241,11 +237,11 @@ async def process_task(bot: Client, task: Dict):
             if config.get('extract_audio'): file_type = 'audio'
             
             if file_type == 'video':
-                await bot.send_video(user_id, video=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(final_size,))
+                await bot.send_video(user_id, video=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback)
             elif file_type == 'audio':
-                await bot.send_audio(user_id, audio=final_path, thumb=thumb_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(final_size,))
+                await bot.send_audio(user_id, audio=final_path, thumb=thumb_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback)
             else:
-                await bot.send_document(user_id, document=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback, progress_args=(final_size,))
+                await bot.send_document(user_id, document=final_path, caption=caption, parse_mode=ParseMode.HTML, progress=tracker.pyrogram_callback)
 
         await db_instance.update_task_field(task_id, "status", "completed")
         await tracker.message.delete()
