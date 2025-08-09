@@ -35,7 +35,7 @@ class ProgressContext:
     
     def reset_timer(self):
         self.start_time = time.time()
-        self.last_update_time = 0 # También resetear el tiempo de la última actualización
+        self.last_update_time = 0
 
 progress_tracker: Dict[int, ProgressContext] = {}
 
@@ -67,7 +67,11 @@ def _progress_callback_pyrogram(current: int, total: int, user_id: int, title: s
 
 async def _run_command_with_progress(user_id: int, command: List[str], input_path: str):
     media_info = get_media_info(input_path)
-    duration = float(media_info.get("format", {}).get("duration", 0))
+    duration_str = media_info.get("format", {}).get("duration", "0")
+    try:
+        duration = float(duration_str)
+    except (TypeError, ValueError):
+        duration = 0
 
     time_pattern = re.compile(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})")
     
@@ -91,7 +95,7 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
 
                 h, m, s, ms = map(int, match.groups())
                 processed_time = h * 3600 + m * 60 + s + ms / 100
-                if processed_time > duration: processed_time = duration # Evitar superar 100%
+                if processed_time > duration: processed_time = duration
 
                 percentage = (processed_time / duration) * 100
                 elapsed = now - ctx.start_time
@@ -110,7 +114,6 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
     if process.returncode != 0:
         error_log = "".join(all_stderr_lines)
         raise Exception(f"FFmpeg falló con código de salida {process.returncode}. Log:\n{error_log}")
-
 
 async def process_task(bot, task: dict):
     task_id, user_id = str(task['_id']), task['user_id']
@@ -155,18 +158,21 @@ async def process_task(bot, task: dict):
         initial_size = os.path.getsize(actual_download_path)
         
         watermark_path = None
-        # (Lógica de descarga de archivos auxiliares se mantiene aquí)
         
-        # [DEFINITIVE FIX - UI FEEDBACK]
-        # Forzar una actualización de estado a "Procesando" ANTES de iniciar FFmpeg.
         ctx.reset_timer()
-        processing_text = format_status_message(
-    operation_title="Task is being Processed!", percentage=0,
-    processed_bytes=0, total_bytes=get_media_info(actual_download_path).get("format", {}).get("duration", 0),
-    speed=0, eta=float('inf'), elapsed=0,
-    status_tag="#Processing", engine="FFmpeg", user_id=user_id
-)
+        media_info = get_media_info(actual_download_path)
+        duration_str = media_info.get("format", {}).get("duration", "0")
+        try:
+            duration = float(duration_str)
+        except (TypeError, ValueError):
+            duration = 0
 
+        processing_text = format_status_message(
+            operation_title="Task is being Processed!", percentage=0,
+            processed_bytes=0, total_bytes=duration,
+            speed=0, eta=float('inf'), elapsed=0,
+            status_tag="#Processing", engine="FFmpeg", user_id=user_id
+        )
         await _edit_status_message(user_id, processing_text, progress_tracker)
 
         final_filename_base = sanitize_filename(config.get('final_filename', original_filename))
@@ -202,27 +208,32 @@ async def process_task(bot, task: dict):
 
         await db_instance.update_task(task_id, "status", "done")
         await status_message.delete()
-
     except Exception as e:
         logger.critical(f"Error al procesar la tarea {task_id}: {e}", exc_info=True)
         error_message = f"❌ <b>Error Fatal en Tarea</b>\n<code>{escape_html(original_filename)}</code>\n\n<b>Motivo:</b>\n<pre>{escape_html(str(e))}</pre>"
-        
+
         await db_instance.update_task(task_id, "status", "error")
         await db_instance.update_task(task_id, "last_error", str(e))
-        
+
         if status_message:
-            try: await status_message.edit_text(error_message, parse_mode=ParseMode.HTML)
-            except Exception: await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
+            try:
+                await status_message.edit_text(error_message, parse_mode=ParseMode.HTML)
+            except Exception:
+                await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
         else:
             await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
 
     finally:
-        if user_id in progress_tracker: del progress_tracker[user_id]
+        if user_id in progress_tracker:
+            del progress_tracker[user_id]
         for fpath in files_to_clean:
             try:
-                if os.path.isdir(fpath): shutil.rmtree(fpath, ignore_errors=True)
-                elif os.path.exists(fpath): os.remove(fpath)
-            except Exception as e: logger.error(f"No se pudo limpiar {fpath}: {e}")
+                if os.path.isdir(fpath):
+                    shutil.rmtree(fpath, ignore_errors=True)
+                elif os.path.exists(fpath):
+                    os.remove(fpath)
+            except Exception as e:
+                logger.error(f"No se pudo limpiar {fpath}: {e}")
 
 async def worker_loop(bot_instance):
     logger.info("[WORKER] Bucle del worker iniciado.")
