@@ -65,31 +65,17 @@ def format_time(seconds: float) -> str:
     if hours > 0: return f"{hours:02}:{minutes:02}:{seconds_part:02}"
     return f"{minutes:02}:{seconds_part:02}"
 
-# [DEFINITIVE FIX - EXTENSION HANDLING]
-# Esta función ahora solo sanea y devuelve el NOMBRE BASE de un archivo.
-# Elimina la extensión y luego limpia el nombre.
-# El worker.py se encargará de añadir la extensión correcta.
 def sanitize_filename(filename: str) -> str:
-    """
-    Toma un nombre de archivo, elimina su extensión y devuelve un nombre base saneado.
-    """
-    if not isinstance(filename, str):
-        return "archivo_invalido"
-    
-    # 1. Quitar la extensión para trabajar solo con el nombre base.
+    if not isinstance(filename, str): return "archivo_invalido"
     name_base = os.path.splitext(filename)[0]
-    
-    # 2. Sanear el nombre base.
     sanitized_base = re.sub(r'[^\w\s-]', '', name_base, flags=re.UNICODE)
     sanitized_base = re.sub(r'[\s-]+', ' ', sanitized_base).strip()
-    
-    # 3. Manejar caso de nombre vacío.
-    if not sanitized_base:
-        sanitized_base = "archivo_procesado"
-        
-    # 4. Devolver solo el nombre base, limpio y con longitud limitada.
+    if not sanitized_base: sanitized_base = "archivo_procesado"
     return sanitized_base[:240]
 
+# [DEFINITIVE FIX - TypeError]
+# La lógica ha sido reescrita para evitar la reutilización de variables con tipos diferentes.
+# Se usan variables separadas para los valores numéricos y sus representaciones en string.
 def format_status_message(
     operation_title: str, percentage: float, processed_bytes: float, total_bytes: float,
     speed: float, eta: float, elapsed: float, status_tag: str,
@@ -99,20 +85,24 @@ def format_status_message(
     details = []
     
     if "Process" in operation_title:
+        # Usar variables separadas para el string formateado
         processed_str = format_time(processed_bytes)
         total_str = format_time(total_bytes) if total_bytes > 0 else "??:??"
         details.append(f"Processed: {processed_str} de {total_str}")
     else:
+        # Usar variables separadas para el string formateado
         processed_str = format_bytes(processed_bytes)
-        total_str = format_bytes(total_bytes)
+        total_str = format_bytes(total_bytes) if total_bytes > 0 else "0 B"
         details.append(f"Processed: {processed_str} of {total_str}")
 
     if file_info: details.append(f"File: {file_info}")
     details.append(f"Status: {status_tag}")
     details.append(f"ETA: {format_time(eta)}")
 
-    if "Process" in operation_title: details.append(f"Speed: {speed:.2f}x")
-    else: details.append(f"Speed: {format_bytes(speed)}/s")
+    if "Process" in operation_title: 
+        details.append(f"Speed: {speed:.2f}x")
+    else: 
+        details.append(f"Speed: {format_bytes(speed)}/s")
 
     details.append(f"Elapsed: {format_time(elapsed)}")
     details.append(f"Engine: {engine}")
@@ -129,7 +119,6 @@ def generate_summary_caption(task: Dict, initial_size: int, final_size: int, fin
     config = task.get('processing_config', {})
     ops = []
 
-    # La comparación de nombres ahora es más simple gracias a la nueva sanitize_filename
     original_base = sanitize_filename(task.get('original_filename', ''))
     final_base = sanitize_filename(final_filename)
 
@@ -138,8 +127,7 @@ def generate_summary_caption(task: Dict, initial_size: int, final_size: int, fin
     if config.get('transcode'): ops.append(f"📉 Transcodificado a {config['transcode'].get('resolution', 'N/A')}")
     if config.get('watermark'): ops.append("💧 Marca de agua añadida")
     if config.get('mute_audio'): ops.append("🔇 Audio silenciado")
-    # ... (y otras operaciones)
-
+    
     caption_parts = [f"✅ <b>Proceso Completado</b>", f"📦 <code>{escape_html(final_filename)}</code>"]
     
     size_reduction_str = ""
@@ -167,10 +155,8 @@ def format_task_details_rich(task: Dict, index: int) -> str:
     config = task.get('processing_config', {})
     config_parts = []
     
-    # La comparación de nombres ahora es más simple
     if sanitize_filename(config.get('final_filename', '')) != sanitize_filename(task.get('original_filename', '')):
         config_parts.append("✏️ Renombrado")
-    # ... (otras configuraciones)
 
     config_summary = ", ".join(config_parts) if config_parts else "<i>(Sin cambios)</i>"
 
