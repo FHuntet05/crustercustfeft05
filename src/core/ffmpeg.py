@@ -2,10 +2,9 @@
 
 import logging
 import subprocess
-import shlex
 import os
 import json
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -27,85 +26,68 @@ def get_media_info(file_path: str) -> dict:
         logger.error(f"No se pudo obtener info de {file_path}: {e}")
         return {}
 
-def build_ffmpeg_command(task: dict, input_path: str, output_path: str, thumbnail_path: str = None, watermark_path: str = None, subs_path: str = None, new_audio_path: str = None) -> tuple[list[str], str]:
+def build_ffmpeg_command(task: Dict, input_path: str, output_path: str, watermark_path: str = None) -> Tuple[List[str], str]:
     config = task.get('processing_config', {})
 
     # Derivación a constructores de comandos especializados
     if config.get('extract_audio'):
         return build_extract_audio_command(input_path, output_path)
 
-    # Constructor principal
-    command = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+    # --- Constructor Principal: Construcción como LISTA DE ARGUMENTOS ---
+    command: List[str] = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
     
-    # Manejo de tiempos (trim)
-    if 'trim_times' in config:
-        start, _, end = config['trim_times'].partition('-')
-        if start.strip(): command.extend(["-ss", start.strip()])
-        if end.strip(): command.extend(["-to", end.strip()])
-    
-    # Entradas principales y auxiliares
+    # Entradas
     command.extend(["-i", input_path])
-    input_map_index = 1
-    watermark_map_str, subs_map_str, thumb_map_str = "", "", ""
     if watermark_path:
         command.extend(["-i", watermark_path])
-        watermark_map_str = f"[{input_map_index}:v]"
-        input_map_index += 1
-    if subs_path:
-        command.extend(["-i", subs_path])
-        subs_map_str = f"[{input_map_index}:s]"
-        input_map_index += 1
-    
-    video_filters = []
+
+    filter_complex_parts = []
     video_chain = "[0:v]"
+    
+    # Filtros de Video
+    if transcode := config.get('transcode'):
+        if res := transcode.get('resolution'):
+            filter_complex_parts.append(f"{video_chain}scale=-2:{res.replace('p', '')}[scaled_v]")
+            video_chain = "[scaled_v]"
 
-    # Filtros de video (escala, texto de marca de agua)
-    if task.get('file_type') == 'video':
-        if transcode := config.get('transcode'):
-            if res := transcode.get('resolution'):
-                video_filters.append(f"scale=-2:{res.replace('p', '')}")
-        
-        if wm_conf := config.get('watermark'):
-            if wm_conf.get('type') == 'text':
-                text = wm_conf.get('text', '').replace("'", "’").replace(':', r'\:')
-                pos_map = {'top_left': 'x=10:y=10', 'top_right': 'x=w-text_w-10:y=10', 'bottom_left': 'x=10:y=h-text_h-10', 'bottom_right': 'x=w-text_w-10:y=h-text_h-10'}
-                video_filters.append(f"drawtext=text='{text}':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.5:boxborderw=5:{pos_map.get(wm_conf.get('position', 'top_right'))}")
+    if wm_conf := config.get('watermark'):
+        pos_map = {'top_left': '10:10', 'top_right': 'W-w-10:10', 'bottom_left': '10:H-h-10', 'bottom_right': 'W-w-10:H-h-10'}
+        position = pos_map.get(wm_conf.get('position', 'top_right'))
+        if wm_conf.get('type') == 'image' and watermark_path:
+            filter_complex_parts.append(f"{video_chain}[1:v]overlay={position}[out_v]")
+            video_chain = "[out_v]"
+        elif wm_conf.get('type') == 'text':
+            # Escapado seguro para drawtext
+            text = wm_conf.get('text', '').replace("'", "’").replace(':', r'\:')
+            filter_complex_parts.append(f"{video_chain}drawtext=text='{text}':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.5:boxborderw=5:x=(w-text_w-10):y=10[out_v]")
+            video_chain = "[out_v]"
 
-    # Aplicar filtros si existen
-    if video_filters:
-        video_chain_out = "[filtered_v]"
-        command.extend(["-filter_complex", f"{video_chain}{','.join(video_filters)}{video_chain_out}"])
-        video_chain = video_chain_out # La siguiente operación usará la salida de esta
-        command.extend(["-map", video_chain])
-    else:
-        command.extend(["-map", "0:v?"])
-        
-    # Mapeo de audio y códecs
-    if not config.get('mute_audio'):
-        command.extend(["-map", "0:a?"])
-        if config.get('transcode'):
-            command.extend(["-c:a", "aac", "-b:a", "128k"])
-        else:
-            command.extend(["-c:a", "copy"])
-    else:
-        command.append("-an")
-        
-    # Códec de video
+    if filter_complex_parts:
+        command.extend(["-filter_complex", ";".join(filter_complex_parts)])
+
+    # Mapeo de Pistas
+    command.extend(["-map", video_chain if video_chain.startswith('[') else "0:v?"])
+    command.extend(["-map", "0:a?"])
+    command.extend(["-map", "0:s?"])
+
+    # Códecs
     if config.get('transcode'):
         command.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "28"])
+        command.extend(["-c:a", "aac", "-b:a", "128k"])
     else:
         command.extend(["-c:v", "copy"])
-        
-    # Mapeo y códec de subtítulos
-    command.extend(["-c:s", "mov_text", "-map", "0:s?"])
+        command.extend(["-c:a", "copy"])
     
+    command.extend(["-c:s", "mov_text"])
+
+    # Salida
     command.append(output_path)
     
-    final_command_str = shlex.join(command)
-    logger.info(f"Comando FFmpeg construido: {final_command_str}")
-    return [final_command_str], output_path
+    logger.info(f"Comando FFmpeg construido (como lista): {command}")
+    return [command], output_path
 
-def build_extract_audio_command(input_path: str, output_path_base: str) -> tuple[List[str], str]:
+
+def build_extract_audio_command(input_path: str, output_path_base: str) -> tuple[List[List[str]], str]:
     media_info = get_media_info(input_path)
     audio_stream = next((s for s in media_info.get('streams', []) if s.get('codec_type') == 'audio'), None)
     ext = ".m4a"
@@ -115,4 +97,4 @@ def build_extract_audio_command(input_path: str, output_path_base: str) -> tuple
     
     final_output_path = f"{os.path.splitext(output_path_base)[0]}{ext}"
     command = ["ffmpeg", "-y", "-i", input_path, "-vn", "-c:a", "copy", final_output_path]
-    return [shlex.join(command)], final_output_path
+    return [command], final_output_path
