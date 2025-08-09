@@ -78,7 +78,8 @@ def build_ffmpeg_command(task: Dict, input_path: str, output_path: str, watermar
     # ✅ Aquí se añade el flag para emitir progreso continuo
     command.extend(["-progress", "pipe:2"])
     command.append(output_path)
-    return command
+    return command, output_path
+
 
 def build_extract_audio_command(input_path: str, output_path_base: str) -> tuple[List[List[str]], str]:
     media_info = get_media_info(input_path)
