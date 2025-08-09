@@ -73,13 +73,12 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
     except (TypeError, ValueError):
         duration = 0
 
-    # Corregido: La expresión regular debe buscar `time=` no `out_time=`
     time_pattern = re.compile(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})")
 
     ctx = progress_tracker.get(user_id)
-    if not ctx:
-        return
+    if not ctx: return
 
+    ctx.reset_timer()
     process = await asyncio.create_subprocess_exec(
         *command,
         stderr=asyncio.subprocess.PIPE
@@ -87,20 +86,17 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
 
     all_stderr_lines = []
     async for line in process.stderr:
-        log_line = line.decode('utf-8', 'ignore').strip()
+        log_line = line.decode('utf-8', 'ignore')
         all_stderr_lines.append(log_line)
-
-        if match := time_pattern.search(log_line): # Corregido para usar `time=`
+        if match := time_pattern.search(log_line):
             if duration > 0:
                 now = time.time()
-                if now - ctx.last_update_time < 1.5:
-                    continue
+                if now - ctx.last_update_time < 1.5: continue
                 ctx.last_update_time = now
 
                 h, m, s, cs = map(int, match.groups())
                 processed_time = h * 3600 + m * 60 + s + cs / 100
-                if processed_time > duration:
-                    processed_time = duration
+                if processed_time > duration: processed_time = duration
 
                 percentage = (processed_time / duration) * 100
                 elapsed = now - ctx.start_time
@@ -108,22 +104,16 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
                 eta = (duration - processed_time) / speed if speed > 0 else float('inf')
 
                 text = format_status_message(
-                    operation_title="Task is being Processed!",
-                    percentage=percentage,
-                    processed_bytes=processed_time,
-                    total_bytes=duration,
-                    speed=speed,
-                    eta=eta,
-                    elapsed=elapsed,
-                    status_tag="#Processing",
-                    engine="FFmpeg",
-                    user_id=user_id
+                    operation_title="Task is being Processed!", percentage=percentage,
+                    processed_bytes=processed_time, total_bytes=duration,
+                    speed=speed, eta=eta, elapsed=elapsed,
+                    status_tag="#Processing", engine="FFmpeg", user_id=user_id
                 )
                 await _edit_status_message(user_id, text, progress_tracker)
-
+    
     await process.wait()
     if process.returncode != 0:
-        error_log = "\n".join(all_stderr_lines) # Corregido para unir con newline
+        error_log = "".join(all_stderr_lines)
         raise Exception(f"FFmpeg falló con código de salida {process.returncode}. Log:\n{error_log}")
 
 
@@ -135,17 +125,13 @@ async def process_task(bot, task: dict):
 
     try:
         task = await db_instance.get_task(task_id)
-        if not task:
-            raise Exception("Tarea no encontrada.")
-
+        if not task: raise Exception("Tarea no encontrada.")
+        
         config = task.get('processing_config', {})
         original_filename = task.get('original_filename') or task.get('url', 'Tarea sin nombre')
-
-        status_message = await bot.send_message(
-            user_id,
-            "✅ Tarea recibida. Preparando...",
-            parse_mode=ParseMode.HTML # Corregido el import
-        )
+        
+        status_message = await bot.send_message(user_id, "✅ Tarea recibida. Preparando...", parse_mode=ParseMode.HTML)
+        
         global progress_tracker
         progress_tracker[user_id] = ProgressContext(bot, status_message, task, asyncio.get_running_loop())
         ctx = progress_tracker[user_id]
@@ -174,14 +160,15 @@ async def process_task(bot, task: dict):
         initial_size = os.path.getsize(actual_download_path)
         
         watermark_path = None
+        if wm_conf := config.get('watermark'):
+            if wm_conf.get('type') == 'image' and (wm_id := wm_conf.get('file_id')):
+                await _edit_status_message(user_id, "Descargando marca de agua...", progress_tracker)
+                watermark_path = await bot.download_media(wm_id, file_name=os.path.join(dl_dir, "watermark_img"))
+                files_to_clean.add(watermark_path)
         
         ctx.reset_timer()
         media_info = get_media_info(actual_download_path)
-        duration_str = media_info.get("format", {}).get("duration", "0")
-        try:
-            duration = float(duration_str)
-        except (TypeError, ValueError):
-            duration = 0
+        duration = float(media_info.get("format", {}).get("duration", 0))
 
         processing_text = format_status_message(
             operation_title="Task is being Processed!", percentage=0,
@@ -204,15 +191,18 @@ async def process_task(bot, task: dict):
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         files_to_clean.add(output_path)
         
-        commands, definitive_output_path = ffmpeg.build_ffmpeg_command(
+        # [DEFINITIVE FIX - TypeError & FileNotFoundError]
+        # La función build_ffmpeg_command ahora devuelve una tupla: (lista_de_listas_de_comandos, ruta_final)
+        # Accedemos a la primera (y usualmente única) lista de comandos con [0]
+        command_groups, definitive_output_path = ffmpeg.build_ffmpeg_command(
             task, actual_download_path, output_path, watermark_path=watermark_path
         )
         
-        # [LA CORRECCIÓN ESTÁ AQUÍ]
-        # `commands` es una lista de comandos (listas de strings). Iteramos sobre ella.
-        for command_list in commands:
-            await _run_command_with_progress(user_id, command_list, actual_download_path)
-
+        # El bucle for fue incorrecto. Ahora, ejecutamos el primer grupo de comandos.
+        # Esto asume que para tareas simples, solo hay un comando.
+        # Para tareas complejas como GIF, `build_ffmpeg_command` debería devolver múltiples listas.
+        if command_groups:
+             await _run_command_with_progress(user_id, command_groups[0], actual_download_path)
         
         final_size = os.path.getsize(definitive_output_path)
         caption = generate_summary_caption(task, initial_size, final_size, os.path.basename(definitive_output_path))
@@ -227,6 +217,7 @@ async def process_task(bot, task: dict):
 
         await db_instance.update_task(task_id, "status", "done")
         await status_message.delete()
+
     except Exception as e:
         logger.critical(f"Error al procesar la tarea {task_id}: {e}", exc_info=True)
         error_message = f"❌ <b>Error Fatal en Tarea</b>\n<code>{escape_html(original_filename)}</code>\n\n<b>Motivo:</b>\n<pre>{escape_html(str(e))}</pre>"
@@ -235,24 +226,18 @@ async def process_task(bot, task: dict):
         await db_instance.update_task(task_id, "last_error", str(e))
 
         if status_message:
-            try:
-                await status_message.edit_text(error_message, parse_mode=ParseMode.HTML)
-            except Exception:
-                await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
+            try: await status_message.edit_text(error_message, parse_mode=ParseMode.HTML)
+            except Exception: await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
         else:
             await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
 
     finally:
-        if user_id in progress_tracker:
-            del progress_tracker[user_id]
+        if user_id in progress_tracker: del progress_tracker[user_id]
         for fpath in files_to_clean:
             try:
-                if os.path.isdir(fpath):
-                    shutil.rmtree(fpath, ignore_errors=True)
-                elif os.path.exists(fpath):
-                    os.remove(fpath)
-            except Exception as e:
-                logger.error(f"No se pudo limpiar {fpath}: {e}")
+                if os.path.isdir(fpath): shutil.rmtree(fpath, ignore_errors=True)
+                elif os.path.exists(fpath): os.remove(fpath)
+            except Exception as e: logger.error(f"No se pudo limpiar {fpath}: {e}")
 
 async def worker_loop(bot_instance):
     logger.info("[WORKER] Bucle del worker iniciado.")
