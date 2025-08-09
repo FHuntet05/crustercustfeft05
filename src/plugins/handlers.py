@@ -1,10 +1,12 @@
+# --- START OF FILE src/plugins/handlers.py ---
+
 import logging
 import re
 from datetime import datetime
 import asyncio
 import os
 
-from pyrogram import Client, filters
+from pyrogram import Client, filters, StopPropagation
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.enums import ParseMode
 from pyrogram.errors import MessageNotModified
@@ -26,28 +28,50 @@ try:
 except (TypeError, ValueError):
     ADMIN_USER_ID = 0
 
-async def reset_user_state_if_needed(client: Client, user_id: int):
+# [FIX 1 - STATE GUARDIAN]
+# Este manejador tiene prioridad (group=-1) y se ejecuta ANTES que cualquier otro manejador de comandos.
+# Su propósito es interceptar comandos cuando el usuario está en un estado de espera (ej. "awaiting_rename").
+# Cancela la operación anterior de forma limpia, evitando los "bucles" de estado y la confusión del usuario.
+@Client.on_message(filters.private & filters.command, group=-1)
+async def state_guardian(client: Client, message: Message):
     """
-    Resetea el estado del usuario si no está 'idle', para prevenir bloqueos.
+    State Guardian: Resets user state if a command is issued during an operation.
     """
+    user_id = message.from_user.id
     user_state = await db_instance.get_user_state(user_id)
+    
+    # Si el usuario está ocupado (no en estado 'idle') y envía un comando,
+    # significa que quiere cancelar la operación actual.
     if user_state.get("status") != "idle":
-        logger.warning(f"Reseteando estado obsoleto '{user_state.get('status')}' para el usuario {user_id}.")
-        # Si el estado obsoleto estaba asociado a un mensaje de configuración, intentamos borrarlo.
+        logger.warning(
+            f"State Guardian: User {user_id} sent command '{message.text}' "
+            f"while in state '{user_state.get('status')}'. Resetting state."
+        )
+        
+        # Intentamos borrar el mensaje que pedía el input (ej. "Envíe el nuevo nombre...")
         if source_id := user_state.get("data", {}).get("source_message_id"):
             try:
                 await client.delete_messages(user_id, source_id)
             except Exception:
-                pass # El mensaje puede no existir, no es crítico.
+                # El mensaje puede no existir, no es crítico.
+                pass 
+                
         await db_instance.set_user_state(user_id, "idle")
+        await message.reply("⚠️ Operación anterior cancelada.")
+        
+        # Si el comando es /start, queremos que se detenga aquí para no mostrar el mensaje de bienvenida
+        # encima del mensaje de cancelación. Para otros comandos, dejamos que continúen.
+        if message.text.startswith("/start"):
+            raise StopPropagation
+
 
 @Client.on_message(filters.command("start") & filters.private)
 async def start_command(client: Client, message: Message):
-    await reset_user_state_if_needed(client, message.from_user.id)
+    # Ya no es necesario el reseteo aquí, el guardián lo maneja.
     greeting = get_greeting(message.from_user.id)
     start_message = (
-        f"¡A sus órdenes, {greeting}! Bienvenido a la <b>Suite de Medios v17.0 (Estable)</b>.\n\n"
-        "He reseteado su estado y estoy listo para nuevas tareas.\n\n"
+        f"¡A sus órdenes, {greeting}! Bienvenido a la <b>Suite de Medios v17.1 (Estable y Segura)</b>.\n\n"
+        "He reseteado su estado si era necesario y estoy listo para nuevas tareas.\n\n"
         "<b>📋 Comandos Principales:</b>\n"
         "• /panel - Muestra su mesa de trabajo con las tareas pendientes.\n"
         "• /p <code>[ID]</code> - Abre el menú de configuración para una tarea específica.\n"
@@ -205,7 +229,7 @@ async def text_gatekeeper(client: Client, message: Message):
     user_id = message.from_user.id
     text = message.text.strip()
     
-    # Ignorar comandos
+    # Ignorar comandos (el guardián ya los manejó si era necesario)
     if text.startswith('/'):
         return
         
@@ -314,8 +338,10 @@ async def search_callbacks_router(client: Client, query: CallbackQuery):
         if data.startswith("song_select_"): await select_song_from_search(client, query)
         elif data.startswith("search_page_"): await handle_search_pagination(client, query)
         elif data.startswith("cancel_search_"): await cancel_search_session(client, query)
-    except MessageNotModified: await query.answer("Nada que cambiar.")
-    except Exception as e: logger.error(f"Error en search_callbacks_router: {e}", exc_info=True)
+    except MessageNotModified:
+        await query.answer("Nada que cambiar.")
+    except Exception as e:
+        logger.error(f"Error en search_callbacks_router: {e}", exc_info=True)
 
 async def select_song_from_search(client: Client, query: CallbackQuery):
     await query.answer("Preparando descarga...", show_alert=False)

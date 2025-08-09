@@ -1,3 +1,5 @@
+# --- START OF FILE src/core/ffmpeg.py ---
+
 import logging
 import shlex
 import os
@@ -6,6 +8,28 @@ import subprocess
 from typing import List, Tuple, Dict
 
 logger = logging.getLogger(__name__)
+
+# [FIX 2 - COMMAND INJECTION]
+# Esta función sanea el texto para ser usado de forma segura en el filtro 'drawtext' de FFmpeg.
+# Evita que caracteres especiales como ' : % \ corrompan el comando o permitan inyecciones.
+# Referencia: https://ffmpeg.org/ffmpeg-utils.html#quoting-and-escaping
+def sanitize_drawtext(text: str) -> str:
+    """
+    Escapes special characters in a string for use with FFmpeg's drawtext filter.
+    """
+    if not isinstance(text, str):
+        return ''
+    
+    # Caracteres que necesitan ser escapados con una barra invertida
+    escape_chars = r"\'%:"
+    
+    # Realizar el escape
+    sanitized = text.replace('\\', '\\\\') # Primero escapar las barras invertidas
+    for char in escape_chars:
+        sanitized = sanitized.replace(char, f'\\{char}')
+        
+    return sanitized
+
 
 def get_media_info(file_path: str) -> dict:
     if not os.path.exists(file_path):
@@ -52,7 +76,8 @@ def _build_standard_ffmpeg_command(task: Dict, input_path: str, output_path_base
         
         if watermark_config := config.get('watermark'):
             if watermark_config.get('type') == 'text':
-                text = watermark_config.get('text', '').replace("'", "’").replace(':', r'\\:').replace('%', r'\%')
+                # [FIX 2 - COMMAND INJECTION] Usamos la función de saneamiento aquí.
+                text = sanitize_drawtext(watermark_config.get('text', ''))
                 pos_map = {'top_left': 'x=10:y=10', 'top_right': 'x=w-text_w-10:y=10', 'bottom_left': 'x=10:y=h-text_h-10', 'bottom_right': 'x=w-text_w-10:y=h-text_h-10'}
                 video_filters.append(f"drawtext=text='{text}':fontcolor=white:fontsize=24:box=1:boxcolor=black@0.5:boxborderw=5:{pos_map.get(watermark_config.get('position', 'top_right'))}")
 
