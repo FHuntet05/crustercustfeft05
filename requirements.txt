@@ -2,9 +2,9 @@
 Pyrogram==2.0.106
 Tgcrypto
 
-# [FIX] Interacción con MongoDB: Versiones compatibles y estables
-motor==2.5.1
-pymongo==3.12.2
+# [SOLUCIÓN DEFINITIVA] Usar una versión MODERNA de motor compatible con Python 3.10+
+# y dejar que instale su propia dependencia de pymongo.
+motor>=3.1.1
 
 # Carga de variables de entorno desde el archivo .env
 python-dotenv==1.0.0
