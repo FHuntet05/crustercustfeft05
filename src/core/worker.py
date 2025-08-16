@@ -8,9 +8,11 @@ import re
 import shutil
 from datetime import datetime
 from zipfile import ZipFile, ZIP_DEFLATED
-
 from pyrogram.enums import ParseMode
 from bson.objectid import ObjectId
+
+# [FIX] - Se añade la importación de 'Dict' y 'List' para corregir el NameError.
+from typing import Dict, List
 
 from src.db.mongo_manager import db_instance
 from src.helpers.utils import (format_status_message, sanitize_filename,
@@ -25,7 +27,7 @@ DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
 OUTPUT_DIR = os.path.join(os.getcwd(), "outputs")
 
 
-# --- CLASE DE PROGRESO (Sin cambios) ---
+# --- CLASE DE PROGRESO ---
 class ProgressContext:
     def __init__(self, bot, message, task, loop):
         self.bot = bot
@@ -118,7 +120,7 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
         raise Exception(f"FFmpeg falló con código de salida {process.returncode}. Log:\n{error_log}")
 
 
-# --- NUEVAS FUNCIONES DE PROCESAMIENTO ESPECIALIZADAS ---
+# --- FUNCIONES DE PROCESAMIENTO ESPECIALIZADAS ---
 
 async def _process_media_task(bot, task: dict, dl_dir: str):
     """Procesa una tarea de un solo archivo (video o audio)."""
@@ -127,7 +129,6 @@ async def _process_media_task(bot, task: dict, dl_dir: str):
     original_filename = task.get('original_filename', 'archivo_desconocido')
     ctx = progress_tracker[user_id]
     
-    # 1. Descargar el archivo principal (desde Telegram o URL)
     actual_download_path = None
     if file_id := task.get('file_id'):
         actual_download_path = os.path.join(dl_dir, original_filename)
@@ -141,7 +142,6 @@ async def _process_media_task(bot, task: dict, dl_dir: str):
         )
     elif url := task.get('url'):
         base_path = os.path.join(dl_dir, sanitize_filename(task.get('final_filename', 'url_download')))
-        # Lógica para yt-dlp (aún por implementar en detalle, placeholder)
         await _edit_status_message(user_id, "Descargando desde URL...", progress_tracker)
         actual_download_path = await asyncio.to_thread(
             downloader.download_from_url, url, base_path, config.get('download_format_id')
@@ -154,16 +154,14 @@ async def _process_media_task(bot, task: dict, dl_dir: str):
 
     initial_size = os.path.getsize(actual_download_path)
     
-    # 2. Descargar archivos auxiliares (marca de agua, subtítulos, etc.)
     watermark_path = None
     if wm_conf := config.get('watermark'):
         if wm_conf.get('type') == 'image' and (wm_id := wm_conf.get('file_id')):
             await _edit_status_message(user_id, "Descargando marca de agua...", progress_tracker)
             watermark_path = await bot.download_media(wm_id, file_name=os.path.join(dl_dir, "watermark_img"))
     
-    # 3. Construir y ejecutar el comando FFmpeg
     final_filename_base = sanitize_filename(config.get('final_filename', original_filename))
-    output_path = os.path.join(OUTPUT_DIR, f"{final_filename_base}.tmp") # Usar .tmp para evitar conflictos
+    output_path = os.path.join(OUTPUT_DIR, f"{final_filename_base}.tmp")
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     command_groups, definitive_output_path = ffmpeg.build_ffmpeg_command(
@@ -173,21 +171,22 @@ async def _process_media_task(bot, task: dict, dl_dir: str):
     if command_groups:
         await _run_command_with_progress(user_id, command_groups[0], actual_download_path)
     
-    # 4. Subir el resultado final
     final_size = os.path.getsize(definitive_output_path)
     caption = generate_summary_caption(task, initial_size, final_size, os.path.basename(definitive_output_path))
     
     ctx.reset_timer()
     file_type = task.get('file_type', 'video')
 
-    # Determinar el método de envío correcto
-    if file_type == 'video' or definitive_output_path.endswith(('.mp4', '.mkv', '.mov', '.webm')):
+    if definitive_output_path.endswith('.gif'):
+        sender_func = bot.send_animation
+        kwargs = {'animation': definitive_output_path}
+    elif file_type == 'video':
         sender_func = bot.send_video
         kwargs = {'video': definitive_output_path}
-    elif file_type == 'audio' or definitive_output_path.endswith(('.mp3', '.m4a', '.flac', '.opus')):
+    elif file_type == 'audio':
         sender_func = bot.send_audio
         kwargs = {'audio': definitive_output_path}
-    else: # Fallback para GIFs u otros tipos
+    else:
         sender_func = bot.send_document
         kwargs = {'document': definitive_output_path}
     
@@ -208,7 +207,6 @@ async def _process_join_task(bot, task: dict, dl_dir: str):
 
     await _edit_status_message(user_id, f"Iniciando unión de {len(source_task_ids)} videos...", progress_tracker)
     
-    downloaded_files = []
     file_list_path = os.path.join(dl_dir, "file_list.txt")
 
     with open(file_list_path, 'w', encoding='utf-8') as f:
@@ -223,16 +221,13 @@ async def _process_join_task(bot, task: dict, dl_dir: str):
             await _edit_status_message(user_id, f"Descargando video {i+1}/{len(source_task_ids)}...", progress_tracker)
             await bot.download_media(source_task['file_id'], file_name=dl_path)
             
-            # FFmpeg necesita rutas escapadas en el archivo de lista
             f.write(f"file '{dl_path.replace('\'', '\\\'')}'\n")
-            downloaded_files.append(dl_path)
 
     output_filename = f"{task.get('final_filename', 'union_video')}.mp4"
     output_path = os.path.join(OUTPUT_DIR, output_filename)
     
     command = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", file_list_path, "-c", "copy", output_path]
     
-    # La barra de progreso para concat es compleja, mostramos un estado genérico
     await _edit_status_message(user_id, "Uniendo videos...", progress_tracker)
     process = await asyncio.create_subprocess_exec(*command, stderr=asyncio.subprocess.PIPE)
     _, stderr = await process.communicate()
@@ -271,7 +266,7 @@ async def _process_zip_task(bot, task: dict, dl_dir: str):
             await bot.download_media(source_task['file_id'], file_name=dl_path)
             
             await _edit_status_message(user_id, f"Añadiendo al ZIP: {filename}", progress_tracker)
-            zf.write(dl_path, arcname=filename) # arcname para no guardar la ruta completa
+            zf.write(dl_path, arcname=filename)
 
     final_size = os.path.getsize(output_path)
     await bot.send_document(
@@ -281,7 +276,7 @@ async def _process_zip_task(bot, task: dict, dl_dir: str):
     )
     return output_path
 
-# --- FUNCIÓN PRINCIPAL DE PROCESAMIENTO (AHORA UN DISPATCHER) ---
+# --- FUNCIÓN PRINCIPAL DE PROCESAMIENTO (DISPATCHER) ---
 
 async def process_task(bot, task: dict):
     task_id, user_id = str(task['_id']), task['user_id']
@@ -306,8 +301,7 @@ async def process_task(bot, task: dict):
         
         definitive_output_path = None
 
-        # --- Lógica de Despacho ---
-        if file_type in ['video', 'audio']:
+        if file_type in ['video', 'audio', 'document']:
             definitive_output_path = await _process_media_task(bot, task, task_dir)
         elif file_type == 'join_operation':
             definitive_output_path = await _process_join_task(bot, task, task_dir)
@@ -342,7 +336,7 @@ async def process_task(bot, task: dict):
             except Exception as e: logger.error(f"No se pudo limpiar {fpath}: {e}")
 
 
-# --- BUCLE DEL WORKER (Sin cambios) ---
+# --- BUCLE DEL WORKER ---
 async def worker_loop(bot_instance):
     logger.info("[WORKER] Bucle del worker iniciado.")
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
