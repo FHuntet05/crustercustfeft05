@@ -2,8 +2,9 @@
 Pyrogram==2.0.106
 Tgcrypto
 
-# Interacción con MongoDB (asíncrona)
+# Interacción con MongoDB (asíncrona) y su dependencia directa
 motor==3.3.2
+pymongo==3.12.2
 
 # Carga de variables de entorno desde el archivo .env
 python-dotenv==1.0.0
@@ -14,5 +15,5 @@ yt-dlp==2023.11.16
 # Para la API de Spotify (búsqueda de metadatos de música)
 spotipy==2.23.0
 
-# Dependencia para descargas genéricas (ej. carátulas, aunque yt-dlp lo maneja)
+# Dependencia para descargas genéricas
 requests==2.31.0
