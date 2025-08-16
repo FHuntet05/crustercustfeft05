@@ -31,7 +31,7 @@ else:
 # --- Clase de Logger Personalizado para capturar errores de yt-dlp ---
 class YtdlpLogger:
     def debug(self, msg):
-        pass # Ignorar mensajes de depuración de yt-dlp
+        pass
 
     def info(self, msg):
         logger.info(f"[yt-dlp] {msg}")
@@ -40,9 +40,8 @@ class YtdlpLogger:
         logger.warning(f"[yt-dlp] {msg}")
 
     def error(self, msg):
-        # Detectar errores de autenticación comunes para dar feedback útil
-        if "confirm your age" in msg or "sign in to view this video" in msg or "authentication" in msg:
-            raise AuthenticationError("YouTube", "El video requiere autenticación (cookies) o está restringido por edad.")
+        if "confirm your age" in msg or "sign in to view this video" in msg or "authentication" in msg or "not a bot" in msg:
+            raise AuthenticationError("YouTube", "YouTube requiere una verificación que no se pudo superar sin cookies.")
         logger.error(f"Error interno de yt-dlp: {msg}")
 
 # --- Funciones de yt-dlp ---
@@ -56,9 +55,13 @@ def get_common_ydl_opts() -> Dict:
         'geo_bypass': True,
         'logger': YtdlpLogger(),
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.5',
         },
+        # [SOLUCIÓN] Añadir argumento para intentar saltar la comprobación de autenticación de YouTube.
+        'extractor_args': {
+            'youtubetab': {'skip': ['authcheck']}
+        }
     }
     cookies_file_path = "youtube_cookies.txt"
     if os.path.exists(cookies_file_path):
@@ -85,15 +88,13 @@ def download_from_url(url: str, output_path_base: str, format_id: Optional[str] 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
     except AuthenticationError:
-        raise # Propagar la excepción de autenticación para que el handler la capture
+        raise
     except yt_dlp.utils.DownloadError as e:
-        # Envolver errores de yt-dlp en nuestra excepción personalizada
         raise NetworkError(f"yt-dlp no pudo descargar el contenido. El enlace puede estar roto o ser privado. Detalles: {e.msg}")
     except Exception as e:
         logger.error(f"Error inesperado durante la descarga con yt-dlp: {e}", exc_info=True)
         return None
 
-    # Buscar el archivo descargado final, ignorando partes temporales
     found_files = glob.glob(f"{output_path_base}.*")
     for f in found_files:
         if not f.endswith((".part", ".ytdl")):
@@ -109,7 +110,7 @@ def get_url_info(url: str) -> Optional[Dict]:
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False, process=True) # Process=True para obtener todos los formatos
+            info = ydl.extract_info(url, download=False, process=True)
             if not info:
                 return None
             return _parse_ydl_entry(info)
@@ -121,7 +122,7 @@ def get_url_info(url: str) -> Optional[Dict]:
 
 def _parse_ydl_entry(entry: Dict) -> Dict:
     """Parsea la salida de yt-dlp a un formato estandarizado y limpio."""
-    if 'entries' in entry and entry['entries']: # Es una playlist, procesar solo el primer video
+    if 'entries' in entry and entry['entries']:
         return get_url_info(entry['entries'][0]['url'])
 
     formats = []
@@ -149,14 +150,11 @@ def get_best_audio_format_id(formats: List[Dict]) -> str:
     if not audio_only:
         return 'bestaudio/best'
     
-    # Priorizar opus, luego ordenar por bitrate (abr) descendente.
     best_format = sorted(audio_only, key=lambda x: (x.get('acodec') == 'opus', x.get('abr', 0)), reverse=True)[0]
     return best_format['format_id']
 
-# --- Funciones de Búsqueda de Música ---
-
+# --- Funciones de Búsqueda de Música (sin cambios) ---
 def search_music(query: str, limit: int = 10) -> List[Dict]:
-    """Busca música en Spotify para metadatos de alta calidad, con fallback a YouTube."""
     if spotify_api:
         try:
             spotify_results = spotify_api.search(q=query, type='track', limit=limit)
@@ -168,13 +166,11 @@ def search_music(query: str, limit: int = 10) -> List[Dict]:
     return _search_youtube_for_music(query, limit)
 
 def _parse_spotify_results(spotify_results: Dict) -> List[Dict]:
-    """Parsea los resultados de la API de Spotify a nuestro formato estándar."""
     results = []
     for item in spotify_results['tracks']['items']:
         if not item or not item.get('name') or not item['artists']:
             continue
         
-        # Construir un término de búsqueda preciso para yt-dlp
         search_term = f"{item['artists'][0]['name']} - {item['name']} Official Audio"
         
         results.append({
@@ -186,7 +182,6 @@ def _parse_spotify_results(spotify_results: Dict) -> List[Dict]:
     return results
 
 def _search_youtube_for_music(query: str, limit: int) -> List[Dict]:
-    """Busca música directamente en YouTube como método de respaldo."""
     logger.info(f"Realizando búsqueda de música de respaldo en YouTube para: '{query}'")
     ydl_opts = get_common_ydl_opts()
     
@@ -207,7 +202,7 @@ def _search_youtube_for_music(query: str, limit: int) -> List[Dict]:
                 results.append({
                     'source': 'youtube', 'title': title.strip(), 'artist': artist.strip(),
                     'album': 'YouTube', 'duration': entry.get('duration'),
-                    'search_term': entry.get('title'), # Usar el título original para la descarga
+                    'search_term': entry.get('title'),
                 })
             return results
     except Exception as e:
