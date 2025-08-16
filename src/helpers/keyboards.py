@@ -1,15 +1,17 @@
+# --- START OF FILE src/helpers/keyboards.py ---
+
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from .utils import escape_html, format_bytes, format_time
 import math
 from typing import List, Dict
 
-# --- Teclado para Volver ---
+from .utils import escape_html, format_bytes, format_time
 
+# --- Teclado para Volver (Componente Reutilizable) ---
 def build_back_button(callback_data: str) -> InlineKeyboardMarkup:
     """Construye un teclado simple con un solo botón de 'Volver'."""
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data=callback_data)]])
 
-# --- Teclados de Gestión de Perfiles ---
+# --- Teclados de Gestión de Perfiles (Presets) ---
 
 def build_profiles_keyboard(task_id: str, presets: List[Dict]) -> InlineKeyboardMarkup:
     """Construye el teclado para aplicar un perfil a una tarea específica."""
@@ -25,7 +27,7 @@ def build_profiles_keyboard(task_id: str, presets: List[Dict]) -> InlineKeyboard
     if row:
         keyboard.append(row)
     
-    keyboard.append([InlineKeyboardButton("🛠️ Abrir Panel de Tarea", callback_data=f"p_open_{task_id}")])
+    keyboard.append([InlineKeyboardButton("🛠️ Abrir Configuración Manual", callback_data=f"p_open_{task_id}")])
     return InlineKeyboardMarkup(keyboard)
 
 def build_profiles_management_keyboard(presets: List[Dict]) -> InlineKeyboardMarkup:
@@ -51,14 +53,14 @@ def build_profile_delete_confirmation_keyboard(preset_id: str) -> InlineKeyboard
         ]
     ])
 
-# --- Teclados del Panel de Procesamiento Principal ---
+# --- Teclado Principal de Procesamiento ---
 
 def build_processing_menu(task_id: str, file_type: str, task_data: Dict) -> InlineKeyboardMarkup:
     """Construye el menú principal de configuración para una tarea."""
     keyboard = []
     config = task_data.get('processing_config', {})
     
-    # --- Opciones Específicas de Video ---
+    # Opciones Específicas de Video
     if file_type == 'video':
         mute_text = "🔇 Silenciar Video" if not config.get('mute_audio') else "🔊 Restaurar Audio"
         transcode_res = config.get('transcode', {}).get('resolution', 'Original').upper()
@@ -66,32 +68,25 @@ def build_processing_menu(task_id: str, file_type: str, task_data: Dict) -> Inli
         keyboard.extend([
             [InlineKeyboardButton(f"📉 Transcodificar ({transcode_res})", callback_data=f"config_transcode_{task_id}")],
             [
-                InlineKeyboardButton("✂️ Cortar", callback_data=f"config_trim_{task_id}"),
-                InlineKeyboardButton("🎞️ a GIF", callback_data=f"config_gif_{task_id}")
+                InlineKeyboardButton("✂️ Cortar (Trim)", callback_data=f"config_trim_{task_id}"),
+                InlineKeyboardButton("🎞️ Crear GIF", callback_data=f"config_gif_{task_id}")
             ],
             [
                 InlineKeyboardButton("💧 Marca de Agua", callback_data=f"config_watermark_{task_id}"),
-                InlineKeyboardButton("🖼️ Miniatura", callback_data=f"config_thumbnail_{task_id}")
+                InlineKeyboardButton("🖼️ Miniatura (Thumbnail)", callback_data=f"config_thumbnail_{task_id}")
             ],
             [
                 InlineKeyboardButton("📜 Pistas (Audio/Subs)", callback_data=f"config_tracks_{task_id}"),
                 InlineKeyboardButton(mute_text, callback_data=f"set_mute_{task_id}_toggle")
             ],
         ])
-    # --- Opciones Específicas de Audio ---
+    # Opciones Específicas de Audio
     elif file_type == 'audio':
-        bitrate, fmt = config.get('audio_bitrate', 'Original'), config.get('audio_format', 'Original')
-        convert_text = f"🔊 Convertir ({fmt.upper()}, {bitrate})"
-        keyboard.extend([
-            [InlineKeyboardButton(convert_text, callback_data=f"config_audioconvert_{task_id}")],
-            [
-                InlineKeyboardButton("🎧 Efectos de Audio", callback_data=f"config_audioeffects_{task_id}"),
-                InlineKeyboardButton("✂️ Cortar", callback_data=f"config_trim_{task_id}")
-            ],
-            [InlineKeyboardButton("📝 Editar Metadatos", callback_data=f"config_audiometadata_{task_id}")],
-        ])
+         keyboard.extend([
+            [InlineKeyboardButton("✂️ Cortar (Trim)", callback_data=f"config_trim_{task_id}")],
+         ])
 
-    # --- Opciones Comunes y Acciones Finales ---
+    # Opciones Comunes y Acciones Finales
     keyboard.extend([
         [InlineKeyboardButton("✏️ Renombrar Archivo", callback_data=f"config_rename_{task_id}")],
         [InlineKeyboardButton("💾 Guardar como Perfil", callback_data=f"profile_save_request_{task_id}")],
@@ -106,47 +101,27 @@ def build_processing_menu(task_id: str, file_type: str, task_data: Dict) -> Inli
 # --- Sub-menús de Configuración ---
 
 def build_transcode_menu(task_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("1080p", callback_data=f"set_transcode_{task_id}_resolution_1080p"), InlineKeyboardButton("720p", callback_data=f"set_transcode_{task_id}_resolution_720p")],
-        [InlineKeyboardButton("480p", callback_data=f"set_transcode_{task_id}_resolution_480p"), InlineKeyboardButton("360p", callback_data=f"set_transcode_{task_id}_resolution_360p")],
-        [InlineKeyboardButton("240p", callback_data=f"set_transcode_{task_id}_resolution_240p"), InlineKeyboardButton("144p", callback_data=f"set_transcode_{task_id}_resolution_144p")],
-        [InlineKeyboardButton("❌ Mantener Resolución Original", callback_data=f"set_transcode_{task_id}_remove_all")],
-        [InlineKeyboardButton("🔙 Volver", callback_data=f"p_open_{task_id}")]
-    ])
+    resolutions = ["1080p", "720p", "480p", "360p", "240p", "144p"]
+    keyboard = [
+        [InlineKeyboardButton(res, callback_data=f"set_transcode_{task_id}_resolution_{res}")]
+        for res in resolutions
+    ]
+    keyboard.append([InlineKeyboardButton("❌ Mantener Resolución Original", callback_data=f"set_transcode_{task_id}_remove_all")])
+    keyboard.append([InlineKeyboardButton("🔙 Volver", callback_data=f"p_open_{task_id}")])
+    return InlineKeyboardMarkup(keyboard)
 
 def build_tracks_menu(task_id: str, config: Dict) -> InlineKeyboardMarkup:
+    remove_subs_text = f"{'✅' if config.get('remove_subtitles') else '❌'} Quitar Subtítulos Incrustados"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎵 Extraer Pista de Audio", callback_data=f"config_extract_audio_{task_id}")],
-        [InlineKeyboardButton("🎼 Reemplazar Audio", callback_data=f"config_replace_audio_{task_id}")],
-        [InlineKeyboardButton(f"{'✅' if config.get('remove_subtitles') else '❌'} Quitar Subtítulos Incrustados", callback_data=f"set_trackopt_{task_id}_remove_subtitles_toggle")],
-        [InlineKeyboardButton("➕ Incrustar Subtítulos (.srt)", callback_data=f"config_addsubs_{task_id}")],
-        [InlineKeyboardButton("🔙 Volver", callback_data=f"p_open_{task_id}")]
-    ])
-
-def build_audio_convert_menu(task_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("MP3", callback_data=f"set_audioprop_{task_id}_format_mp3"), InlineKeyboardButton("FLAC", callback_data=f"set_audioprop_{task_id}_format_flac"), InlineKeyboardButton("Opus", callback_data=f"set_audioprop_{task_id}_format_opus")],
-        [InlineKeyboardButton("128 kbps", callback_data=f"set_audioprop_{task_id}_bitrate_128k"), InlineKeyboardButton("192 kbps", callback_data=f"set_audioprop_{task_id}_bitrate_192k"), InlineKeyboardButton("320 kbps", callback_data=f"set_audioprop_{task_id}_bitrate_320k")],
-        [InlineKeyboardButton("🔙 Volver", callback_data=f"p_open_{task_id}")]
-    ])
-
-def build_audio_effects_menu(task_id: str, config: Dict) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"🐌 Slowed & Reverb {'✅' if config.get('slowed') else '❌'}", callback_data=f"set_audioeffect_{task_id}_slowed_toggle")],
-        [InlineKeyboardButton(f"🌌 Solo Reverb {'✅' if config.get('reverb') else '❌'}", callback_data=f"set_audioeffect_{task_id}_reverb_toggle")],
-        [InlineKeyboardButton("🔙 Volver", callback_data=f"p_open_{task_id}")]
-    ])
-
-def build_audio_metadata_menu(task_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✏️ Editar Título, Artista, Álbum", callback_data=f"config_audiotags_{task_id}")],
-        [InlineKeyboardButton("🖼️ Añadir/Cambiar Carátula", callback_data=f"config_audiothumb_{task_id}")],
+        [InlineKeyboardButton(remove_subs_text, callback_data=f"set_trackopt_{task_id}_remove_subtitles_toggle")],
         [InlineKeyboardButton("🔙 Volver", callback_data=f"p_open_{task_id}")]
     ])
 
 def build_watermark_menu(task_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🖼️ Usar Imagen", callback_data=f"config_watermark_image_{task_id}")],
+        # [IMPLEMENTACIÓN] Se habilita la opción de marca de agua con texto.
         [InlineKeyboardButton("✏️ Usar Texto", callback_data=f"config_watermark_text_{task_id}")],
         [InlineKeyboardButton("❌ Quitar Marca de Agua", callback_data=f"set_watermark_{task_id}_remove")],
         [InlineKeyboardButton("🔙 Volver", callback_data=f"p_open_{task_id}")]
@@ -164,7 +139,6 @@ def build_position_menu(task_id: str, origin_menu: str) -> InlineKeyboardMarkup:
 def build_thumbnail_menu(task_id: str, config: Dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🖼️ Añadir/Cambiar Miniatura", callback_data=f"config_thumbnail_add_{task_id}")],
-        [InlineKeyboardButton(f"{'✅' if config.get('extract_thumbnail') else '❌'} Extraer Miniatura del Video", callback_data=f"set_thumb_op_{task_id}_extract_toggle")],
         [InlineKeyboardButton(f"{'✅' if config.get('remove_thumbnail') else '❌'} Eliminar Miniatura Existente", callback_data=f"set_thumb_op_{task_id}_remove_toggle")],
         [InlineKeyboardButton("🔙 Volver", callback_data=f"p_open_{task_id}")]
     ])
@@ -172,45 +146,43 @@ def build_thumbnail_menu(task_id: str, config: Dict) -> InlineKeyboardMarkup:
 # --- Teclados de Funciones de Búsqueda y Lote ---
 
 def build_detailed_format_menu(url_info_id: str, formats: List[Dict]) -> InlineKeyboardMarkup:
-    k, r = [], []
-    # Filtrar y ordenar formatos de video por altura
-    v_formats = sorted([f for f in formats if f.get('vcodec') not in ['none', None] and f.get('height')], key=lambda x: x.get('height', 0), reverse=True)
+    keyboard = []
+    video_formats = sorted([f for f in formats if f.get('vcodec', 'none') != 'none' and f.get('height')], key=lambda x: x['height'], reverse=True)
     
-    for f in v_formats[:6]: # Mostrar hasta 6 formatos de video
-        label = f"🎬 {f.get('height')}p"
-        if fsize := f.get('filesize'): label += f" ({format_bytes(fsize)})"
-        r.append(InlineKeyboardButton(label, callback_data=f"set_dlformat_{url_info_id}_{f['format_id']}"))
-        if len(r) >= 2: k.append(r); r = []
-    if r: k.append(r)
+    for f in video_formats[:6]:
+        label = f"🎬 {f['height']}p ({f['ext']})"
+        if fsize := f.get('filesize'):
+            label += f" - {format_bytes(fsize)}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"set_dlformat_{url_info_id}_{f['format_id']}")])
             
-    k.extend([
+    keyboard.extend([
         [InlineKeyboardButton("🎵 Mejor Audio (MP3)", callback_data=f"set_dlformat_{url_info_id}_mp3")],
-        [InlineKeyboardButton("🏆 Mejor Calidad General", callback_data=f"set_dlformat_{url_info_id}_bestvideo")],
-        [InlineKeyboardButton("❌ Cancelar", callback_data=f"cancel_search_session")] # Callback unificada
+        [InlineKeyboardButton("🏆 Mejor Calidad General", callback_data=f"set_dlformat_{url_info_id}_best")],
+        [InlineKeyboardButton("❌ Cancelar", callback_data=f"cancel_search_session")]
     ])
-    return InlineKeyboardMarkup(k)
+    return InlineKeyboardMarkup(keyboard)
 
 def build_search_results_keyboard(all_results: List[Dict], search_id: str, page: int = 1, page_size: int = 5) -> InlineKeyboardMarkup:
-    k = []
+    keyboard = []
     start_index = (page - 1) * page_size
     paginated_results = all_results[start_index : start_index + page_size]
     total_pages = math.ceil(len(all_results) / page_size)
 
     for res in paginated_results:
-        title, artist = (res.get('title', '...')[:30]), (res.get('artist', '...')[:20])
+        title, artist = res.get('title', '...')[:30], res.get('artist', '...')[:20]
         display_text = f"🎵 {title} - {artist}"
         if duration := res.get('duration'):
              display_text += f" ({format_time(duration)})"
-        k.append([InlineKeyboardButton(display_text, callback_data=f"song_select_{res['_id']}")])
+        keyboard.append([InlineKeyboardButton(display_text, callback_data=f"song_select_{res['_id']}")])
     
-    nav = []
-    if page > 1: nav.append(InlineKeyboardButton("⬅️ Anterior", callback_data=f"search_page_{search_id}_{page - 1}"))
-    if total_pages > 1: nav.append(InlineKeyboardButton(f"Pág {page}/{total_pages}", callback_data="noop"))
-    if page < total_pages: nav.append(InlineKeyboardButton("Siguiente ➡️", callback_data=f"search_page_{search_id}_{page + 1}"))
-    if nav: k.append(nav)
+    nav_row = []
+    if page > 1: nav_row.append(InlineKeyboardButton("⬅️", callback_data=f"search_page_{search_id}_{page - 1}"))
+    if total_pages > 1: nav_row.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="noop"))
+    if page < total_pages: nav_row.append(InlineKeyboardButton("➡️", callback_data=f"search_page_{search_id}_{page + 1}"))
+    if nav_row: keyboard.append(nav_row)
 
-    k.append([InlineKeyboardButton("❌ Cancelar Búsqueda", callback_data=f"cancel_search_session")])
-    return InlineKeyboardMarkup(k)
+    keyboard.append([InlineKeyboardButton("❌ Cancelar Búsqueda", callback_data=f"cancel_search_session")])
+    return InlineKeyboardMarkup(keyboard)
 
 def build_batch_profiles_keyboard(presets: List[Dict]) -> InlineKeyboardMarkup:
     k, r = [], []
@@ -220,7 +192,7 @@ def build_batch_profiles_keyboard(presets: List[Dict]) -> InlineKeyboardMarkup:
         if len(r) == 2: k.append(r); r = []
     if r: k.append(r)
     k.extend([
-        [InlineKeyboardButton("⚙️ Usar Config. Por Defecto", callback_data="batch_apply_default")],
+        [InlineKeyboardButton("⚙️ Sin Perfil (Default)", callback_data="batch_apply_default")],
         [InlineKeyboardButton("❌ Cancelar", callback_data="batch_cancel")]
     ])
     return InlineKeyboardMarkup(k)
@@ -228,29 +200,34 @@ def build_batch_profiles_keyboard(presets: List[Dict]) -> InlineKeyboardMarkup:
 def build_join_selection_keyboard(tasks: List[Dict], selected_ids: List[str]) -> InlineKeyboardMarkup:
     k = []
     for task in tasks:
-        tid, fname = str(task['_id']), task.get('original_filename', '...')[:50]
+        tid = str(task['_id'])
+        fname = (task.get('original_filename') or 'Video sin nombre')[:45]
         prefix = "✅ " if tid in selected_ids else "🎬 "
         k.append([InlineKeyboardButton(f"{prefix}{escape_html(fname)}", callback_data=f"join_select_{tid}")])
 
     actions = [InlineKeyboardButton("❌ Cancelar", callback_data="join_cancel")]
     if len(selected_ids) > 1:
-        actions.insert(0, InlineKeyboardButton(f"✅ Unir {len(selected_ids)} Videos", callback_data="join_confirm"))
+        actions.insert(0, InlineKeyboardButton(f"🔗 Unir {len(selected_ids)} Videos", callback_data="join_confirm"))
     k.append(actions)
     return InlineKeyboardMarkup(k)
 
 def build_zip_selection_keyboard(tasks: List[Dict], selected_ids: List[str]) -> InlineKeyboardMarkup:
     k, emoji_map = [], {'video': '🎬', 'audio': '🎵', 'document': '📄'}
     for task in tasks:
-        tid, fname = str(task['_id']), task.get('original_filename', '...')[:45]
+        tid = str(task['_id'])
+        fname = (task.get('original_filename') or 'Archivo sin nombre')[:45]
         emoji = emoji_map.get(task.get('file_type'), '📦')
         prefix = "✅ " if tid in selected_ids else f"{emoji} "
         k.append([InlineKeyboardButton(f"{prefix}{escape_html(fname)}", callback_data=f"zip_select_{tid}")])
         
     actions = [InlineKeyboardButton("❌ Cancelar", callback_data="zip_cancel")]
     if selected_ids:
-        actions.insert(0, InlineKeyboardButton(f"✅ Comprimir {len(selected_ids)} Archivos", callback_data="zip_confirm"))
+        actions.insert(0, InlineKeyboardButton(f"🗜️ Comprimir {len(selected_ids)} Archivos", callback_data="zip_confirm"))
     k.append(actions)
     return InlineKeyboardMarkup(k)
 
 def build_confirmation_keyboard(action_callback: str, cancel_callback: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("✅ Sí, estoy seguro", callback_data=action_callback), InlineKeyboardButton("❌ No, cancelar", callback_data=cancel_callback)]])
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Sí, estoy seguro", callback_data=action_callback), 
+        InlineKeyboardButton("❌ No, cancelar", callback_data=cancel_callback)
+    ]])

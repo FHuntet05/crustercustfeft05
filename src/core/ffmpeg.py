@@ -39,7 +39,6 @@ def build_ffmpeg_command(
     """
     Función router principal que construye el comando FFmpeg apropiado
     basado en la configuración de la tarea.
-    Devuelve una tupla: (lista de comandos, ruta final del archivo de salida).
     """
     config = task.get('processing_config', {})
 
@@ -60,16 +59,13 @@ def _build_standard_video_command(
     subs_path: Optional[str]
 ) -> Tuple[List[List[str]], str]:
     """
-    Construye un comando FFmpeg para tareas de procesamiento de video estándar
-    (transcodificación, corte, marca de agua, etc.).
+    Construye un comando FFmpeg para tareas de procesamiento de video estándar.
     """
     config = task.get('processing_config', {})
     command: List[str] = ["ffmpeg", "-y", "-hide_banner"]
     
-    # 1. Manejo del Corte (Trim) - Se aplica antes de la entrada para mayor eficiencia
     if trim_times := config.get('trim_times'):
         try:
-            # Soportar formato "inicio-fin" o solo "fin"
             if '-' in trim_times:
                 start, end = trim_times.split('-', 1)
                 command.extend(["-ss", start.strip(), "-to", end.strip()])
@@ -78,18 +74,15 @@ def _build_standard_video_command(
         except Exception as e:
             logger.warning(f"Formato de trim inválido '{trim_times}': {e}. Se ignorará.")
 
-    # 2. Definición de Entradas (Inputs)
     command.extend(["-i", input_path])
     if watermark_path:
         command.extend(["-i", watermark_path])
     if subs_path:
         command.extend(["-i", subs_path])
 
-    # 3. Construcción de la Cadena de Filtros Complejos (`filter_complex`)
     filter_complex_parts = []
-    current_video_chain = "[0:v]" # El stream de video del primer input
+    current_video_chain = "[0:v]"
 
-    # Filtros de video simples (ej. escalar)
     video_filters = []
     if transcode := config.get('transcode'):
         if res := transcode.get('resolution'):
@@ -101,22 +94,42 @@ def _build_standard_video_command(
         filter_complex_parts.append(filter_str)
         current_video_chain = next_chain
 
-    # Filtro de superposición de Marca de Agua (overlay)
-    if watermark_path:
-        position = config.get('watermark', {}).get('position', 'bottom_right')
-        pos_map = {
-            'top_left': '10:10',
-            'top_right': 'main_w-overlay_w-10:10',
-            'bottom_left': '10:main_h-overlay_h-10',
-            'bottom_right': 'main_w-overlay_w-10:main_h-overlay_h-10'
-        }
-        overlay_pos = pos_map.get(position, 'main_w-overlay_w-10:main_h-overlay_h-10')
-        
+    if watermark_config := config.get('watermark'):
+        wm_type = watermark_config.get('type')
+        position = watermark_config.get('position', 'bottom_right')
         next_chain = "[watermarked_v]"
-        # El stream [1:v] corresponde a la segunda entrada (-i watermark_path)
-        filter_str = f"{current_video_chain}[1:v]overlay={overlay_pos}{next_chain}"
-        filter_complex_parts.append(filter_str)
-        current_video_chain = next_chain
+
+        if wm_type == 'image' and watermark_path:
+            pos_map = {
+                'top_left': '10:10', 'top_right': 'main_w-overlay_w-10:10',
+                'bottom_left': '10:main_h-overlay_h-10', 'bottom_right': 'main_w-overlay_w-10:main_h-overlay_h-10'
+            }
+            overlay_pos = pos_map.get(position, pos_map['bottom_right'])
+            filter_str = f"{current_video_chain}[1:v]overlay={overlay_pos}{next_chain}"
+            filter_complex_parts.append(filter_str)
+            current_video_chain = next_chain
+
+        elif wm_type == 'text':
+            text_to_draw = watermark_config.get('text', '').replace("'", "’").replace(":", "∶")
+            pos_map = {
+                'top_left': 'x=10:y=10', 'top_right': 'x=w-text_w-10:y=10',
+                'bottom_left': 'x=10:y=h-text_h-10', 'bottom_right': 'x=w-text_w-10:y=h-text_h-10'
+            }
+            text_pos = pos_map.get(position, pos_map['bottom_right'])
+            
+            # [IMPLEMENTACIÓN] Usar una fuente local del proyecto.
+            # Asegúrate de tener un archivo de fuente en 'assets/font.ttf'.
+            font_path = "assets/font.ttf"
+            
+            drawtext_filter = (
+                f"drawtext=fontfile='{font_path}':"
+                f"text='{text_to_draw}':fontcolor=white@0.8:fontsize=24:"
+                f"box=1:boxcolor=black@0.5:boxborderw=5:{text_pos}"
+            )
+            
+            filter_str = f"{current_video_chain}{drawtext_filter}{next_chain}"
+            filter_complex_parts.append(filter_str)
+            current_video_chain = next_chain
 
     if filter_complex_parts:
         command.extend(["-filter_complex", ";".join(filter_complex_parts)])
@@ -125,20 +138,19 @@ def _build_standard_video_command(
     else:
         command.extend(["-map", "0:v?"])
 
-    # 4. Mapeo de Pistas de Audio y Subtítulos
     if config.get('mute_audio'):
-        command.append("-an")  # Descartar todo el audio
+        command.append("-an")
     else:
-        command.extend(["-map", "0:a?"]) # Mapear el audio del video original si existe
+        command.extend(["-map", "0:a?"])
 
     if config.get('remove_subtitles'):
-        command.append("-sn") # Descartar todos los subtítulos
+        command.append("-sn")
     elif subs_path:
-        command.extend(["-map", "2:s?"]) # Mapear los subtítulos del tercer input si existe
+        subs_input_index = "2" if watermark_path else "1"
+        command.extend(["-map", f"{subs_input_index}:s?"])
     else:
-        command.extend(["-map", "0:s?"]) # Mapear los subtítulos originales si existen
+        command.extend(["-map", "0:s?"])
 
-    # 5. Configuración de Codecs
     if config.get('transcode'):
         command.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "28"])
         command.extend(["-c:a", "aac", "-b:a", "128k"])
@@ -147,17 +159,13 @@ def _build_standard_video_command(
         command.extend(["-c:a", "copy"])
         
     command.extend(["-c:s", "mov_text"])
-
-    # 6. Finalización del Comando
     command.extend(["-progress", "pipe:2"])
     command.append(output_path)
 
     return [command], output_path
 
 def _build_extract_audio_command(input_path: str, output_path_base: str) -> Tuple[List[List[str]], str]:
-    """
-    Construye un comando FFmpeg para extraer la pista de audio sin recodificar.
-    """
+    """Construye un comando FFmpeg para extraer la pista de audio sin recodificar."""
     media_info = get_media_info(input_path)
     audio_stream = next((s for s in media_info.get('streams', []) if s.get('codec_type') == 'audio'), None)
     ext = ".m4a"
@@ -170,9 +178,7 @@ def _build_extract_audio_command(input_path: str, output_path_base: str) -> Tupl
     return [command], final_output_path
 
 def _build_gif_command(task: Dict, input_path: str, output_path_base: str) -> Tuple[List[List[str]], str]:
-    """
-    Construye un comando FFmpeg para crear un GIF de alta calidad a partir de un video.
-    """
+    """Construye un comando FFmpeg para crear un GIF de alta calidad a partir de un video."""
     config = task.get('processing_config', {})
     gif_opts = config.get('gif_options', {})
     duration = gif_opts.get('duration', 5.0)
@@ -182,22 +188,16 @@ def _build_gif_command(task: Dict, input_path: str, output_path_base: str) -> Tu
     
     command: List[str] = ["ffmpeg", "-y"]
 
-    # Aplicar corte si está definido
     if trim_times := config.get('trim_times'):
         if '-' in trim_times:
              start, _ = trim_times.split('-', 1)
              command.extend(["-ss", start.strip()])
-        else: # Si solo se especifica un tiempo, asumimos que es el inicio
+        else:
             command.extend(["-ss", trim_times.strip()])
 
-    command.extend(["-t", str(duration)]) # Duración del GIF
+    command.extend(["-t", str(duration)])
     command.extend(["-i", input_path])
     
-    # Cadena de filtros complejos para la creación de GIF optimizado
-    # 1. Ajusta FPS y escala el video.
-    # 2. Divide el stream en dos: uno para el video, otro para generar la paleta.
-    # 3. Genera una paleta de 256 colores.
-    # 4. Usa la paleta generada para crear el GIF.
     filter_complex = (
         f"fps={fps},scale=480:-1:flags=lanczos,split[s0][s1];"
         f"[s0]palettegen[p];[s1][p]paletteuse"

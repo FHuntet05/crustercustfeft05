@@ -82,11 +82,17 @@ async def handle_text_input_for_state(client: Client, message: Message, user_sta
                 await message.reply("❌ Formato inválido. Use: `duración fps` (ej: `5 15`)", quote=True)
                 return
         
+        # [IMPLEMENTACIÓN] Manejar la entrada de texto para la marca de agua.
         elif state == "awaiting_watermark_text":
+            # Guarda el texto y cambia el estado para pedir la posición.
             await db_instance.update_task_config(task_id, "watermark", {"type": "text", "text": user_input})
             await message.delete()
             await db_instance.set_user_state(user_id, 'awaiting_watermark_position', data=data)
-            return await client.edit_message_text(user_id, source_message_id, text="✅ Texto recibido. Elija la posición:", reply_markup=build_position_menu(task_id, "config_watermark"))
+            return await client.edit_message_text(
+                user_id, source_message_id, 
+                text="✅ Texto recibido. Ahora elija la posición:", 
+                reply_markup=build_position_menu(task_id, "config_watermark")
+            )
         
         else: # Estado no reconocido
             return
@@ -219,6 +225,7 @@ async def show_config_menu_and_set_state(client: Client, query: CallbackQuery):
     if menu_type in keyboards:
         return await query.message.edit_text(text=menu_messages[menu_type], reply_markup=keyboards[menu_type])
     
+    # [IMPLEMENTACIÓN] Añadir watermark_text al mapa de estados.
     state_map = {"rename": "awaiting_rename", "trim": "awaiting_trim", "gif": "awaiting_gif",
                  "addsubs": "awaiting_subs", "thumbnail_add": "awaiting_thumbnail_add",
                  "replace_audio": "awaiting_replace_audio", "watermark_text": "awaiting_watermark_text",
@@ -227,6 +234,7 @@ async def show_config_menu_and_set_state(client: Client, query: CallbackQuery):
     
     await db_instance.set_user_state(user_id, state_map[menu_type], data={"task_id": task_id, "source_message_id": query.message.id})
     
+    # [IMPLEMENTACIÓN] Añadir el texto de instrucción para la marca de agua con texto.
     menu_texts = {
         "rename": "✏️ Envíe el nuevo nombre (sin extensión).",
         "trim": "✂️ Envíe tiempos de corte. Formatos:\n• <code>00:10-00:50</code> (inicio-fin)\n• <code>01:23</code> (corta hasta ese punto)",

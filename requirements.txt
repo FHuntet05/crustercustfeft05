@@ -1,21 +1,18 @@
-# Pyrogram y sus dependencias de rendimiento
-Pyrogram>=2.0.106
+# Pyrogram y su dependencia de rendimiento para encriptación
+Pyrogram==2.0.106
 Tgcrypto
 
 # Interacción con MongoDB (asíncrona)
-motor>=3.1.1
+motor==3.3.2
 
-# Carga de variables de entorno
-python-dotenv>=1.0.0
+# Carga de variables de entorno desde el archivo .env
+python-dotenv==1.0.0
 
 # Descargador principal de video/audio
-yt-dlp>=2023.7.6
+yt-dlp==2023.11.16
 
-# Para la API de Spotify (búsqueda)
-spotipy>=2.23.0
+# Para la API de Spotify (búsqueda de metadatos de música)
+spotipy==2.23.0
 
-# Dependencia para descargas genéricas (ej. carátulas)
-requests>=2.31.0
-
-# Para extraer metadatos de audio si es necesario
-Pillow
+# Dependencia para descargas genéricas (ej. carátulas, aunque yt-dlp lo maneja)
+requests==2.31.0
