@@ -2,8 +2,8 @@
 Pyrogram==2.0.106
 Tgcrypto
 
-# Interacción con MongoDB (asíncrona) y su dependencia directa
-motor==3.3.2
+# [FIX] Interacción con MongoDB: Versiones compatibles y estables
+motor==2.5.1
 pymongo==3.12.2
 
 # Carga de variables de entorno desde el archivo .env
