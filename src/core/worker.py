@@ -10,8 +10,6 @@ from datetime import datetime
 from zipfile import ZipFile, ZIP_DEFLATED
 from pyrogram.enums import ParseMode
 from bson.objectid import ObjectId
-
-# [FIX] - Se añade la importación de 'Dict' y 'List' para corregir el NameError.
 from typing import Dict, List
 
 from src.db.mongo_manager import db_instance
@@ -27,7 +25,7 @@ DOWNLOAD_DIR = os.path.join(os.getcwd(), "downloads")
 OUTPUT_DIR = os.path.join(os.getcwd(), "outputs")
 
 
-# --- CLASE DE PROGRESO ---
+# --- CLASE DE PROGRESO (Sin cambios) ---
 class ProgressContext:
     def __init__(self, bot, message, task, loop):
         self.bot = bot
@@ -120,21 +118,19 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
         raise Exception(f"FFmpeg falló con código de salida {process.returncode}. Log:\n{error_log}")
 
 
-# --- FUNCIONES DE PROCESAMIENTO ESPECIALIZADAS ---
+# --- FUNCIONES DE PROCESAMIENTO ESPECIALIZADAS (CON CORRECCIÓN) ---
 
 async def _process_media_task(bot, task: dict, dl_dir: str):
     """Procesa una tarea de un solo archivo (video o audio)."""
     user_id = task['user_id']
     config = task.get('processing_config', {})
-    original_filename = task.get('original_filename', 'archivo_desconocido')
+    original_filename = task.get('original_filename', 'archivo.mkv') # Default con extensión
     ctx = progress_tracker[user_id]
     
     actual_download_path = None
     if file_id := task.get('file_id'):
         actual_download_path = os.path.join(dl_dir, original_filename)
         db_total_size = task.get('file_metadata', {}).get('size', 0)
-        
-        ctx.reset_timer()
         await bot.download_media(
             message=file_id, file_name=actual_download_path,
             progress=_progress_callback_pyrogram,
@@ -155,13 +151,26 @@ async def _process_media_task(bot, task: dict, dl_dir: str):
     initial_size = os.path.getsize(actual_download_path)
     
     watermark_path = None
-    if wm_conf := config.get('watermark'):
+    if wm_conf := config.get('watermark', {}):
         if wm_conf.get('type') == 'image' and (wm_id := wm_conf.get('file_id')):
             await _edit_status_message(user_id, "Descargando marca de agua...", progress_tracker)
             watermark_path = await bot.download_media(wm_id, file_name=os.path.join(dl_dir, "watermark_img"))
     
-    final_filename_base = sanitize_filename(config.get('final_filename', original_filename))
-    output_path = os.path.join(OUTPUT_DIR, f"{final_filename_base}.tmp")
+    # [FIX] Determinar la extensión de salida ANTES de construir la ruta
+    if config.get('gif_options'):
+        output_extension = ".gif"
+    elif config.get('extract_audio'):
+        # La función de ffmpeg determinará la mejor extensión, pero necesitamos una para el contenedor
+        output_extension = ".m4a" 
+    elif config.get('transcode'):
+        output_extension = ".mp4"
+    else:
+        _, original_ext = os.path.splitext(original_filename)
+        output_extension = original_ext if original_ext in ['.mp4', '.mkv', '.mov', '.webm'] else ".mkv"
+
+    final_filename_base = sanitize_filename(config.get('final_filename', os.path.splitext(original_filename)[0]))
+    # [FIX] Construir la ruta final sin .tmp, FFmpeg lo sobrescribirá gracias a '-y'
+    output_path = os.path.join(OUTPUT_DIR, f"{final_filename_base}{output_extension}")
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     command_groups, definitive_output_path = ffmpeg.build_ffmpeg_command(
@@ -180,10 +189,10 @@ async def _process_media_task(bot, task: dict, dl_dir: str):
     if definitive_output_path.endswith('.gif'):
         sender_func = bot.send_animation
         kwargs = {'animation': definitive_output_path}
-    elif file_type == 'video':
+    elif file_type == 'video' and not config.get('extract_audio'):
         sender_func = bot.send_video
         kwargs = {'video': definitive_output_path}
-    elif file_type == 'audio':
+    elif file_type == 'audio' or config.get('extract_audio'):
         sender_func = bot.send_audio
         kwargs = {'audio': definitive_output_path}
     else:
@@ -197,6 +206,8 @@ async def _process_media_task(bot, task: dict, dl_dir: str):
         **kwargs
     )
     return definitive_output_path
+
+# --- EL RESTO DEL ARCHIVO (join, zip, process_task, worker_loop) PERMANECE IGUAL ---
 
 async def _process_join_task(bot, task: dict, dl_dir: str):
     """Procesa una tarea de unión de videos."""
@@ -276,8 +287,6 @@ async def _process_zip_task(bot, task: dict, dl_dir: str):
     )
     return output_path
 
-# --- FUNCIÓN PRINCIPAL DE PROCESAMIENTO (DISPATCHER) ---
-
 async def process_task(bot, task: dict):
     task_id, user_id = str(task['_id']), task['user_id']
     status_message, files_to_clean = None, set()
@@ -335,8 +344,6 @@ async def process_task(bot, task: dict):
                 elif os.path.exists(fpath): os.remove(fpath)
             except Exception as e: logger.error(f"No se pudo limpiar {fpath}: {e}")
 
-
-# --- BUCLE DEL WORKER ---
 async def worker_loop(bot_instance):
     logger.info("[WORKER] Bucle del worker iniciado.")
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
