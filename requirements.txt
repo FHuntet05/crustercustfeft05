@@ -2,15 +2,15 @@
 Pyrogram==2.0.106
 Tgcrypto
 
-# [SOLUCIÓN DEFINITIVA] Usar una versión MODERNA de motor compatible con Python 3.10+
-# y dejar que instale su propia dependencia de pymongo.
+# Interacción con MongoDB (asíncrona)
 motor>=3.1.1
 
 # Carga de variables de entorno desde el archivo .env
 python-dotenv==1.0.0
 
-# Descargador principal de video/audio
-yt-dlp==2023.11.16
+# [ACTUALIZACIÓN] Descargador principal de video/audio a una versión más reciente
+# para evitar bloqueos de YouTube.
+yt-dlp==2024.04.09
 
 # Para la API de Spotify (búsqueda de metadatos de música)
 spotipy==2.23.0
