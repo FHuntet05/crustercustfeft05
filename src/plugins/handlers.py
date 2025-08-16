@@ -7,13 +7,16 @@ import asyncio
 import os
 
 from pyrogram import Client, filters, StopPropagation
-from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message, CallbackQuery
 from pyrogram.enums import ParseMode
 from pyrogram.errors import MessageNotModified
 from bson.objectid import ObjectId
 
 from src.db.mongo_manager import db_instance
-from src.helpers.keyboards import *
+from src.helpers.keyboards import (build_confirmation_keyboard, build_profiles_management_keyboard,
+                                   build_join_selection_keyboard, build_zip_selection_keyboard,
+                                   build_batch_profiles_keyboard, build_profiles_keyboard,
+                                   build_detailed_format_menu, build_search_results_keyboard)
 from src.helpers.utils import (get_greeting, escape_html, sanitize_filename,
                                format_time, format_task_details_rich)
 from src.core import downloader
@@ -28,40 +31,31 @@ try:
 except (TypeError, ValueError):
     ADMIN_USER_ID = 0
 
-# [FIX 1 - INVALID FILTER]
-# El filtro ha sido cambiado de `filters.command` a `filters.regex(r"^/")`.
-# `filters.command` sin argumentos causaba un crash. `filters.regex(r"^/")`
-# captura correctamente cualquier mensaje que empiece con '/', es decir, todos los comandos.
+# [STABILITY FIX] - Filtro de comando corregido para mayor compatibilidad y robustez.
+# `filters.regex(r"^/")` captura cualquier comando, que es la intención aquí.
 @Client.on_message(filters.private & filters.regex(r"^/"), group=-1)
 async def state_guardian(client: Client, message: Message):
     """
-    State Guardian: Resets user state if a command is issued during an operation.
+    Guardián de estado: Resetea el estado del usuario si se emite un comando
+    durante una operación que espera una entrada (ej. renombrar).
     """
     user_id = message.from_user.id
     user_state = await db_instance.get_user_state(user_id)
     
-    # Si el usuario está ocupado (no en estado 'idle') y envía un comando,
-    # significa que quiere cancelar la operación actual.
     if user_state.get("status") != "idle":
         logger.warning(
             f"State Guardian: User {user_id} sent command '{message.text}' "
             f"while in state '{user_state.get('status')}'. Resetting state."
         )
         
-        # Intentamos borrar el mensaje que pedía el input (ej. "Envíe el nuevo nombre...")
         if source_id := user_state.get("data", {}).get("source_message_id"):
             try:
-                # [ROBUSTNESS FIX] Editar el mensaje a "Cancelado" antes de borrarlo.
-                # A veces la eliminación es lenta y esto da feedback inmediato.
                 await client.edit_message_text(user_id, source_id, "✖️ Operación cancelada.")
             except Exception:
-                pass
+                pass # El mensaje podría haber sido borrado, no es crítico.
                 
         await db_instance.set_user_state(user_id, "idle")
         
-        # Detenemos la propagación para que el comando no se ejecute inmediatamente después de cancelar.
-        # El usuario puede volver a intentarlo si lo desea.
-        # Esto evita un comportamiento confuso como /panel apareciendo después de cancelar.
         await message.reply("✔️ Operación anterior cancelada. Puede continuar.")
         raise StopPropagation
 
@@ -70,8 +64,7 @@ async def state_guardian(client: Client, message: Message):
 async def start_command(client: Client, message: Message):
     greeting = get_greeting(message.from_user.id)
     start_message = (
-        f"¡A sus órdenes, {greeting}! Bienvenido a la <b>Suite de Medios v17.2 (Estable y Segura)</b>.\n\n"
-        "Su estado es monitoreado constantemente para prevenir bloqueos.\n\n"
+        f"¡A sus órdenes, {greeting}! Bienvenido a la <b>Suite de Medios v18.0 (Estable)</b>.\n\n"
         "<b>📋 Comandos Principales:</b>\n"
         "• /panel - Muestra su mesa de trabajo con las tareas pendientes.\n"
         "• /p <code>[ID]</code> - Abre el menú de configuración para una tarea específica.\n"
@@ -88,8 +81,7 @@ async def start_command(client: Client, message: Message):
 @Client.on_message(filters.command("panel") & filters.private)
 async def panel_command(client: Client, message: Message):
     user_id = message.from_user.id
-    greeting = get_greeting(user_id).replace(',', '')
-    # Obtenemos solo las tareas que el usuario debe poder configurar
+    greeting = get_greeting(user_id)
     pending_tasks = await db_instance.get_pending_tasks(user_id, status_filter="pending_processing")
     
     if not pending_tasks:
@@ -186,35 +178,30 @@ async def media_gatekeeper(client: Client, message: Message):
     user_id = message.from_user.id
     user_state = await db_instance.get_user_state(user_id)
     
-    # Si el bot está esperando un archivo (ej. una miniatura), se delega al handler de estado.
     if user_state.get("status") != "idle":
         return await processing_handler.handle_media_input_for_state(client, message, user_state)
     
     media = message.video or message.audio or message.document
     file_type = 'video' if message.video else 'audio' if message.audio else 'document'
     
-    status = "pending_processing"
-    
     metadata = {}
-    file_name = sanitize_filename(getattr(media, 'file_name', f"{file_type}_{datetime.utcnow().timestamp()}"))
+    file_name = getattr(media, 'file_name', f"{file_type}_{datetime.utcnow().timestamp()}")
     
-    if file_type == 'video':
-        metadata = {"resolution": f"{media.width}x{media.height}" if media.width else None, "duration": media.duration}
+    if file_type == 'video' and hasattr(media, 'width'):
+        metadata = {"resolution": f"{media.width}x{media.height}", "duration": getattr(media, 'duration', 0)}
     elif file_type == 'audio':
-        metadata = {"duration": media.duration}
+        metadata = {"duration": getattr(media, 'duration', 0)}
     
-    # [ROBUSTNESS FIX] Obtener file_size de forma segura
     metadata['size'] = getattr(media, 'file_size', 0)
     
     task_id = await db_instance.add_task(
         user_id=user_id, file_type=file_type, file_name=file_name,
-        file_id=media.file_id, status=status, metadata=metadata
+        file_id=media.file_id, status="pending_processing", metadata=metadata
     )
     if not task_id:
         return await message.reply("❌ Error al registrar la tarea en la base de datos.")
     
     count = await db_instance.tasks.count_documents({'user_id': user_id, 'status': 'pending_processing'})
-    
     reply_text = f"✅ Añadido al panel como tarea <b>#{count}</b>."
     status_msg = await message.reply(reply_text, parse_mode=ParseMode.HTML)
     
@@ -227,9 +214,7 @@ async def text_gatekeeper(client: Client, message: Message):
     user_id = message.from_user.id
     text = message.text.strip()
     
-    if text.startswith('/'):
-        # No hacer nada, el guardián y los manejadores de comandos ya hicieron su trabajo.
-        return
+    if text.startswith('/'): return
         
     user_state = await db_instance.get_user_state(user_id)
     if user_state.get("status") != "idle":
@@ -251,18 +236,16 @@ async def handle_url_input(client: Client, message: Message, url: str):
         caption = f"<b>📝 Título:</b> {escape_html(info['title'])}\n<b>🕓 Duración:</b> {format_time(info.get('duration'))}"
         
         temp_info_id = str((await db_instance.search_results.insert_one({
-            'user_id': message.from_user.id,
-            'data': info,
-            'created_at': datetime.utcnow()
+            'user_id': message.from_user.id, 'data': info, 'created_at': datetime.utcnow()
         })).inserted_id)
         
-        keyboard = build_detailed_format_menu(temp_info_id, info['formats'])
+        keyboard = build_detailed_format_menu(temp_info_id, info.get('formats', []))
         await status_msg.delete()
         
-        if info.get('thumbnail'):
+        if thumbnail := info.get('thumbnail'):
             await client.send_photo(
-                message.from_user.id, photo=info['thumbnail'],
-                caption=caption, reply_markup=keyboard, parse_mode=ParseMode.HTML
+                message.from_user.id, photo=thumbnail, caption=caption,
+                reply_markup=keyboard, parse_mode=ParseMode.HTML
             )
         else:
             await client.send_message(
@@ -271,13 +254,13 @@ async def handle_url_input(client: Client, message: Message, url: str):
             
     except AuthenticationError as e:
         logger.error(f"Error de autenticación procesando URL {url}: {e}")
-        await status_msg.edit_text(f"❌ Error de autenticación: <code>{escape_html(str(e))}</code>. Las cookies de YouTube pueden haber expirado.")
+        await status_msg.edit(f"❌ <b>Error de autenticación:</b>\n<code>{escape_html(str(e))}</code>\n\nLas cookies de YouTube pueden haber expirado o ser inválidas.", parse_mode=ParseMode.HTML)
     except (NetworkError, ValueError) as e:
         logger.error(f"Error de red/valor procesando URL {url}: {e}")
-        await status_msg.edit_text(f"❌ Error: <code>{escape_html(str(e))}</code>")
+        await status_msg.edit(f"❌ <b>Error:</b>\n<code>{escape_html(str(e))}</code>", parse_mode=ParseMode.HTML)
     except Exception as e:
-        logger.error(f"Error inesperado procesando URL {url}: {e}", exc_info=True)
-        await status_msg.edit_text(f"❌ Error inesperado: <code>{escape_html(str(e))}</code>")
+        logger.critical(f"Error inesperado procesando URL {url}: {e}", exc_info=True)
+        await status_msg.edit(f"❌ <b>Error inesperado del sistema.</b>", parse_mode=ParseMode.HTML)
 
 
 async def handle_music_search(client: Client, message: Message, query: str):
@@ -285,18 +268,18 @@ async def handle_music_search(client: Client, message: Message, query: str):
     try:
         results = await asyncio.to_thread(downloader.search_music, query, limit=10)
         if not results:
-            return await status_msg.edit_text("❌ No encontré resultados. Intente con otro término de búsqueda.")
+            return await status_msg.edit("❌ No encontré resultados. Intente con otro término de búsqueda.")
         
         search_id = str((await db_instance.search_sessions.insert_one({'user_id': message.from_user.id, 'created_at': datetime.utcnow()})).inserted_id)
         
         docs = [{'search_id': search_id, 'created_at': datetime.utcnow(), **res} for res in results]
         await db_instance.search_results.insert_many(docs)
         
-        await status_msg.edit_text("✅ He encontrado esto. Seleccione una opción para descargar:", reply_markup=build_search_results_keyboard(docs, search_id))
+        await status_msg.edit("✅ He encontrado esto. Seleccione una opción para descargar:", reply_markup=build_search_results_keyboard(docs, search_id))
     
     except Exception as e:
         logger.error(f"Error en búsqueda de música para '{query}': {e}", exc_info=True)
-        await status_msg.edit_text(f"❌ Ocurrió un error durante la búsqueda: <code>{escape_html(str(e))}</code>")
+        await status_msg.edit(f"❌ Ocurrió un error durante la búsqueda: <code>{escape_html(str(e))}</code>", parse_mode=ParseMode.HTML)
 
 
 @Client.on_callback_query(filters.regex(r"^set_dlformat_"))
@@ -307,61 +290,58 @@ async def set_download_format_callback(client: Client, query: CallbackQuery):
     
     info_doc = await db_instance.search_results.find_one_and_delete({"_id": ObjectId(temp_info_id)})
     if not info_doc:
-        return await query.message.edit_text("❌ Esta selección ha expirado. Por favor, envíe el enlace de nuevo.")
+        return await query.message.edit("❌ Esta selección ha expirado. Por favor, envíe el enlace de nuevo.")
         
     info = info_doc['data']
     file_type = 'audio' if 'audio' in format_id or 'mp3' in format_id else 'video'
     
-    task_id = await db_instance.add_task(
+    await db_instance.add_task(
         user_id=query.from_user.id,
         file_type=file_type,
         file_name=sanitize_filename(info['title']),
-        final_filename=sanitize_filename(info['title']),
         url=info.get('webpage_url') or info.get('url'),
         processing_config={"download_format_id": format_id},
         url_info=info,
         status="queued"
     )
     
-    await query.message.edit_text(f"✅ <b>¡Enviado a la cola!</b>\n🔗 <code>{escape_html(info['title'])}</code>", parse_mode=ParseMode.HTML)
+    await query.message.edit(f"✅ <b>¡Enviado a la cola!</b>\n🔗 <code>{escape_html(info['title'])}</code>", parse_mode=ParseMode.HTML)
 
 @Client.on_callback_query(filters.regex(r"^(song_select_|search_page_|cancel_search_)"))
 async def search_callbacks_router(client: Client, query: CallbackQuery):
     try:
+        await query.answer()
         data = query.data
         if data.startswith("song_select_"): await select_song_from_search(client, query)
         elif data.startswith("search_page_"): await handle_search_pagination(client, query)
         elif data.startswith("cancel_search_"): await cancel_search_session(client, query)
-    except MessageNotModified:
-        await query.answer("Nada que cambiar.")
+    except MessageNotModified: pass
     except Exception as e:
         logger.error(f"Error en search_callbacks_router: {e}", exc_info=True)
 
 async def select_song_from_search(client: Client, query: CallbackQuery):
-    await query.answer("Preparando descarga...", show_alert=False)
     result_id = query.data.split("_")[2]
     
     search_result = await db_instance.search_results.find_one({"_id": ObjectId(result_id)})
     if not search_result:
-        return await query.message.edit_text("❌ Este resultado de búsqueda ha expirado. Por favor, inicie una nueva búsqueda.")
+        return await query.message.edit("❌ Este resultado de búsqueda ha expirado. Por favor, inicie una nueva búsqueda.")
 
     search_term = search_result.get('search_term')
     display_title = f"{search_result.get('artist', '')} - {search_result.get('title', 'Canción Desconocida')}"
     
-    await query.message.edit_text(f"🔎 Obteniendo mejor fuente de audio para:\n<code>{escape_html(display_title)}</code>", parse_mode=ParseMode.HTML)
+    await query.message.edit(f"🔎 Obteniendo mejor fuente de audio para:\n<code>{escape_html(display_title)}</code>", parse_mode=ParseMode.HTML)
     
     try:
         url_info = await asyncio.to_thread(downloader.get_url_info, f"ytsearch1:{search_term}")
         if not url_info or not (url_info.get('webpage_url') or url_info.get('url')):
-            return await query.message.edit_text("❌ No pude encontrar una fuente de audio descargable para esta canción.")
+            return await query.message.edit("❌ No pude encontrar una fuente de audio descargable para esta canción.")
         
         final_filename = sanitize_filename(f"{search_result['artist']} - {search_result['title']}")
         
         task_id = await db_instance.add_task(
             user_id=query.from_user.id,
             file_type='audio',
-            file_name=f"{final_filename}.mp3",
-            final_filename=final_filename,
+            file_name=f"{final_filename}.mp3", # Nombre de archivo por defecto
             url=url_info.get('webpage_url'),
             status="queued",
             processing_config={
@@ -371,26 +351,21 @@ async def select_song_from_search(client: Client, query: CallbackQuery):
             url_info=url_info
         )
         
-        if thumbnail_url := search_result.get('thumbnail'):
-            await db_instance.update_task_config(str(task_id), "thumbnail_url", thumbnail_url)
-        
-        await query.message.edit_text(f"✅ <b>¡Enviado a la cola!</b>\n🎧 <code>{escape_html(display_title)}</code>", parse_mode=ParseMode.HTML)
+        await query.message.edit(f"✅ <b>¡Enviado a la cola!</b>\n🎧 <code>{escape_html(display_title)}</code>", parse_mode=ParseMode.HTML)
 
     except Exception as e:
         logger.error(f"Error al procesar selección de canción: {e}", exc_info=True)
-        await query.message.edit_text(f"❌ Error al obtener la fuente: <code>{escape_html(str(e))}</code>")
+        await query.message.edit(f"❌ Error al obtener la fuente: <code>{escape_html(str(e))}</code>", parse_mode=ParseMode.HTML)
 
 async def handle_search_pagination(client: Client, query: CallbackQuery):
-    await query.answer()
     _, search_id, page_str = query.data.split("_")
     page = int(page_str)
     
     results = await db_instance.search_results.find({"search_id": search_id}).sort('created_at', 1).to_list(length=100)
     if not results:
-        return await query.message.edit_text("❌ La sesión de búsqueda ha expirado.")
+        return await query.message.edit("❌ La sesión de búsqueda ha expirado.")
         
     await query.message.edit_reply_markup(reply_markup=build_search_results_keyboard(results, search_id, page))
 
 async def cancel_search_session(client: Client, query: CallbackQuery):
-    await query.answer("Búsqueda cancelada.")
     await query.message.delete()
