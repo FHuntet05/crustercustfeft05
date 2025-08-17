@@ -65,7 +65,7 @@ def _build_standard_video_command(
     if subs_path: command.extend(["-i", subs_path]); subs_input_index = input_count
 
     filter_complex_parts = []
-    # [FIX] Lógica de encadenamiento de filtros corregida
+    # [FIX] Lógica de encadenamiento de filtros corregida. Se usa una variable para seguir el rastro del último stream de video.
     current_video_chain = "[0:v]"
     
     if transcode_res := config.get('transcode', {}).get('resolution'):
@@ -88,7 +88,7 @@ def _build_standard_video_command(
             filter_complex_parts.append(f"{current_video_chain}{drawtext}{next_chain}")
             current_video_chain = next_chain
 
-    # [FIX] Mapeo final del stream de video
+    # [FIX] Mapeo final del stream de video. Ahora es dinámico y siempre correcto.
     if filter_complex_parts:
         command.extend(["-filter_complex", ";".join(filter_complex_parts)])
         # Usamos el resultado de la última operación en la cadena de filtros
