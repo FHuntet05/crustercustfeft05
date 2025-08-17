@@ -73,9 +73,10 @@ async def handle_text_input_for_state(client: Client, message: Message, user_sta
                 await db_instance.update_task_config(task_id, "gif_options", {"duration": float(parts[0]), "fps": int(parts[1])})
             else: await message.reply("❌ Formato inválido. Use: `duración fps` (ej: `5 15`)", quote=True); return
         elif state == "awaiting_watermark_text":
+            # [FIX] Se actualiza la configuración de la marca de agua con el texto proporcionado.
             await db_instance.update_task_config(task_id, "watermark", {"type": "text", "text": user_input})
-            await message.delete() # Borra el mensaje de texto del usuario
-            # [FIX] Ahora el handler de texto también es responsable de la transición de estado y la edición del mensaje.
+            await message.delete() 
+            # [FIX] Transición de estado: ahora se pasa a esperar la posición.
             await db_instance.set_user_state(user_id, 'awaiting_watermark_position', data=data)
             await client.edit_message_text(user_id, source_message_id, text="✅ Texto recibido. Elija la posición:", reply_markup=build_position_menu(task_id, "config_watermark"))
             return # Detenemos la ejecución aquí porque ya hemos manejado la respuesta.
@@ -90,7 +91,7 @@ async def handle_text_input_for_state(client: Client, message: Message, user_sta
 
         await message.delete()
         await db_instance.set_user_state(user_id, "idle")
-        # Obtenemos una referencia al mensaje del panel para actualizarlo
+        # [FIX] Se restaura SIEMPRE el panel principal después de una entrada exitosa.
         panel_message = await client.get_messages(user_id, source_message_id)
         await open_task_menu_from_p(client, panel_message, task_id)
         
@@ -128,9 +129,11 @@ async def handle_media_input_for_state(client: Client, message: Message, user_st
     await message.delete()
 
     if state == "awaiting_watermark_image":
+        # [FIX] Transición correcta a esperar la posición de la marca de agua.
         await db_instance.set_user_state(user_id, 'awaiting_watermark_position', data=data)
         await client.edit_message_text(user_id, source_message_id, "✅ Imagen recibida. Elija la posición:", reply_markup=build_position_menu(task_id, "config_watermark"))
     else:
+        # [FIX] Se restaura SIEMPRE el panel principal.
         await db_instance.set_user_state(user_id, "idle")
         panel_message = await client.get_messages(user_id, source_message_id)
         await open_task_menu_from_p(client, panel_message, task_id)
@@ -171,7 +174,7 @@ async def handle_task_actions(client: Client, query: CallbackQuery):
         await query.message.edit_text("🗑️ Tarea cancelada.")
     await db_instance.set_user_state(query.from_user.id, "idle")
 
-# [FIX DE FLUJO LÓGICO] - Función refactorizada para manejar la edición de mensajes de forma segura.
+# [REFACTOR] Esta función ahora es el cerebro central del flujo de configuración, aplicando el "patrón bueno".
 async def show_config_menu_and_set_state(client: Client, query: CallbackQuery):
     user_id, data = query.from_user.id, query.data
     parts = data.split("_"); menu_type, task_id = parts[1], "_".join(parts[2:])
@@ -179,29 +182,29 @@ async def show_config_menu_and_set_state(client: Client, query: CallbackQuery):
     if not task: return await query.message.delete()
     config = task.get('processing_config', {})
     
-    # Manejar acciones directas primero
+    # --- 1. Acciones Directas (que no necesitan más input) ---
     if menu_type == "extract_audio":
         await db_instance.update_task_config(task_id, "extract_audio", True)
         await db_instance.update_task_field(task_id, "status", "queued")
         return await query.message.edit_text("✅ Tarea de extracción enviada.\n⏳ <b>En Cola...</b>", parse_mode=ParseMode.HTML)
     
-    # Mapas para mostrar sub-menús (sin cambio de estado)
+    # --- 2. Mostrar Sub-menús (sin cambiar de estado) ---
     keyboards = {"transcode": build_transcode_menu(task_id), "tracks": build_tracks_menu(task_id, config), "watermark": build_watermark_menu(task_id), "thumbnail": build_thumbnail_menu(task_id, config), "audiometadata": build_audio_metadata_menu(task_id)}
     menu_messages = {"transcode": "📉 Seleccione resolución:", "tracks": "📜 Gestione pistas:", "watermark": "💧 Añada marca de agua:", "thumbnail": "🖼️ Gestione miniatura:", "audiometadata": "📝 Elija qué metadato editar:"}
     if menu_type in keyboards:
         return await query.message.edit_text(text=menu_messages[menu_type], reply_markup=keyboards[menu_type])
     
-    # Mapas para acciones que esperan una entrada (con cambio de estado)
+    # --- 3. Acciones que esperan una entrada (con cambio de estado) ---
     state_map = {"rename": "awaiting_rename", "trim": "awaiting_trim", "gif": "awaiting_gif", "addsubs": "awaiting_subs", "thumbnail_add": "awaiting_thumbnail_add", "replace_audio": "awaiting_replace_audio", "watermark_text": "awaiting_watermark_text", "watermark_image": "awaiting_watermark_image", "profile_save_request": "awaiting_profile_name", "audiotags": "awaiting_audiotags", "audiothumb": "awaiting_audiothumb"}
     menu_texts = {"rename": "✏️ Envíe el nuevo nombre (sin extensión).", "trim": "✂️ Envíe tiempos de corte:\n• <code>00:10-00:50</code> (inicio-fin)\n• <code>01:23</code> (corta hasta ahí)", "gif": "🎞️ Envíe duración y FPS (ej: <code>5 15</code>).", "addsubs": "➕ Envíe el archivo <code>.srt</code>.", "thumbnail_add": "🖼️ Envíe la nueva miniatura.", "replace_audio": "🎼 Envíe el nuevo audio.", "watermark_text": "💧 Envíe el texto para la marca de agua.", "watermark_image": "🖼️ Envíe la imagen para la marca.", "profile_save_request": "✏️ Envíe un nombre para el perfil.", "audiotags": "✍️ Envíe los metadatos:\n<code>Título: Mi Canción\nArtista: El Artista</code>", "audiothumb": "🖼️ Envíe la imagen de la carátula."}
     
     if menu_type in state_map:
         await db_instance.set_user_state(user_id, state_map[menu_type], data={"task_id": task_id, "source_message_id": query.message.id})
         back_callbacks = {"addsubs": "config_tracks_", "thumbnail_add": "config_thumbnail_", "replace_audio": "config_tracks_", "watermark_text": "config_watermark_", "watermark_image": "config_watermark_", "profile_save_request": "p_open_", "audiotags": "config_audiometadata_", "audiothumb": "config_audiometadata_"}
-        back_button = build_back_button(f"{back_callbacks.get(menu_type, 'p_open_')}{task_id}")
+        back_button_callback = f"{back_callbacks.get(menu_type, 'p_open_')}{task_id}"
+        back_button = build_back_button(back_button_callback)
         await query.message.edit_text(menu_texts[menu_type], reply_markup=back_button, parse_mode=ParseMode.HTML)
 
-# ... (El resto del archivo, set_value_callback y demás, no necesitan cambios) ...
 async def set_value_callback(client: Client, query: CallbackQuery):
     user_id, parts = query.from_user.id, query.data.split("_")
     config_type, task_id = parts[1], parts[2]
@@ -216,12 +219,13 @@ async def set_value_callback(client: Client, query: CallbackQuery):
         else: prop, val = value.split('_', 1); await db_instance.update_task_config(task_id, f"transcode.{prop}", val)
     elif config_type == "watermark" and parts[3] == "remove": await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$unset": {"processing_config.watermark": ""}})
     elif config_type == "thumb_op":
-        op, current_val = parts[3], config.get(f"{op}_thumbnail", False)
-        update_q = {"$set": {f"processing_config.{op}_thumbnail": not current_val}}
-        if not current_val: other_op = 'remove' if op == 'extract' else 'extract'; update_q.update({"$unset": {f"processing_config.{other_op}_thumbnail": "", "processing_config.thumbnail_file_id": ""}})
-        await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, update_q)
+        op, current_val = parts[3], config.get(f"remove_thumbnail", False)
+        # Este es un toggle, así que simplemente seteamos el opuesto.
+        await db_instance.update_task_config(task_id, "remove_thumbnail", not current_val)
     elif config_type == "mute": await db_instance.update_task_config(task_id, 'mute_audio', not config.get('mute_audio', False))
     elif config_type == "trackopt": await db_instance.update_task_config(task_id, f"{parts[3]}", not config.get(parts[3], False))
+    
+    # [FIX] Después de cualquier cambio, siempre volvemos al panel principal.
     await open_task_menu_from_p(client, query, task_id)
 
 async def handle_profile_actions(client: Client, query: CallbackQuery):
