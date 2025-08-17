@@ -76,12 +76,11 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
                 await _edit_status_message(user_id, text, progress_tracker)
     await process.wait()
     if process.returncode != 0:
-        raise Exception(f"FFmpeg falló con código {process.returncode}. Log:\n{''.join(all_stderr_lines)}")
+        raise Exception(f"FFmpeg falló con código {process.returncode}. Log:\n{''.join(all_stderr_lines[-10:])}") # Solo los últimos 10 logs
 
 async def _process_media_task(bot, task: dict, dl_dir: str):
     user_id, config = task['user_id'], task.get('processing_config', {})
     original_filename = task.get('original_filename', 'archivo.mkv')
-    ctx = progress_tracker[user_id]
     
     actual_download_path = None
     if file_id := task.get('file_id'):
@@ -99,7 +98,6 @@ async def _process_media_task(bot, task: dict, dl_dir: str):
 
     initial_size = os.path.getsize(actual_download_path)
     
-    # Descargar archivos auxiliares
     watermark_path, replace_audio_path, audio_thumb_path, subs_path = None, None, None, None
     if wm_conf := config.get('watermark', {}):
         if wm_conf.get('type') == 'image' and (wm_id := wm_conf.get('file_id')):
@@ -108,7 +106,6 @@ async def _process_media_task(bot, task: dict, dl_dir: str):
         await _edit_status_message(user_id, "Descargando nuevo audio...", progress_tracker); replace_audio_path = await bot.download_media(audio_file_id, file_name=os.path.join(dl_dir, "new_audio"))
     if thumb_file_id := config.get('audio_thumbnail_file_id'):
         await _edit_status_message(user_id, "Descargando carátula...", progress_tracker); audio_thumb_path = await bot.download_media(thumb_file_id, file_name=os.path.join(dl_dir, "audio_thumb"))
-    # [IMPLEMENTACIÓN] Descargar el archivo de subtítulos si está definido.
     if subs_file_id := config.get('subs_file_id'):
         await _edit_status_message(user_id, "Descargando subtítulos...", progress_tracker); subs_path = await bot.download_media(subs_file_id, file_name=os.path.join(dl_dir, "subtitles.srt"))
     
@@ -121,7 +118,6 @@ async def _process_media_task(bot, task: dict, dl_dir: str):
     output_path = os.path.join(OUTPUT_DIR, f"{final_filename_base}{output_extension}")
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    # [IMPLEMENTACIÓN] Pasar la ruta de los subtítulos al constructor de comandos.
     command_groups, definitive_output_path = ffmpeg.build_ffmpeg_command(
         task=task, input_path=actual_download_path, output_path=output_path, watermark_path=watermark_path,
         replace_audio_path=replace_audio_path, audio_thumb_path=audio_thumb_path, subs_path=subs_path
@@ -129,14 +125,21 @@ async def _process_media_task(bot, task: dict, dl_dir: str):
     
     if command_groups: await _run_command_with_progress(user_id, command_groups[0], actual_download_path)
     
+    if not os.path.exists(definitive_output_path):
+        raise FileNotFoundError(f"FFmpeg finalizó pero el archivo de salida '{definitive_output_path}' no fue creado.")
+    
     final_size = os.path.getsize(definitive_output_path)
     caption = generate_summary_caption(task, initial_size, final_size, os.path.basename(definitive_output_path))
-    ctx.reset_timer(); file_type = task.get('file_type', 'video')
+    ctx = progress_tracker.get(user_id)
+    if ctx: ctx.reset_timer()
+    
+    file_type = task.get('file_type', 'video')
     
     if definitive_output_path.endswith('.gif'): sender_func, kwargs = bot.send_animation, {'animation': definitive_output_path}
     elif file_type == 'video' and not config.get('extract_audio'): sender_func, kwargs = bot.send_video, {'video': definitive_output_path}
     elif file_type == 'audio' or config.get('extract_audio'): sender_func, kwargs = bot.send_audio, {'audio': definitive_output_path}
     else: sender_func, kwargs = bot.send_document, {'document': definitive_output_path}
+    
     await sender_func(user_id, caption=caption, parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=(user_id, "Uploading...", "#TelegramUpload", final_size), **kwargs)
     return definitive_output_path
 
@@ -149,11 +152,11 @@ async def _process_join_task(bot, task: dict, dl_dir: str):
         for i, tid in enumerate(source_task_ids):
             source_task = await db_instance.get_task(str(tid))
             if not source_task or not source_task.get('file_id'): continue
-            filename, dl_path = source_task.get('original_filename', f'v_{i}.mp4'), os.path.join(dl_dir, f"{i}_{filename}")
+            filename, dl_path = sanitize_filename(source_task.get('original_filename', f'v_{i}.mp4')), os.path.join(dl_dir, f"{i}_{filename}")
             await _edit_status_message(user_id, f"Descargando video {i+1}/{len(source_task_ids)}...", progress_tracker)
             await bot.download_media(source_task['file_id'], file_name=dl_path)
             f.write(f"file '{dl_path.replace('\'', '\\\'')}'\n")
-    output_path = os.path.join(OUTPUT_DIR, f"{task.get('final_filename', 'union_video')}.mp4")
+    output_path = os.path.join(OUTPUT_DIR, f"{sanitize_filename(task.get('final_filename', 'union_video'))}.mp4")
     command = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", file_list_path, "-c", "copy", output_path]
     await _edit_status_message(user_id, "Uniendo videos...", progress_tracker)
     process = await asyncio.create_subprocess_exec(*command, stderr=asyncio.subprocess.PIPE)
@@ -166,12 +169,12 @@ async def _process_join_task(bot, task: dict, dl_dir: str):
 async def _process_zip_task(bot, task: dict, dl_dir: str):
     user_id, source_task_ids = task['user_id'], task.get('source_task_ids', [])
     if not source_task_ids: raise ValueError("Tarea de compresión sin source_task_ids.")
-    output_path = os.path.join(OUTPUT_DIR, f"{task.get('final_filename', 'comprimido')}.zip")
+    output_path = os.path.join(OUTPUT_DIR, f"{sanitize_filename(task.get('final_filename', 'comprimido'))}.zip")
     with ZipFile(output_path, 'w', ZIP_DEFLATED) as zf:
         for i, tid in enumerate(source_task_ids):
             source_task = await db_instance.get_task(str(tid))
             if not source_task or not source_task.get('file_id'): continue
-            filename, dl_path = source_task.get('original_filename', f'f_{i}'), os.path.join(dl_dir, filename)
+            filename, dl_path = sanitize_filename(source_task.get('original_filename', f'f_{i}')), os.path.join(dl_dir, filename)
             await _edit_status_message(user_id, f"Descargando para ZIP: {i+1}/{len(source_task_ids)}...", progress_tracker)
             await bot.download_media(source_task['file_id'], file_name=dl_path)
             await _edit_status_message(user_id, f"Añadiendo al ZIP: {filename}", progress_tracker)
@@ -192,22 +195,35 @@ async def process_task(bot, task: dict):
         status_message = await bot.send_message(user_id, "✅ Tarea recibida. Preparando...", parse_mode=ParseMode.HTML)
         global progress_tracker; progress_tracker[user_id] = ProgressContext(bot, status_message, task, asyncio.get_running_loop())
         task_dir = os.path.join(DOWNLOAD_DIR, task_id); os.makedirs(task_dir, exist_ok=True); files_to_clean.add(task_dir)
+        
         definitive_output_path = None
         if file_type in ['video', 'audio', 'document']: definitive_output_path = await _process_media_task(bot, task, task_dir)
         elif file_type == 'join_operation': definitive_output_path = await _process_join_task(bot, task, task_dir)
         elif file_type == 'zip_operation': definitive_output_path = await _process_zip_task(bot, task, task_dir)
         else: raise NotImplementedError(f"Tipo de tarea '{file_type}' no implementado.")
+        
         if definitive_output_path: files_to_clean.add(definitive_output_path)
-        await db_instance.update_task(task_id, "status", "done"); await status_message.delete()
+        await db_instance.update_task(task_id, "status", "done")
+        # [FIX] Manejo seguro de la eliminación del mensaje de estado.
+        if status_message:
+            try: await status_message.delete()
+            except Exception: pass
+            
     except Exception as e:
         logger.critical(f"Error procesando tarea {task_id}: {e}", exc_info=True)
         error_message = f"❌ <b>Error Fatal en Tarea</b>\n<code>{escape_html(original_filename)}</code>\n\n<b>Motivo:</b>\n<pre>{escape_html(str(e))}</pre>"
         await db_instance.update_task(task_id, "status", "error")
         await db_instance.update_task(task_id, "last_error", str(e))
+        
+        # [FIX] Manejo seguro de la edición/envío del mensaje de error.
         if status_message:
             try: await status_message.edit_text(error_message, parse_mode=ParseMode.HTML)
-            except Exception: await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
-        else: await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
+            except Exception: 
+                logger.warning(f"No se pudo editar mensaje de error para {user_id}. Enviando uno nuevo.")
+                await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
+        else: 
+            await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
+            
     finally:
         if user_id in progress_tracker: del progress_tracker[user_id]
         for fpath in files_to_clean:
@@ -227,8 +243,10 @@ async def worker_loop(bot_instance):
                 {"$set": {"status": "processing", "processed_at": datetime.utcnow()}},
                 sort=[('created_at', 1)]
             )
-            if task: asyncio.create_task(process_task(bot_instance, task))
-            else: await asyncio.sleep(2)
+            if task: 
+                asyncio.create_task(process_task(bot_instance, task))
+            else: 
+                await asyncio.sleep(2)
         except Exception as e:
             logger.critical(f"[WORKER] Bucle del worker falló críticamente: {e}", exc_info=True)
             await asyncio.sleep(10)

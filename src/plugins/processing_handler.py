@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # --- Funciones de Apertura de Menú y Manejo de Estado ---
 
 async def open_task_menu_from_p(client: Client, message_or_query, task_id: str):
-    """Abre el menú de configuración principal para una tarea específica, editando el mensaje existente."""
+    """Abre el menú de configuración principal para una tarea específica."""
     try:
         task = await db_instance.get_task(task_id)
         if not task:
@@ -33,14 +33,16 @@ async def open_task_menu_from_p(client: Client, message_or_query, task_id: str):
         text_content = f"🛠️ <b>Configurando Tarea:</b>\n<code>{escape_html(task.get('original_filename', '...'))}</code>"
         markup = build_processing_menu(task_id, task['file_type'], task)
         
-        target_message = message_or_query.message if isinstance(message_or_query, CallbackQuery) else message_or_query
-        try:
-            await target_message.edit_text(text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
-        except MessageNotModified:
-            if isinstance(message_or_query, CallbackQuery): await message_or_query.answer()
-        except Exception as e:
-             logger.warning(f"No se pudo editar el mensaje en open_task_menu_from_p. Error: {e}")
-             # Como fallback, si la edición falla, no se hace nada para evitar crashes.
+        # [FIX DEFINITIVO] Diferencia clara entre responder a un comando y editar un mensaje de botones.
+        if isinstance(message_or_query, CallbackQuery):
+            # Si es un botón, editamos el mensaje del panel.
+            try:
+                await message_or_query.message.edit_text(text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
+            except MessageNotModified:
+                await message_or_query.answer()
+        else:
+            # Si es un comando como /p 1, respondemos con un mensaje nuevo.
+            await message_or_query.reply(text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
 
     except Exception as e:
         logger.error(f"Error crítico en open_task_menu_from_p: {e}", exc_info=True)
@@ -213,7 +215,7 @@ async def set_value_callback(client: Client, query: CallbackQuery):
         else: prop, val = value.split('_', 1); await db_instance.update_task_config(task_id, f"transcode.{prop}", val)
     elif config_type == "watermark" and parts[3] == "remove": 
         await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$unset": {"processing_config.watermark": ""}})
-    elif config_type == "thumb" and parts[3] == "op": # [FIX] Lógica de toggle simplificada
+    elif config_type == "thumb" and parts[3] == "op":
         current_val = config.get("remove_thumbnail", False)
         await db_instance.update_task_config(task_id, "remove_thumbnail", not current_val)
     elif config_type == "mute": 
@@ -260,7 +262,6 @@ async def handle_join_actions(client: Client, query: CallbackQuery):
     user_id, parts, action = query.from_user.id, query.data.split("_"), query.data.split("_")[1]
     state = await db_instance.get_user_state(user_id); selected_ids = state.get("data", {}).get("selected_ids", [])
     if action == "select":
-        # [FIX] Corregido el error de sintaxis aquí
         task_id = parts[2]
         if task_id in selected_ids: selected_ids.remove(task_id)
         else: selected_ids.append(task_id)
