@@ -18,7 +18,10 @@ logger = logging.getLogger(__name__)
 # --- Funciones de Apertura de Menú y Manejo de Estado ---
 
 async def open_task_menu_from_p(client: Client, message_or_query, task_id: str):
-    """Abre el menú de configuración principal para una tarea específica."""
+    """
+    Punto de retorno universal. Abre el menú de configuración principal para una tarea.
+    Distingue si fue llamado por un comando (responde) o un botón (edita).
+    """
     try:
         task = await db_instance.get_task(task_id)
         if not task:
@@ -33,15 +36,12 @@ async def open_task_menu_from_p(client: Client, message_or_query, task_id: str):
         text_content = f"🛠️ <b>Configurando Tarea:</b>\n<code>{escape_html(task.get('original_filename', '...'))}</code>"
         markup = build_processing_menu(task_id, task['file_type'], task)
         
-        # [FIX DEFINITIVO] Diferencia clara entre responder a un comando y editar un mensaje de botones.
         if isinstance(message_or_query, CallbackQuery):
-            # Si es un botón, editamos el mensaje del panel.
             try:
                 await message_or_query.message.edit_text(text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
             except MessageNotModified:
                 await message_or_query.answer()
         else:
-            # Si es un comando como /p 1, respondemos con un mensaje nuevo.
             await message_or_query.reply(text=text_content, reply_markup=markup, parse_mode=ParseMode.HTML)
 
     except Exception as e:
@@ -49,7 +49,7 @@ async def open_task_menu_from_p(client: Client, message_or_query, task_id: str):
 
 
 async def handle_text_input_for_state(client: Client, message: Message, user_state: dict):
-    """Maneja la entrada de texto del usuario cuando el bot está esperando una configuración."""
+    """Maneja la entrada de texto del usuario y SIEMPRE restaura el menú principal."""
     user_id, user_input = message.from_user.id, message.text.strip()
     state, data = user_state['status'], user_state['data']
     task_id, source_message_id = data.get('task_id'), data.get('source_message_id')
@@ -58,6 +58,13 @@ async def handle_text_input_for_state(client: Client, message: Message, user_sta
         await db_instance.set_user_state(user_id, "idle"); return
 
     try:
+        if state == "awaiting_watermark_text":
+            await db_instance.update_task_config(task_id, "watermark", {"type": "text", "text": user_input})
+            await message.delete() 
+            await db_instance.set_user_state(user_id, 'awaiting_watermark_position', data=data)
+            await client.edit_message_text(user_id, source_message_id, text="✅ Texto recibido. Elija la posición:", reply_markup=build_position_menu(task_id, "config_watermark"))
+            return 
+        
         task = await db_instance.get_task(task_id)
         if not task:
             await message.reply("❌ La tarea ya no existe.", quote=True)
@@ -75,12 +82,6 @@ async def handle_text_input_for_state(client: Client, message: Message, user_sta
             if len(parts) == 2 and parts[0].replace('.','',1).isdigit() and parts[1].isdigit():
                 await db_instance.update_task_config(task_id, "gif_options", {"duration": float(parts[0]), "fps": int(parts[1])})
             else: await message.reply("❌ Formato inválido. Use: `duración fps` (ej: `5 15`)", quote=True); return
-        elif state == "awaiting_watermark_text":
-            await db_instance.update_task_config(task_id, "watermark", {"type": "text", "text": user_input})
-            await message.delete() 
-            await db_instance.set_user_state(user_id, 'awaiting_watermark_position', data=data)
-            await client.edit_message_text(user_id, source_message_id, text="✅ Texto recibido. Elija la posición:", reply_markup=build_position_menu(task_id, "config_watermark"))
-            return 
         elif state == "awaiting_audiotags":
             tags_to_update, valid_keys = {}, {'título': 'title', 'titulo': 'title', 'artista': 'artist', 'artist': 'artist', 'álbum': 'album', 'album': 'album'}
             for line in user_input.split('\n'):
@@ -96,10 +97,11 @@ async def handle_text_input_for_state(client: Client, message: Message, user_sta
         await open_task_menu_from_p(client, panel_message, task_id)
         
     except Exception as e:
-        logger.error(f"Error procesando entrada de config '{state}': {e}", exc_info=True)
+        logger.error(f"Error procesando entrada de texto '{state}': {e}", exc_info=True)
         await message.reply(f"❌ Error al procesar su entrada: `{e}`", quote=True)
 
 async def handle_media_input_for_state(client: Client, message: Message, user_state: dict):
+    """Maneja la entrada de media del usuario y SIEMPRE restaura el menú principal."""
     user_id, state, data = message.from_user.id, user_state['status'], user_state['data']
     task_id, source_message_id = data.get('task_id'), data.get('source_message_id')
     if not task_id or not source_message_id:
@@ -173,6 +175,7 @@ async def handle_task_actions(client: Client, query: CallbackQuery):
     await db_instance.set_user_state(user_id, "idle")
 
 async def show_config_menu_and_set_state(client: Client, query: CallbackQuery):
+    """Único responsable de mostrar submenús o pedir una entrada al usuario."""
     user_id, data = query.from_user.id, query.data
     parts = data.split("_"); menu_type, task_id = parts[1], "_".join(parts[2:])
     task = await db_instance.get_task(task_id)
@@ -187,6 +190,7 @@ async def show_config_menu_and_set_state(client: Client, query: CallbackQuery):
     keyboards = {"transcode": build_transcode_menu(task_id), "tracks": build_tracks_menu(task_id, config), "watermark": build_watermark_menu(task_id), "thumbnail": build_thumbnail_menu(task_id, config), "audiometadata": build_audio_metadata_menu(task_id)}
     menu_messages = {"transcode": "📉 Seleccione resolución:", "tracks": "📜 Gestione pistas:", "watermark": "💧 Añada marca de agua:", "thumbnail": "🖼️ Gestione miniatura:", "audiometadata": "📝 Elija qué metadato editar:"}
     if menu_type in keyboards:
+        await db_instance.set_user_state(user_id, "idle")
         return await query.message.edit_text(text=menu_messages[menu_type], reply_markup=keyboards[menu_type])
     
     state_map = {"rename": "awaiting_rename", "trim": "awaiting_trim", "gif": "awaiting_gif", "addsubs": "awaiting_subs", "thumbnail_add": "awaiting_thumbnail_add", "replace_audio": "awaiting_replace_audio", "watermark_text": "awaiting_watermark_text", "watermark_image": "awaiting_watermark_image", "profile_save_request": "awaiting_profile_name", "audiotags": "awaiting_audiotags", "audiothumb": "awaiting_audiothumb"}
@@ -200,15 +204,17 @@ async def show_config_menu_and_set_state(client: Client, query: CallbackQuery):
         await query.message.edit_text(menu_texts[menu_type], reply_markup=back_button, parse_mode=ParseMode.HTML)
 
 async def set_value_callback(client: Client, query: CallbackQuery):
+    """Maneja toggles simples y SIEMPRE restaura el menú principal."""
     user_id, parts = query.from_user.id, query.data.split("_")
     config_type, task_id = parts[1], parts[2]
+    
+    await db_instance.set_user_state(user_id, "idle")
     task = await db_instance.get_task(task_id)
     if not task: return await query.message.delete()
     config = task.get('processing_config', {})
 
     if config_type == "watermark" and parts[3] == "position":
         await db_instance.update_task_config(task_id, "watermark.position", parts[4].replace('-', '_'))
-        await db_instance.set_user_state(user_id, "idle")
     elif config_type == "transcode":
         value = "_".join(parts[3:])
         if value == "remove_all": await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, {"$unset": {"processing_config.transcode": ""}})
@@ -228,11 +234,13 @@ async def set_value_callback(client: Client, query: CallbackQuery):
 
 async def handle_profile_actions(client: Client, query: CallbackQuery):
     user_id, parts, action = query.from_user.id, query.data.split("_"), query.data.split("_")[1]
+    await db_instance.set_user_state(user_id, "idle")
     if action == "apply":
         task_id, preset_id = parts[2], parts[3]
         preset = await db_instance.get_preset_by_id(preset_id)
         if not preset: return
-        await db_instance.update_task_field(task_id, "processing_config", preset['config_data']); await open_task_menu_from_p(client, query, task_id)
+        await db_instance.update_task_field(task_id, "processing_config", preset['config_data'])
+        await open_task_menu_from_p(client, query, task_id)
     elif action == "delete":
         if parts[2] == "req": await query.message.edit_text("¿Seguro que desea eliminar este perfil?", reply_markup=build_profile_delete_confirmation_keyboard(parts[3]))
         elif parts[2] == "confirm":
@@ -245,6 +253,7 @@ async def handle_profile_actions(client: Client, query: CallbackQuery):
 
 async def handle_batch_actions(client: Client, query: CallbackQuery):
     user_id, parts, action = query.from_user.id, query.data.split("_"), query.data.split("_")[1]
+    await db_instance.set_user_state(user_id, "idle")
     if action == "cancel": return await query.message.delete()
     tasks = await db_instance.get_pending_tasks(user_id, status_filter="pending_processing")
     if not tasks: return await query.message.edit_text("❌ No hay tareas en el panel.")
@@ -295,6 +304,7 @@ async def handle_zip_actions(client: Client, query: CallbackQuery):
     elif action == "cancel": await db_instance.set_user_state(user_id, "idle"); await query.message.delete()
 
 async def handle_panel_delete_all(client: Client, query: CallbackQuery):
+    await db_instance.set_user_state(query.from_user.id, "idle")
     action = query.data.split("_")[-1]
     if action == "confirm":
         deleted = await db_instance.delete_all_pending_tasks(query.from_user.id)
