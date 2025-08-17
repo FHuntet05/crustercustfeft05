@@ -31,8 +31,6 @@ try:
 except (TypeError, ValueError):
     ADMIN_USER_ID = 0
 
-# [FIX DE FLUJO LÓGICO] - El guardián ahora solo se activa con COMANDOS (texto que empieza con /).
-# Esto evita que cancele operaciones que están esperando una entrada de texto normal.
 @Client.on_message(filters.private & filters.text & filters.regex(r"^/"), group=-1)
 async def state_guardian(client: Client, message: Message):
     """
@@ -54,8 +52,6 @@ async def state_guardian(client: Client, message: Message):
                 
         await db_instance.set_user_state(user_id, "idle")
         
-        # Dejamos que el comando se procese normalmente después de cancelar.
-        # No usamos StopPropagation para que el /panel (por ejemplo) funcione.
         await message.reply("✔️ Operación anterior cancelada.")
 
 
@@ -63,7 +59,7 @@ async def state_guardian(client: Client, message: Message):
 async def start_command(client: Client, message: Message):
     greeting = get_greeting(message.from_user.id)
     start_message = (
-        f"¡A sus órdenes, {greeting}! Bienvenido a la <b>Suite de Medios v19.0 (Estable)</b>.\n\n"
+        f"¡A sus órdenes, {greeting}! Bienvenido a la <b>Suite de Medios v20.0 (Estable)</b>.\n\n"
         "<b>📋 Comandos Principales:</b>\n"
         "• /panel - Muestra su mesa de trabajo con las tareas pendientes.\n"
         "• /p <code>[ID]</code> - Abre el menú de configuración para una tarea específica.\n"
@@ -117,7 +113,6 @@ async def process_command(client: Client, message: Message):
     else:
         await message.reply(f"❌ ID inválido. Tiene {len(pending_tasks)} tareas en el panel.")
 
-# ... (El resto de los manejadores de comandos como /profiles, /join, /zip, /p_all no cambian) ...
 @Client.on_message(filters.command("profiles") & filters.private)
 async def profiles_command(client: Client, message: Message):
     presets = await db_instance.get_user_presets(message.from_user.id)
@@ -151,10 +146,8 @@ async def process_all_command(client: Client, message: Message):
 async def media_gatekeeper(client: Client, message: Message):
     user_id = message.from_user.id
     user_state = await db_instance.get_user_state(user_id)
-    
     if user_state.get("status") != "idle":
         return await processing_handler.handle_media_input_for_state(client, message, user_state)
-    
     media = message.video or message.audio or message.document
     file_type = 'video' if message.video else 'audio' if message.audio else 'document'
     metadata, file_name = {}, getattr(media, 'file_name', f"{file_type}_{datetime.utcnow().timestamp()}")
@@ -170,30 +163,31 @@ async def media_gatekeeper(client: Client, message: Message):
     if presets := await db_instance.get_user_presets(user_id):
         await status_msg.edit("¿Desea aplicar un perfil de configuración a esta tarea?", reply_markup=build_profiles_keyboard(str(task_id), presets))
 
-# [FIX DE FLUJO LÓGICO] - Este es el gatekeeper para todo el texto que NO es un comando.
-@Client.on_message(filters.text & filters.private & ~filters.command(), group=2)
+# [FIX] Se corrige el decorador para evitar el TypeError.
+# La lógica de grupos asegura que este manejador solo se ejecute si un manejador de comandos (group=0 por defecto) no lo ha hecho.
+@Client.on_message(filters.text & filters.private, group=2)
 async def text_gatekeeper(client: Client, message: Message):
     user_id = message.from_user.id
     text = message.text.strip()
-    user_state = await db_instance.get_user_state(user_id)
     
-    # Si el bot está esperando una entrada de texto (ej. un nuevo nombre), se la pasamos al handler.
+    # Se añade esta comprobación para asegurar que los comandos sean ignorados aquí.
+    if text.startswith('/'):
+        return
+
+    user_state = await db_instance.get_user_state(user_id)
     if user_state.get("status") != "idle":
         return await processing_handler.handle_text_input_for_state(client, message, user_state)
     
-    # Si el estado es 'idle', el bot no espera nada. Procedemos a interpretar la entrada.
     if re.search(URL_REGEX, text):
         return await handle_url_input(client, message, text)
     
-    # Si no es una URL, es una búsqueda de música.
     await handle_music_search(client, message, text)
 
-# ... (El resto del archivo, handle_url_input, handle_music_search, y los callbacks no cambian) ...
 async def handle_url_input(client: Client, message: Message, url: str):
     status_msg = await message.reply("🔎 Analizando enlace...")
     try:
         info = await asyncio.to_thread(downloader.get_url_info, url)
-        if not info: raise ValueError("No se pudo obtener información del enlace. Podría no ser compatible o estar caído.")
+        if not info: raise ValueError("No se pudo obtener información del enlace.")
         caption = f"<b>📝 Título:</b> {escape_html(info['title'])}\n<b>🕓 Duración:</b> {format_time(info.get('duration'))}"
         temp_info_id = str((await db_instance.search_results.insert_one({'user_id': message.from_user.id, 'data': info, 'created_at': datetime.utcnow()})).inserted_id)
         keyboard = build_detailed_format_menu(temp_info_id, info.get('formats', []))
@@ -203,7 +197,7 @@ async def handle_url_input(client: Client, message: Message, url: str):
         else:
             await client.send_message(message.from_user.id, caption, reply_markup=keyboard, parse_mode=ParseMode.HTML)
     except AuthenticationError as e:
-        await status_msg.edit(f"❌ <b>Error de autenticación:</b>\n<code>{escape_html(str(e))}</code>\n\nLas cookies de YouTube pueden haber expirado.", parse_mode=ParseMode.HTML)
+        await status_msg.edit(f"❌ <b>Error de autenticación:</b>\n<code>{escape_html(str(e))}</code>", parse_mode=ParseMode.HTML)
     except (NetworkError, ValueError) as e:
         await status_msg.edit(f"❌ <b>Error:</b>\n<code>{escape_html(str(e))}</code>", parse_mode=ParseMode.HTML)
     except Exception as e:
@@ -257,11 +251,7 @@ async def select_song_from_search(client: Client, query: CallbackQuery):
         url_info = await asyncio.to_thread(downloader.get_url_info, f"ytsearch1:{search_term}")
         if not url_info or not (url_info.get('webpage_url') or url_info.get('url')): return await query.message.edit("❌ No pude encontrar una fuente de audio descargable.")
         final_filename = sanitize_filename(f"{search_result['artist']} - {search_result['title']}")
-        await db_instance.add_task(
-            user_id=query.from_user.id, file_type='audio', file_name=f"{final_filename}.mp3", url=url_info.get('webpage_url'), status="queued",
-            processing_config={"download_format_id": downloader.get_best_audio_format_id(url_info.get('formats', [])),
-            "audio_tags": {'title': search_result['title'], 'artist': search_result['artist'], 'album': search_result.get('album')}}
-        )
+        await db_instance.add_task(user_id=query.from_user.id, file_type='audio', file_name=f"{final_filename}.mp3", url=url_info.get('webpage_url'), status="queued", processing_config={"download_format_id": downloader.get_best_audio_format_id(url_info.get('formats', [])), "audio_tags": {'title': search_result['title'], 'artist': search_result['artist'], 'album': search_result.get('album')}})
         await query.message.edit(f"✅ <b>¡Enviado a la cola!</b>\n🎧 <code>{escape_html(display_title)}</code>", parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.error(f"Error al procesar selección de canción: {e}", exc_info=True)
