@@ -9,7 +9,7 @@ import re
 from typing import Dict, Union, Optional
 
 from pyrogram.enums import ParseMode
-from pyrogram.errors import MessageNotModified, FloodWait
+from pyrogram.errors import MessageNotModified, FloodWait, BadRequest
 import logging
 
 logger = logging.getLogger(__name__)
@@ -31,9 +31,18 @@ async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
         )
     except MessageNotModified: pass
     except FloodWait as e:
+        logger.warning(f"FloodWait al editar mensaje para {user_id}. Esperando {e.value}s.")
         await asyncio.sleep(e.value + 1)
+    # [FIX] Captura específica para mensajes borrados o inválidos. Esto evita que el worker crashee.
+    except BadRequest as e:
+        if "MESSAGE_ID_INVALID" in str(e):
+            logger.warning(f"No se pudo editar el mensaje de estado para {user_id} (ID: {ctx.message.id}). Probablemente fue borrado. La tarea continúa.")
+            # Opcional: Anular el mensaje para no intentar editarlo más.
+            ctx.message = None
+        else:
+            logger.error(f"Error BadRequest no manejado al editar mensaje para {user_id}: {e}")
     except Exception as e:
-        logger.error(f"Error al editar mensaje de estado para {user_id}: {e}")
+        logger.error(f"Error inesperado al editar mensaje de estado para {user_id}: {e}")
 
 def get_greeting(user_id: int) -> str:
     """Devuelve un saludo personalizado."""
@@ -116,7 +125,6 @@ def generate_summary_caption(task: Dict, initial_size: int, final_size: int, fin
     config = task.get('processing_config', {})
     ops = []
 
-    # [MEJORA] Lista de operaciones más completa y dinámica.
     if sanitize_filename(final_filename) != sanitize_filename(task.get('original_filename', '')):
         ops.append("✍️ Renombrado")
     if config.get('transcode'):
@@ -157,7 +165,6 @@ def format_task_details_rich(task: Dict, index: int) -> str:
     
     config = task.get('processing_config', {})
     
-    # [MEJORA] Resumen de configuración dinámico y detallado para el panel.
     config_tags = []
     if config.get('final_filename', sanitize_filename(task.get('original_filename', ''))) != sanitize_filename(task.get('original_filename', '')):
         config_tags.append("✏️ Ren.")
