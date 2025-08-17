@@ -64,10 +64,14 @@ def _build_standard_video_command(
     if replace_audio_path: command.extend(["-i", replace_audio_path]); audio_input_index = input_count; input_count += 1
     if subs_path: command.extend(["-i", subs_path]); subs_input_index = input_count
 
-    filter_complex_parts, current_video_chain = [], "[0:v]"
+    filter_complex_parts = []
+    # [FIX] Lógica de encadenamiento de filtros corregida
+    current_video_chain = "[0:v]"
+    
     if transcode_res := config.get('transcode', {}).get('resolution'):
-        filter_complex_parts.append(f"{current_video_chain}scale=-2:{transcode_res.replace('p', '')}[scaled_v]")
-        current_video_chain = "[scaled_v]"
+        next_chain = "[scaled_v]"
+        filter_complex_parts.append(f"{current_video_chain}scale=-2:{transcode_res.replace('p', '')}{next_chain}")
+        current_video_chain = next_chain
     
     if wm_conf := config.get('watermark'):
         next_chain = "[watermarked_v]"
@@ -84,15 +88,19 @@ def _build_standard_video_command(
             filter_complex_parts.append(f"{current_video_chain}{drawtext}{next_chain}")
             current_video_chain = next_chain
 
+    # [FIX] Mapeo final del stream de video
     if filter_complex_parts:
-        command.extend(["-filter_complex", ";".join(filter_complex_parts), "-map", current_video_chain.replace('[','').replace(']','')])
-    else: command.extend(["-map", "0:v?"])
+        command.extend(["-filter_complex", ";".join(filter_complex_parts)])
+        # Usamos el resultado de la última operación en la cadena de filtros
+        command.extend(["-map", current_video_chain])
+    else:
+        # Si no hubo filtros, mapeamos el video original directamente
+        command.extend(["-map", "0:v?"])
     
-    if replace_audio_path: command.extend(["-map", f"{audio_input_index}:a", "-shortest"])
+    if replace_audio_path: command.extend(["-map", f"{audio_input_index}:a?", "-shortest"])
     elif config.get('mute_audio'): command.append("-an")
     else: command.extend(["-map", "0:a?"])
     
-    # [IMPLEMENTACIÓN] Lógica de mapeo de subtítulos.
     if config.get('remove_subtitles'): command.append("-sn")
     elif subs_path: command.extend(["-map", f"{subs_input_index}:s?"])
     else: command.extend(["-map", "0:s?"])
