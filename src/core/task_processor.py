@@ -14,7 +14,7 @@ from src.core.exceptions import FfmpegError, NetworkError, AuthenticationError
 from src.logic.path_resolver import PathResolver
 from src.logic.filename_generator import generate_final_filename
 from src.telegram.uploader import Uploader
-from src.helpers.utils import get_media_type, get_file_size
+from src.helpers.utils import get_media_type, get_file_size, get_media_info
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ class TaskProcessor:
         await self.update_task_status("processing", "⚙️ Procesando...")
         
         config = self.task.get('processing_config', {})
-        media_info = FfmpegProcessor.get_media_info(source_path)
+        media_info = get_media_info(source_path)
         final_filename = generate_final_filename(self.task, media_info, config)
 
         ffmpeg_processor = FfmpegProcessor(source_path, self.temp_dir, config, media_info)
