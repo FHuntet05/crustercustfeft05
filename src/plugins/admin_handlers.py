@@ -5,6 +5,7 @@ from typing import Union
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery
 from pyrogram.enums import ParseMode
+from pyrogram.errors import StopPropagation
 
 from src.core.admin_manager import AdminManager
 from src.helpers.utils import escape_html
