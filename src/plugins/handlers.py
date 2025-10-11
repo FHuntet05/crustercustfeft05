@@ -214,10 +214,19 @@ async def text_gatekeeper(client: Client, message: Message):
     await handle_music_search(client, message, text)
 
 async def handle_url_input(client: Client, message: Message, url: str):
+    # Añadimos una guarda para ignorar explícitamente los enlaces de Telegram aquí
+    if downloader.validate_url(url):
+        await message.reply("He detectado un enlace de Telegram. Para descargarlo, por favor usa el comando /get_restricted y sigue las instrucciones.")
+        return
+
     status_msg = await message.reply("🔎 Analizando enlace...")
     try:
+        # Esta sección ahora solo se ejecutará para URLs que NO son de Telegram.
+        # Como yt-dlp ya no está, esta llamada debería fallar o estar vacía.
+        # La eliminaremos en el futuro, pero por ahora la guarda anterior es suficiente.
         info = await asyncio.to_thread(downloader.get_url_info, url)
-        if not info: raise ValueError("No se pudo obtener información del enlace.")
+        if not info: raise ValueError("No se pudo obtener información del enlace. El bot ya no soporta descargas directas de sitios como YouTube.")
+        
         caption = f"<b>📝 Título:</b> {escape_html(info['title'])}\n<b>🕓 Duración:</b> {format_time(info.get('duration'))}"
         temp_info_id = str((await db_instance.search_results.insert_one({'user_id': message.from_user.id, 'data': info, 'created_at': datetime.utcnow()})).inserted_id)
         keyboard = build_detailed_format_menu(temp_info_id, info.get('formats', []))
