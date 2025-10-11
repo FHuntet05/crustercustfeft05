@@ -5,9 +5,10 @@ import re
 from datetime import datetime
 import asyncio
 import os
+from typing import Optional, Union, Tuple, Any
 
 from pyrogram import Client, filters, StopPropagation
-from pyrogram.types import Message, CallbackQuery
+from pyrogram.types import Message, CallbackQuery, Chat
 from pyrogram.enums import ParseMode
 from pyrogram.errors import MessageNotModified
 from bson.objectid import ObjectId
@@ -180,6 +181,70 @@ async def media_gatekeeper(client: Client, message: Message):
 
 # [FIX] Se corrige el decorador para evitar el TypeError.
 # La lógica de grupos asegura que este manejador solo se ejecute si un manejador de comandos (group=0 por defecto) no lo ha hecho.
+async def get_message_info(client: Client, chat_id: Union[int, str], message_id: int) -> tuple[bool, str, Optional[Message]]:
+    """Obtiene información de un mensaje específico"""
+    try:
+        message = await client.get_messages(chat_id, message_id)
+        if not message:
+            return False, "❌ No se encontró el mensaje.", None
+        if not message.media:
+            return False, "❌ El mensaje no contiene archivos multimedia.", None
+        return True, "✅ Mensaje encontrado con contenido multimedia.", message
+    except Exception as e:
+        logger.error(f"Error getting message {message_id} from {chat_id}: {e}")
+        return False, f"❌ Error al obtener el mensaje: {str(e)}", None
+
+async def get_chat_info(client: Client, url: str) -> tuple[bool, str, Optional[Union[Chat, Message]], Optional[int]]:
+    """Obtiene información del chat o mensaje"""
+    try:
+        parts = url.split('/')
+        message_id = None
+        
+        # Si es un enlace a un mensaje específico
+        if len(parts) > 4 and parts[-1].isdigit():
+            message_id = int(parts[-1])
+            chat_id = parts[-2]
+        else:
+            chat_id = parts[-1]
+
+        try:
+            # Intentar obtener información del chat
+            chat = await client.get_chat(chat_id)
+            
+            # Verificar si el userbot es miembro
+            try:
+                member = await client.get_chat_member(chat.id, "me")
+                is_member = True
+            except Exception:
+                is_member = False
+
+            if not is_member:
+                try:
+                    # Intentar unirse si no es miembro
+                    await client.join_chat(url)
+                    is_member = True
+                except Exception as e:
+                    if "INVITE_REQUEST_SENT" in str(e):
+                        return False, "📩 Se ha enviado una solicitud para unirse al canal.", None, None
+                    return False, f"❌ No se pudo unir al canal: {str(e)}", None, None
+
+            # Si es un mensaje específico y somos miembros
+            if message_id and is_member:
+                success, msg, message = await get_message_info(client, chat.id, message_id)
+                if success:
+                    return True, msg, message, message_id
+                return False, msg, None, None
+
+            return True, "✅ Canal verificado.", chat, message_id
+
+        except Exception as e:
+            logger.error(f"Error getting chat info: {e}")
+            return False, f"❌ Error al obtener información del chat: {str(e)}", None, None
+
+    except Exception as e:
+        logger.error(f"Error in get_chat_info: {e}")
+        return False, "❌ Error al procesar el enlace.", None, None
+
 async def process_channel_link(client: Client, message: Message, url: str):
     """Procesa un enlace de canal para añadirlo o unirse"""
     try:
@@ -189,7 +254,8 @@ async def process_channel_link(client: Client, message: Message, url: str):
                 "❌ El enlace proporcionado no es válido.\n"
                 "Formatos válidos:\n"
                 "• Canal privado: https://t.me/+abc123...\n"
-                "• Canal público: https://t.me/nombre_canal"
+                "• Canal público: https://t.me/nombre_canal\n"
+                "• Mensaje específico: https://t.me/nombre_canal/123"
             )
 
         status_msg = await message.reply("🔄 Procesando enlace...")
@@ -443,6 +509,71 @@ async def list_channels_command(client: Client, message: Message):
     
     await message.reply("\n".join(response), parse_mode=ParseMode.HTML)
 
+async def process_media_message(client: Client, original_message: Message, target_message: Message, status_msg: Message):
+    """Procesa un mensaje que contiene media para descargarlo y reenviarlo"""
+    try:
+        # Actualizar mensaje de estado
+        await status_msg.edit("⏬ Descargando contenido...")
+        
+        # Preparar carpeta temporal si es necesario
+        temp_path = os.path.join(os.getcwd(), "downloads")
+        os.makedirs(temp_path, exist_ok=True)
+        
+        # Descargar el archivo
+        file_path = await target_message.download(
+            file_name=os.path.join(temp_path, target_message.file_name if hasattr(target_message, 'file_name') else "downloaded_file"),
+            progress=progress_callback,
+            progress_args=(status_msg, "⏬ Descargando")
+        )
+        
+        # Actualizar estado
+        await status_msg.edit("⏫ Subiendo contenido...")
+        
+        # Enviar el archivo
+        if target_message.video:
+            await client.send_video(
+                original_message.chat.id,
+                file_path,
+                progress=progress_callback,
+                progress_args=(status_msg, "⏫ Subiendo")
+            )
+        elif target_message.document:
+            await client.send_document(
+                original_message.chat.id,
+                file_path,
+                progress=progress_callback,
+                progress_args=(status_msg, "⏫ Subiendo")
+            )
+        elif target_message.audio:
+            await client.send_audio(
+                original_message.chat.id,
+                file_path,
+                progress=progress_callback,
+                progress_args=(status_msg, "⏫ Subiendo")
+            )
+        
+        # Limpiar
+        try:
+            os.remove(file_path)
+        except:
+            pass
+        
+        await status_msg.edit("✅ Contenido procesado exitosamente")
+        
+    except Exception as e:
+        logger.error(f"Error processing media message: {e}")
+        await status_msg.edit(f"❌ Error al procesar el contenido: {str(e)}")
+
+async def progress_callback(current: int, total: int, status_msg: Message, action: str):
+    """Callback para mostrar el progreso de descarga/subida"""
+    try:
+        percent = current * 100 / total
+        status_text = f"{action}: {percent:.1f}%\n"
+        status_text += f"[{'=' * int(percent // 5)}{'.' * (20 - int(percent // 5))}]"
+        await status_msg.edit(status_text)
+    except:
+        pass
+
 @Client.on_message(filters.command("get_restricted") & filters.private)
 async def get_restricted_command(client: Client, message: Message):
     """Inicia el proceso de obtener contenido de un canal restringido"""
@@ -461,6 +592,50 @@ async def get_restricted_command(client: Client, message: Message):
                 "• Mensaje específico: https://t.me/nombre_canal/123",
                 parse_mode=ParseMode.HTML
             )
+            
+        url = text[1].strip()
+        
+        # Validar formato del enlace
+        if not downloader.validate_url(url):
+            return await message.reply(
+                "❌ El enlace proporcionado no es válido.\n"
+                "<b>Formatos válidos:</b>\n"
+                "• Canal privado: https://t.me/+abc123...\n"
+                "• Canal público: https://t.me/nombre_canal\n"
+                "• Mensaje específico: https://t.me/nombre_canal/123",
+                parse_mode=ParseMode.HTML
+            )
+            
+        # Mostrar mensaje de estado inicial
+        status_msg = await message.reply("🔄 Procesando enlace...")
+        
+        # Obtener información del chat/mensaje
+        success, info_msg, data, message_id = await get_chat_info(client, url)
+        
+        if not success:
+            return await status_msg.edit(info_msg)
+            
+        # Si es un mensaje específico
+        if isinstance(data, Message):
+            if not data.media:
+                return await status_msg.edit("❌ El mensaje no contiene archivos multimedia.")
+            await process_media_message(client, message, data, status_msg)
+            
+        # Si es un chat
+        elif isinstance(data, Chat):
+            if message_id:  # Si teníamos un message_id en el enlace
+                success, msg, target_message = await get_message_info(client, data.id, message_id)
+                if success and target_message:
+                    await process_media_message(client, message, target_message, status_msg)
+                else:
+                    await status_msg.edit(msg)
+            else:
+                await status_msg.edit(
+                    f"✅ Conectado al canal: <b>{escape_html(data.title)}</b>\n"
+                    "📤 Ahora envía el enlace del mensaje específico que quieres descargar.\n"
+                    "Ejemplo: https://t.me/nombre_canal/123",
+                    parse_mode=ParseMode.HTML
+                )
 
         url = text[1].strip()
         
