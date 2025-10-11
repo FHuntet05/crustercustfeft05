@@ -1,6 +1,6 @@
 # Pyrogram y su dependencia de rendimiento para encriptación
 Pyrogram==2.0.106
-Tgcrypto
+TgCrypto
 
 # Interacción con MongoDB (asíncrona)
 motor>=3.1.1

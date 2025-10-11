@@ -53,11 +53,43 @@ class UserbotHandler:
         """Valida y obtiene información de un canal."""
         client = await self.ensure_client()
         if not client:
+            logger.error("No se pudo inicializar el cliente userbot")
             return None, None
 
         try:
+            # Intentar obtener información del chat
             chat = await client.get_chat(channel_identifier)
+            
+            # Verificar si es un canal
+            if not chat.type.name.endswith("CHANNEL"):
+                logger.error(f"El chat {channel_identifier} no es un canal")
+                return None, None
+
+            # Verificar si ya somos miembros
+            try:
+                member = await client.get_chat_member(chat.id, "me")
+                if member.status.name == "LEFT":
+                    # Intentar unirse si no somos miembros
+                    if chat.username:  # Canal público
+                        await client.join_chat(chat.username)
+                    else:  # Canal privado
+                        if not channel_identifier.startswith("https://t.me/+"):
+                            logger.error(f"Se necesita un enlace de invitación para el canal privado {chat.id}")
+                            return None, None
+                        await client.join_chat(channel_identifier)
+                    
+                    # Verificar que la unión fue exitosa
+                    member = await client.get_chat_member(chat.id, "me")
+                    if member.status.name == "LEFT":
+                        logger.error(f"No se pudo unir al canal {chat.id}")
+                        return None, None
+            except Exception as e:
+                logger.error(f"Error al verificar/unirse al canal {chat.id}: {e}")
+                return None, None
+
+            logger.info(f"Canal validado exitosamente: {chat.title} ({chat.id})")
             return chat.id, chat.title
+
         except Exception as e:
             logger.error(f"Error al validar canal {channel_identifier}: {e}")
             return None, None
