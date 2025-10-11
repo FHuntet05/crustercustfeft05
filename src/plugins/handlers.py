@@ -380,11 +380,14 @@ async def get_restricted_command(client: Client, message: Message):
 
     try:
         chat = await client.get_chat(url)
-        if chat:
-            await message.reply(f"✅ El userbot ya está unido al canal: <b>{escape_html(chat.title)}</b>.\nPor favor, envíe el enlace del contenido que desea extraer.", parse_mode=ParseMode.HTML)
+        if chat.type in ["private", "group", "supergroup"]:
+            if chat.is_member:
+                await message.reply(f"✅ El userbot ya está unido al canal: <b>{escape_html(chat.title)}</b>.\nPor favor, envíe el enlace del contenido que desea extraer.", parse_mode=ParseMode.HTML)
+            else:
+                await client.join_chat(url)
+                await message.reply("✅ El userbot se ha unido al canal correctamente. Ahora puede enviar el enlace del contenido que desea extraer.")
         else:
-            await client.join_chat(url)
-            await message.reply("✅ El userbot se ha unido al canal correctamente. Ahora puede enviar el enlace del contenido que desea extraer.")
+            await message.reply("❌ El enlace proporcionado no corresponde a un canal válido.")
     except Exception as e:
         logger.error(f"Error al procesar el enlace: {e}", exc_info=True)
         await message.reply("❌ No se pudo procesar el enlace. Verifique que sea un enlace válido de Telegram.")
