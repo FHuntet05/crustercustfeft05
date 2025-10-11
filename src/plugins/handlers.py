@@ -185,17 +185,32 @@ async def text_gatekeeper(client: Client, message: Message):
     user_id = message.from_user.id
     text = message.text.strip()
     
-    # Se añade esta comprobación para asegurar que los comandos sean ignorados aquí.
     if text.startswith('/'):
         return
 
     user_state = await db_instance.get_user_state(user_id)
     if user_state.get("status") != "idle":
+        # Si el estado no es idle, puede que esté esperando un input específico
+        # como un enlace de canal restringido.
+        if user_state.get("status") in ["waiting_channel_link", "waiting_restricted_link"] and downloader.validate_url(text):
+             # Aquí podrías añadir la lógica para manejar el enlace recibido
+             # por ahora, lo pasamos al manejador de estado.
+             pass
         return await processing_handler.handle_text_input_for_state(client, message, user_state)
     
+    # Nueva lógica para diferenciar enlaces
+    if downloader.validate_url(text):
+        # Si es una URL de Telegram, la manejamos como contenido restringido.
+        # Esta es una suposición, podrías querer una lógica más explícita
+        # con un comando como /get_restricted
+        await message.reply("He detectado un enlace de Telegram. Para descargarlo, por favor usa el comando /get_restricted y sigue las instrucciones.")
+        return
+    
     if re.search(URL_REGEX, text):
+        # Para otras URLs, mantenemos el flujo anterior (que ya no debería usar yt-dlp)
         return await handle_url_input(client, message, text)
     
+    # Si no es una URL, se asume que es una búsqueda de música
     await handle_music_search(client, message, text)
 
 async def handle_url_input(client: Client, message: Message, url: str):
