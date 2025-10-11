@@ -59,18 +59,33 @@ async def state_guardian(client: Client, message: Message):
 async def start_command(client: Client, message: Message):
     greeting = get_greeting(message.from_user.id)
     start_message = (
-        f"¡A sus órdenes, {greeting}! Bienvenido a la <b>Suite de Medios v20.0 (Estable)</b>.\n\n"
+        f"¡A sus órdenes, {greeting}! Bienvenido a la <b>Suite de Medios v21.0 (Pro)</b>.\n\n"
         "<b>📋 Comandos Principales:</b>\n"
-        "• /panel - Muestra su mesa de trabajo con las tareas pendientes.\n"
-        "• /p <code>[ID]</code> - Abre el menú de configuración para una tarea específica.\n"
-        "• /p clean - Limpia todas las tareas de su panel.\n"
-        "• /profiles - Gestiona sus perfiles de configuración guardados.\n\n"
+        "• /panel - Muestra su mesa de trabajo con las tareas pendientes\n"
+        "• /p <code>[ID]</code> - Abre el menú de configuración para una tarea\n"
+        "• /p clean - Limpia todas las tareas de su panel\n"
+        "• /profiles - Gestiona sus perfiles de configuración guardados\n\n"
         "<b>🛠️ Herramientas de Lote:</b>\n"
-        "• /join - Une varios videos de su panel en un solo archivo.\n"
-        "• /zip - Comprime varias tareas de su panel en un archivo .zip.\n"
-        "• /p_all - Procesa todas las tareas del panel aplicando un perfil.\n\n"
-        "Para empezar, envíe un archivo, un enlace, o un texto para buscar música."
-    )
+        "• /join - Une varios videos en un solo archivo\n"
+        "• /zip - Comprime varias tareas en un archivo .zip\n"
+        "• /p_all - Procesa todas las tareas con un perfil\n\n"
+        "<b>🔒 Canales Restringidos:</b>\n"
+        "• /add_channel - Registra un canal para monitoreo automático\n"
+        "• /list_channels - Muestra tus canales monitoreados\n"
+        "• /get_restricted - Descarga contenido enviando un enlace\n"
+        "• /monitor <code>[on/off]</code> - Activa/desactiva el monitoreo\n\n"
+        "<b>⚙️ Configuración:</b>\n"
+        "• /settings - Ajustes generales del bot\n"
+        "• /presets - Gestiona perfiles de configuración\n"
+        "• /queue - Muestra estado de la cola de tareas\n"
+        "• /cancel - Cancela la operación en curso\n\n"
+        "<b>👥 Comandos de Admin:</b>\n"
+        "• /stats - Muestra estadísticas generales\n"
+        "• /user <code>[ID]</code> - Ver detalles de un usuario\n"
+        "• /ban <code>[ID] [razón]</code> - Banear usuario\n"
+        "• /unban <code>[ID]</code> - Desbanear usuario\n\n"
+        "📤 Para empezar, envíe un archivo o enlace para procesar.")
+    
     await message.reply(start_message, parse_mode=ParseMode.HTML)
 
 @Client.on_message(filters.command("panel") & filters.private)
@@ -266,3 +281,80 @@ async def handle_search_pagination(client: Client, query: CallbackQuery):
 
 async def cancel_search_session(client: Client, query: CallbackQuery):
     await query.message.delete()
+
+# --- Manejadores para canales restringidos ---
+
+@Client.on_message(filters.command("add_channel") & filters.private)
+async def add_channel_command(client: Client, message: Message):
+    """Inicia el proceso de añadir un canal restringido"""
+    user_id = message.from_user.id
+    
+    # Resetear estado anterior si existe
+    await db_instance.set_user_state(user_id, "idle")
+    
+    # Solicitar enlace del canal
+    await message.reply(
+        "🔒 <b>Añadir Canal Restringido</b>\n\n"
+        "Por favor, envíe el enlace del canal privado.\n"
+        "Puede ser un enlace de invitación (t.me/joinchat/...) o el @username del canal.",
+        parse_mode=ParseMode.HTML
+    )
+    
+    # Establecer estado de espera
+    await db_instance.set_user_state(user_id, "waiting_channel_link")
+
+@Client.on_message(filters.command("list_channels") & filters.private)
+async def list_channels_command(client: Client, message: Message):
+    """Lista los canales monitoreados del usuario"""
+    user_id = message.from_user.id
+    
+    channels = await db_instance.get_monitored_channels(user_id)
+    
+    if not channels:
+        return await message.reply(
+            "📝 <b>Canales Monitoreados</b>\n\n"
+            "No tienes canales configurados para monitoreo.\n"
+            "Usa /add_channel para añadir uno.",
+            parse_mode=ParseMode.HTML
+        )
+    
+    response = ["📝 <b>Canales Monitoreados:</b>\n"]
+    
+    for i, channel in enumerate(channels, 1):
+        try:
+            chat = await client.get_chat(channel["channel_id"])
+            channel_info = (
+                f"{i}. <b>{escape_html(chat.title)}</b>\n"
+                f"   • ID: <code>{channel['channel_id']}</code>\n"
+                f"   • Añadido: {channel['added_on'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+            )
+        except Exception:
+            channel_info = (
+                f"{i}. <b>Canal no disponible</b>\n"
+                f"   • ID: <code>{channel['channel_id']}</code>\n"
+                f"   • Añadido: {channel['added_on'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+            )
+        response.append(channel_info)
+    
+    response.append("\nUsa /add_channel para añadir más canales.")
+    
+    await message.reply("\n".join(response), parse_mode=ParseMode.HTML)
+
+@Client.on_message(filters.command("get_restricted") & filters.private)
+async def get_restricted_command(client: Client, message: Message):
+    """Inicia el proceso de obtener contenido de un canal restringido"""
+    user_id = message.from_user.id
+    
+    # Resetear estado anterior si existe
+    await db_instance.set_user_state(user_id, "idle")
+    
+    # Solicitar enlace del contenido
+    await message.reply(
+        "🔒 <b>Obtener Contenido Restringido</b>\n\n"
+        "Por favor, envíe el enlace directo al contenido que desea descargar.\n"
+        "Debe ser un enlace a un mensaje específico del canal (t.me/c/...).",
+        parse_mode=ParseMode.HTML
+    )
+    
+    # Establecer estado de espera
+    await db_instance.set_user_state(user_id, "waiting_restricted_link")

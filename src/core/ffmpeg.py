@@ -50,28 +50,55 @@ def _build_standard_video_command(
     task: Dict, input_path: str, output_path: str, watermark_path: Optional[str],
     replace_audio_path: Optional[str], subs_path: Optional[str]
 ) -> Tuple[List[List[str]], str]:
-    config, command = task.get('processing_config', {}), ["ffmpeg", "-y", "-hide_banner"]
+    config = task.get('processing_config', {})
+    media_info = get_media_info(input_path)
+    content_type = config.get('content_type', 'default')
+    
+    command = ["ffmpeg", "-y", "-hide_banner"]
+    
+    # Manejo de trimming
     if trim_times := config.get('trim_times'):
         try:
             if '-' in trim_times: start, end = trim_times.split('-', 1); command.extend(["-ss", start.strip(), "-to", end.strip()])
             else: command.extend(["-to", trim_times.strip()])
         except Exception as e: logger.warning(f"Formato de trim inválido: {e}. Se ignorará.")
     
+    # Inputs
     command.extend(["-i", input_path])
     input_count = 1
     watermark_input_index, audio_input_index, subs_input_index = None, None, None
     if watermark_path: command.extend(["-i", watermark_path]); watermark_input_index = input_count; input_count += 1
     if replace_audio_path: command.extend(["-i", replace_audio_path]); audio_input_index = input_count; input_count += 1
     if subs_path: command.extend(["-i", subs_path]); subs_input_index = input_count
+    
+    # Auto-thumbnail si está configurado
+    thumbnail_index = None
+    if thumbnail_path := config.get('thumbnail', {}).get('path'):
+        command.extend(["-i", thumbnail_path])
+        thumbnail_index = input_count
+        input_count += 1
 
     filter_complex_parts = []
-    # [FIX] Lógica de encadenamiento de filtros corregida. Se usa una variable para seguir el rastro del último stream de video.
     current_video_chain = "[0:v]"
     
-    if transcode_res := config.get('transcode', {}).get('resolution'):
-        next_chain = "[scaled_v]"
-        filter_complex_parts.append(f"{current_video_chain}scale=-2:{transcode_res.replace('p', '')}{next_chain}")
-        current_video_chain = next_chain
+    # Detectar resolución y ajustar calidad
+    video_stream = next((s for s in media_info.get('streams', []) if s.get('codec_type') == 'video'), None)
+    if video_stream:
+        width = int(video_stream.get('width', 1920))
+        height = int(video_stream.get('height', 1080))
+        
+        # Ajustar calidad según el tipo de contenido
+        if content_type == "movies":
+            target_height = min(height, 1080)
+        elif content_type == "series":
+            target_height = min(height, 720)
+        else:
+            target_height = min(height, 720)
+            
+        if height > target_height:
+            next_chain = "[scaled_v]"
+            filter_complex_parts.append(f"{current_video_chain}scale=-2:{target_height}{next_chain}")
+            current_video_chain = next_chain
     
     if wm_conf := config.get('watermark'):
         next_chain = "[watermarked_v]"
@@ -101,13 +128,61 @@ def _build_standard_video_command(
     elif config.get('mute_audio'): command.append("-an")
     else: command.extend(["-map", "0:a?"])
     
-    if config.get('remove_subtitles'): command.append("-sn")
-    elif subs_path: command.extend(["-map", f"{subs_input_index}:s?"])
-    else: command.extend(["-map", "0:s?"])
+    # Manejo mejorado de subtítulos
+    if config.get('remove_subtitles'):
+        command.append("-sn")
+    elif subs_path:
+        # Asegurarse de que los subtítulos se codifiquen correctamente
+        command.extend([
+            "-map", f"{subs_input_index}:s?",
+            "-c:s", "mov_text",
+            "-metadata:s:s:0", "language=spa",
+            "-disposition:s:0", "default"
+        ])
+    else:
+        # Mantener subtítulos existentes
+        command.extend(["-map", "0:s?"])
+    
+    # Configuración de calidad adaptativa basada en el tipo de contenido
+    compression_settings = {
+        "movies": {
+            "1080p": {"preset": "slow", "crf": "18", "profile": "high"},
+            "720p": {"preset": "medium", "crf": "20", "profile": "high"}
+        },
+        "series": {
+            "1080p": {"preset": "medium", "crf": "21", "profile": "high"},
+            "720p": {"preset": "medium", "crf": "23", "profile": "main"}
+        },
+        "default": {
+            "1080p": {"preset": "veryfast", "crf": "23", "profile": "main"},
+            "720p": {"preset": "veryfast", "crf": "25", "profile": "main"}
+        }
+    }
     
     if config.get('transcode') or replace_audio_path:
-        command.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-c:a", "aac", "-b:a", "128k"])
-    else: command.extend(["-c:v", "copy", "-c:a", "copy"])
+        quality_key = "1080p" if height >= 1080 else "720p"
+        settings = compression_settings.get(content_type, compression_settings["default"]).get(quality_key)
+        
+        command.extend([
+            "-c:v", "libx264",
+            "-preset", settings["preset"],
+            "-crf", settings["crf"],
+            "-profile:v", settings["profile"],
+            "-level:v", "4.1" if quality_key == "1080p" else "3.1",
+            "-c:a", "aac",
+            "-b:a", "192k" if quality_key == "1080p" else "128k",
+            "-movflags", "+faststart"
+        ])
+        
+        # Configuración adicional para mejor calidad
+        if content_type == "movies":
+            command.extend([
+                "-x264-params", "ref=6:me=umh:subme=8:trellis=2",
+                "-maxrate", f"{int(height * 2.5)}k",
+                "-bufsize", f"{int(height * 5)}k"
+            ])
+    else: 
+        command.extend(["-c:v", "copy", "-c:a", "copy"])
     
     command.extend(["-c:s", "mov_text", "-progress", "pipe:2", output_path])
     return [command], output_path

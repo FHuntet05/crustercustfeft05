@@ -81,7 +81,7 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
 async def _process_media_task(bot, task: dict, dl_dir: str):
     user_id, config = task['user_id'], task.get('processing_config', {})
     original_filename = task.get('original_filename', 'archivo.mkv')
-    
+
     actual_download_path = None
     if file_id := task.get('file_id'):
         actual_download_path = os.path.join(dl_dir, original_filename)
@@ -92,23 +92,30 @@ async def _process_media_task(bot, task: dict, dl_dir: str):
         await _edit_status_message(user_id, "Descargando desde URL...", progress_tracker)
         actual_download_path = await asyncio.to_thread(downloader.download_from_url, url, base_path, config.get('download_format_id'))
     else: raise ValueError("La tarea no contiene 'file_id' ni 'url'.")
-        
+
     if not actual_download_path or not os.path.exists(actual_download_path):
         raise FileNotFoundError("La descarga del archivo principal falló.")
 
     initial_size = os.path.getsize(actual_download_path)
-    
-    watermark_path, replace_audio_path, audio_thumb_path, subs_path = None, None, None, None
+
+    watermark_path, watermark_text, replace_audio_path, audio_thumb_path, subs_path = None, None, None, None, None
     if wm_conf := config.get('watermark', {}):
         if wm_conf.get('type') == 'image' and (wm_id := wm_conf.get('file_id')):
-            await _edit_status_message(user_id, "Descargando marca de agua...", progress_tracker); watermark_path = await bot.download_media(wm_id, file_name=os.path.join(dl_dir, "watermark_img"))
+            await _edit_status_message(user_id, "Descargando marca de agua...", progress_tracker)
+            watermark_path = await bot.download_media(wm_id, file_name=os.path.join(dl_dir, "watermark_img"))
+        elif wm_conf.get('type') == 'text':
+            watermark_text = wm_conf.get('text')
+
     if audio_file_id := config.get('replace_audio_file_id'):
-        await _edit_status_message(user_id, "Descargando nuevo audio...", progress_tracker); replace_audio_path = await bot.download_media(audio_file_id, file_name=os.path.join(dl_dir, "new_audio"))
+        await _edit_status_message(user_id, "Descargando nuevo audio...", progress_tracker)
+        replace_audio_path = await bot.download_media(audio_file_id, file_name=os.path.join(dl_dir, "new_audio"))
     if thumb_file_id := config.get('audio_thumbnail_file_id'):
-        await _edit_status_message(user_id, "Descargando carátula...", progress_tracker); audio_thumb_path = await bot.download_media(thumb_file_id, file_name=os.path.join(dl_dir, "audio_thumb"))
+        await _edit_status_message(user_id, "Descargando carátula...", progress_tracker)
+        audio_thumb_path = await bot.download_media(thumb_file_id, file_name=os.path.join(dl_dir, "audio_thumb"))
     if subs_file_id := config.get('subs_file_id'):
-        await _edit_status_message(user_id, "Descargando subtítulos...", progress_tracker); subs_path = await bot.download_media(subs_file_id, file_name=os.path.join(dl_dir, "subtitles.srt"))
-    
+        await _edit_status_message(user_id, "Descargando subtítulos...", progress_tracker)
+        subs_path = await bot.download_media(subs_file_id, file_name=os.path.join(dl_dir, "subtitles.srt"))
+
     if config.get('gif_options'): output_extension = ".gif"
     elif config.get('extract_audio'): output_extension = ".m4a"
     elif config.get('transcode'): output_extension = ".mp4"
@@ -122,24 +129,28 @@ async def _process_media_task(bot, task: dict, dl_dir: str):
         task=task, input_path=actual_download_path, output_path=output_path, watermark_path=watermark_path,
         replace_audio_path=replace_audio_path, audio_thumb_path=audio_thumb_path, subs_path=subs_path
     )
-    
+
+    if watermark_text:
+        logger.info(f"Aplicando marca de agua de texto: {watermark_text}")
+        # Aquí se puede añadir lógica para manejar marcas de agua de texto en FFmpeg
+
     if command_groups: await _run_command_with_progress(user_id, command_groups[0], actual_download_path)
-    
+
     if not os.path.exists(definitive_output_path):
         raise FileNotFoundError(f"FFmpeg finalizó pero el archivo de salida '{definitive_output_path}' no fue creado.")
-    
+
     final_size = os.path.getsize(definitive_output_path)
     caption = generate_summary_caption(task, initial_size, final_size, os.path.basename(definitive_output_path))
     ctx = progress_tracker.get(user_id)
     if ctx: ctx.reset_timer()
-    
+
     file_type = task.get('file_type', 'video')
-    
+
     if definitive_output_path.endswith('.gif'): sender_func, kwargs = bot.send_animation, {'animation': definitive_output_path}
     elif file_type == 'video' and not config.get('extract_audio'): sender_func, kwargs = bot.send_video, {'video': definitive_output_path}
     elif file_type == 'audio' or config.get('extract_audio'): sender_func, kwargs = bot.send_audio, {'audio': definitive_output_path}
     else: sender_func, kwargs = bot.send_document, {'document': definitive_output_path}
-    
+
     await sender_func(user_id, caption=caption, parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=(user_id, "Uploading...", "#TelegramUpload", final_size), **kwargs)
     return definitive_output_path
 
@@ -187,6 +198,20 @@ async def process_task(bot, task: dict):
     task_id, user_id = str(task['_id']), task['user_id']
     status_message, files_to_clean = None, set()
     original_filename = "Tarea sin nombre"
+    
+    # Manejar descargas de canales restringidos
+    if task.get('is_restricted', False):
+        try:
+            return await process_restricted_content(bot, task)
+        except Exception as e:
+            logger.error(f"Error procesando contenido restringido: {e}")
+            await bot.send_message(
+                user_id,
+                f"❌ <b>Error al procesar contenido restringido</b>\n"
+                f"<code>{escape_html(str(e))}</code>",
+                parse_mode=ParseMode.HTML
+            )
+            return
     try:
         task = await db_instance.get_task(task_id)
         if not task: raise Exception("Tarea no encontrada.")
@@ -195,35 +220,35 @@ async def process_task(bot, task: dict):
         status_message = await bot.send_message(user_id, "✅ Tarea recibida. Preparando...", parse_mode=ParseMode.HTML)
         global progress_tracker; progress_tracker[user_id] = ProgressContext(bot, status_message, task, asyncio.get_running_loop())
         task_dir = os.path.join(DOWNLOAD_DIR, task_id); os.makedirs(task_dir, exist_ok=True); files_to_clean.add(task_dir)
-        
+
         definitive_output_path = None
         if file_type in ['video', 'audio', 'document']: definitive_output_path = await _process_media_task(bot, task, task_dir)
         elif file_type == 'join_operation': definitive_output_path = await _process_join_task(bot, task, task_dir)
         elif file_type == 'zip_operation': definitive_output_path = await _process_zip_task(bot, task, task_dir)
         else: raise NotImplementedError(f"Tipo de tarea '{file_type}' no implementado.")
-        
+
         if definitive_output_path: files_to_clean.add(definitive_output_path)
         await db_instance.update_task(task_id, "status", "done")
         # [FIX] Manejo seguro de la eliminación del mensaje de estado.
         if status_message:
             try: await status_message.delete()
             except Exception: pass
-            
+
     except Exception as e:
         logger.critical(f"Error procesando tarea {task_id}: {e}", exc_info=True)
         error_message = f"❌ <b>Error Fatal en Tarea</b>\n<code>{escape_html(original_filename)}</code>\n\n<b>Motivo:</b>\n<pre>{escape_html(str(e))}</pre>"
         await db_instance.update_task(task_id, "status", "error")
         await db_instance.update_task(task_id, "last_error", str(e))
-        
+
         # [FIX] Manejo seguro de la edición/envío del mensaje de error.
         if status_message:
             try: await status_message.edit_text(error_message, parse_mode=ParseMode.HTML)
-            except Exception: 
+            except Exception:
                 logger.warning(f"No se pudo editar mensaje de error para {user_id}. Enviando uno nuevo.")
                 await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
-        else: 
+        else:
             await bot.send_message(user_id, error_message, parse_mode=ParseMode.HTML)
-            
+
     finally:
         if user_id in progress_tracker: del progress_tracker[user_id]
         for fpath in files_to_clean:
@@ -232,21 +257,188 @@ async def process_task(bot, task: dict):
                 elif os.path.exists(fpath): os.remove(fpath)
             except Exception as e: logger.error(f"No se pudo limpiar {fpath}: {e}")
 
+async def process_restricted_content(bot, task: dict) -> None:
+    """Procesa contenido de canales restringidos"""
+    user_id = task['user_id']
+    message_link = task.get('message_link')
+    status_message = None
+    
+    try:
+        # Validar el enlace
+        if not message_link:
+            raise ValueError("No se proporcionó enlace al mensaje")
+            
+        # Enviar mensaje de estado inicial
+        status_message = await bot.send_message(
+            user_id,
+            "🔄 <b>Procesando contenido restringido...</b>",
+            parse_mode=ParseMode.HTML
+        )
+        
+        # Intentar obtener el mensaje
+        try:
+            message = await bot.get_messages(
+                chat_id=task.get('chat_id'),
+                message_ids=task.get('message_id')
+            )
+        except Exception as e:
+            raise Exception(f"No se pudo acceder al mensaje: {str(e)}")
+            
+        if not message:
+            raise ValueError("No se encontró el mensaje")
+            
+        if not message.media:
+            raise ValueError("El mensaje no contiene archivos multimedia")
+            
+        # Actualizar mensaje de estado
+        await status_message.edit_text(
+            "⬇️ <b>Descargando archivo del canal restringido...</b>",
+            parse_mode=ParseMode.HTML
+        )
+        
+        # Preparar directorios
+        task_dir = os.path.join(DOWNLOAD_DIR, str(task['_id']))
+        os.makedirs(task_dir, exist_ok=True)
+        
+        # Descargar el archivo
+        file_path = await bot.download_media(
+            message,
+            file_name=os.path.join(task_dir, message.media.file_name if hasattr(message.media, 'file_name') else "downloaded_file"),
+            progress=_progress_callback_pyrogram,
+            progress_args=(
+                user_id,
+                "Downloading from restricted channel...",
+                "#RestrictedDownload",
+                message.media.file_size if hasattr(message.media, 'file_size') else 0
+            )
+        )
+        
+        if not file_path:
+            raise Exception("Error al descargar el archivo")
+            
+        # Actualizar estado
+        await status_message.edit_text(
+            "⬆️ <b>Subiendo archivo procesado...</b>",
+            parse_mode=ParseMode.HTML
+        )
+        
+        # Determinar tipo de archivo y enviar
+        if message.video:
+            await bot.send_video(
+                user_id,
+                video=file_path,
+                caption=f"✅ <b>Archivo descargado exitosamente</b>\n🔗 De: {message_link}",
+                parse_mode=ParseMode.HTML,
+                progress=_progress_callback_pyrogram,
+                progress_args=(user_id, "Uploading...", "#RestrictedUpload", os.path.getsize(file_path))
+            )
+        elif message.document:
+            await bot.send_document(
+                user_id,
+                document=file_path,
+                caption=f"✅ <b>Archivo descargado exitosamente</b>\n🔗 De: {message_link}",
+                parse_mode=ParseMode.HTML,
+                progress=_progress_callback_pyrogram,
+                progress_args=(user_id, "Uploading...", "#RestrictedUpload", os.path.getsize(file_path))
+            )
+        elif message.audio:
+            await bot.send_audio(
+                user_id,
+                audio=file_path,
+                caption=f"✅ <b>Archivo descargado exitosamente</b>\n🔗 De: {message_link}",
+                parse_mode=ParseMode.HTML,
+                progress=_progress_callback_pyrogram,
+                progress_args=(user_id, "Uploading...", "#RestrictedUpload", os.path.getsize(file_path))
+            )
+            
+        # Limpiar
+        try:
+            if os.path.exists(task_dir):
+                shutil.rmtree(task_dir)
+        except Exception as e:
+            logger.error(f"Error limpiando archivos temporales: {e}")
+            
+        # Eliminar mensaje de estado
+        try:
+            await status_message.delete()
+        except Exception:
+            pass
+            
+    except Exception as e:
+        error_msg = f"❌ <b>Error al procesar contenido restringido</b>\n<code>{escape_html(str(e))}</code>"
+        if status_message:
+            try:
+                await status_message.edit_text(error_msg, parse_mode=ParseMode.HTML)
+            except Exception:
+                await bot.send_message(user_id, error_msg, parse_mode=ParseMode.HTML)
+        else:
+            await bot.send_message(user_id, error_msg, parse_mode=ParseMode.HTML)
+        
+        # Actualizar estado de la tarea
+        await db_instance.update_task(str(task['_id']), "status", "error")
+        await db_instance.update_task(str(task['_id']), "last_error", str(e))
+
 async def worker_loop(bot_instance):
     logger.info("[WORKER] Bucle del worker iniciado.")
     os.makedirs(DOWNLOAD_DIR, exist_ok=True); os.makedirs(OUTPUT_DIR, exist_ok=True)
+    active_tasks = {}  # user_id -> Task
+    
     while True:
         try:
-            processing_users = list(progress_tracker.keys())
-            task = await db_instance.tasks.find_one_and_update(
-                {"status": "queued", "user_id": {"$nin": processing_users}},
-                {"$set": {"status": "processing", "processed_at": datetime.utcnow()}},
-                sort=[('created_at', 1)]
-            )
-            if task: 
-                asyncio.create_task(process_task(bot_instance, task))
-            else: 
+            # Limpiar tareas completadas
+            for user_id in list(active_tasks.keys()):
+                task = active_tasks[user_id]
+                if task.done():
+                    try:
+                        await task
+                    except Exception as e:
+                        logger.error(f"Task for user {user_id} failed: {e}")
+                    del active_tasks[user_id]
+            
+            # Verificar usuarios que pueden procesar nuevas tareas
+            available_users = [uid for uid in (await db_instance.tasks.distinct("user_id", {"status": "queued"}))
+                             if uid not in active_tasks]
+            
+            if not available_users:
                 await asyncio.sleep(2)
+                continue
+                
+            # Procesar una tarea por usuario disponible
+            for user_id in available_users:
+                # Obtener la próxima tarea para este usuario
+                task = await db_instance.tasks.find_one_and_update(
+                    {
+                        "status": "queued",
+                        "user_id": user_id
+                    },
+                    {
+                        "$set": {
+                            "status": "processing",
+                            "processed_at": datetime.utcnow(),
+                            "queue_position": await db_instance.tasks.count_documents({"status": "processing"}) + 1
+                        }
+                    },
+                    sort=[('priority', -1), ('created_at', 1)]  # Prioridad alta primero, luego por orden de llegada
+                )
+                
+                if task:
+                    # Informar posición en cola
+                    try:
+                        queue_msg = (
+                            f"⌛ <b>Tarea en cola</b>\n"
+                            f"Posición: {task['queue_position']}\n"
+                            f"ID: <code>{task['_id']}</code>"
+                        )
+                        await bot_instance.send_message(user_id, queue_msg, parse_mode=ParseMode.HTML)
+                    except Exception as e:
+                        logger.error(f"Error sending queue message: {e}")
+                    
+                    # Crear y registrar la tarea
+                    process_task_obj = asyncio.create_task(process_task(bot_instance, task))
+                    active_tasks[user_id] = process_task_obj
+            
+            await asyncio.sleep(2)
+            
         except Exception as e:
             logger.critical(f"[WORKER] Bucle del worker falló críticamente: {e}", exc_info=True)
             await asyncio.sleep(10)

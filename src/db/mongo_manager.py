@@ -35,6 +35,7 @@ class Database:
                 cls._instance.user_presets = cls._instance.db.user_presets
                 cls._instance.search_sessions = cls._instance.db.search_sessions
                 cls._instance.search_results = cls._instance.db.search_results
+                cls._instance.monitored_channels = cls._instance.db.monitored_channels
                 
                 logger.info("Cliente de base de datos Motor (asíncrono) inicializado.")
             except Exception as e:
@@ -173,12 +174,37 @@ class Database:
             default_settings = {
                 "_id": user_id,
                 "created_at": datetime.utcnow(),
-                "user_state": {"status": "idle", "data": {}}
+                "user_state": {"status": "idle", "data": {}},
+                "restricted_channels": {},  # Almacena info de canales restringidos
+                "last_used_userbot": datetime.utcnow()  # Para control de rate limit
             }
             await self.user_settings.insert_one(default_settings)
             logger.info(f"Nuevo perfil de usuario creado en la DB para el ID: {user_id}")
             return default_settings
         return settings
+
+    async def add_restricted_channel(self, user_id: int, channel_id: int, channel_title: str) -> bool:
+        """Registra un canal restringido para un usuario."""
+        try:
+            await self.user_settings.update_one(
+                {"_id": user_id},
+                {"$set": {
+                    f"restricted_channels.{channel_id}": {
+                        "title": channel_title,
+                        "added_at": datetime.utcnow()
+                    }
+                }},
+                upsert=True
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error al añadir canal restringido: {e}")
+            return False
+
+    async def get_restricted_channels(self, user_id: int) -> Dict:
+        """Obtiene la lista de canales restringidos de un usuario."""
+        settings = await self.get_user_settings(user_id)
+        return settings.get("restricted_channels", {})
 
     async def set_user_state(self, user_id: int, status: str, data: Optional[Dict] = None):
         state_data = {"status": status, "data": data or {}}
@@ -191,5 +217,58 @@ class Database:
     async def get_user_state(self, user_id: int) -> Dict:
         settings = await self.get_user_settings(user_id)
         return settings.get("user_state", {"status": "idle", "data": {}})
+
+    # --- Métodos para Canales Monitoreados ---
+    
+    async def add_monitored_channel(self, channel_id: int, user_id: int) -> bool:
+        """Añade un canal a la lista de monitoreo"""
+        try:
+            await self.monitored_channels.insert_one({
+                "channel_id": channel_id,
+                "user_id": user_id,
+                "added_on": datetime.utcnow(),
+                "last_message_id": 0,
+                "active": True
+            })
+            return True
+        except Exception as e:
+            logger.error(f"Error al añadir canal monitoreado: {e}")
+            return False
+
+    async def is_channel_monitored(self, channel_id: int, user_id: int) -> bool:
+        """Verifica si un canal ya está siendo monitoreado"""
+        count = await self.monitored_channels.count_documents({
+            "channel_id": channel_id,
+            "user_id": user_id,
+            "active": True
+        })
+        return count > 0
+
+    async def get_monitored_channels(self, user_id: int) -> List[Dict]:
+        """Obtiene la lista de canales monitoreados de un usuario"""
+        cursor = self.monitored_channels.find({
+            "user_id": user_id,
+            "active": True
+        })
+        return await cursor.to_list(length=100)
+
+    async def remove_monitored_channel(self, channel_id: int, user_id: int) -> bool:
+        """Elimina un canal de la lista de monitoreo"""
+        try:
+            result = await self.monitored_channels.update_one(
+                {"channel_id": channel_id, "user_id": user_id},
+                {"$set": {"active": False}}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"Error al eliminar canal monitoreado: {e}")
+            return False
+
+    async def update_last_message_id(self, channel_id: int, message_id: int):
+        """Actualiza el último ID de mensaje procesado para un canal"""
+        await self.monitored_channels.update_one(
+            {"channel_id": channel_id},
+            {"$set": {"last_message_id": message_id}}
+        )
 
 db_instance = Database()

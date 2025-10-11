@@ -18,12 +18,34 @@ async def main():
         print("❌ ERROR: Faltan una o más variables en el archivo .env (API_ID, API_HASH, USERBOT_SESSION_STRING)")
         return
 
-    # --- ACCIÓN REQUERIDA ---
-    # Pega aquí el enlace de invitación privado de tu canal
-    chat_identifier = "https://t.me/+rTJhHhkSH3tiMmQ5"
+    # --- FUNCIONES AUXILIARES ---
+    async def test_channel_access(client, chat_identifier):
+        try:
+            chat = await client.get_chat(chat_identifier)
+            print(f"✅ Acceso exitoso al canal '{chat.title}' (ID: {chat.id})")
+            return chat.id
+        except Exception as e:
+            print(f"❌ Error al acceder al canal: {e}")
+            return None
 
-    if "https://t.me/+rTJhHhkSH3tiMmQ5" in chat_identifier:
-        print("❌ ERROR: Por favor, edita el archivo 'test_userbot.py' y reemplaza 'https://t.me/+rTJhHhkSH3tiMmQ5' con el enlace de invitación real de tu canal.")
+    async def download_media_from_restricted(client, message_id, chat_id, destination):
+        try:
+            message = await client.get_messages(chat_id, message_id)
+            if not message:
+                print(f"❌ No se encontró el mensaje con ID {message_id}")
+                return None
+            
+            file_path = await client.download_media(message, file_name=destination)
+            print(f"✅ Archivo descargado exitosamente: {file_path}")
+            return file_path
+        except Exception as e:
+            print(f"❌ Error al descargar el medio: {e}")
+            return None
+
+    # --- TEST DE ACCESO ---
+    chat_identifier = input("Ingrese el enlace o ID del canal a probar: ").strip()
+    if not chat_identifier:
+        print("❌ ERROR: Debe proporcionar un enlace o ID de canal.")
         return
 
     print("--- INICIANDO PRUEBA CON ENLACE DE INVITACIÓN ---")

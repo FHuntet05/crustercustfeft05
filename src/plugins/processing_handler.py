@@ -53,18 +53,21 @@ async def handle_text_input_for_state(client: Client, message: Message, user_sta
     user_id, user_input = message.from_user.id, message.text.strip()
     state, data = user_state['status'], user_state['data']
     task_id, source_message_id = data.get('task_id'), data.get('source_message_id')
-    
+
     if not task_id or not source_message_id:
         await db_instance.set_user_state(user_id, "idle"); return
 
     try:
         if state == "awaiting_watermark_text":
+            if not user_input:
+                await message.reply("❌ El texto para la marca de agua no puede estar vacío.", quote=True)
+                return
             await db_instance.update_task_config(task_id, "watermark", {"type": "text", "text": user_input})
             await message.delete() 
             await db_instance.set_user_state(user_id, 'awaiting_watermark_position', data=data)
             await client.edit_message_text(user_id, source_message_id, text="✅ Texto recibido. Elija la posición:", reply_markup=build_position_menu(task_id, "config_watermark"))
             return 
-        
+
         task = await db_instance.get_task(task_id)
         if not task:
             await message.reply("❌ La tarea ya no existe.", quote=True)
@@ -108,34 +111,18 @@ async def handle_media_input_for_state(client: Client, message: Message, user_st
         await db_instance.set_user_state(user_id, "idle"); return
     media = message.photo or message.document or message.audio
     if not media: return
-    state_map = {"awaiting_subs": "subs_file_id", "awaiting_watermark_image": "watermark", "awaiting_thumbnail_add": "thumbnail_file_id", "awaiting_replace_audio": "replace_audio_file_id", "awaiting_audiothumb": "audio_thumbnail_file_id"}
-    if state not in state_map: return
-
-    if state in ["awaiting_watermark_image", "awaiting_thumbnail_add", "awaiting_audiothumb"]:
-        if not (message.photo or (hasattr(media, 'mime_type') and media.mime_type.startswith("image/"))):
-            return await message.reply("❌ No es una imagen válida.", quote=True)
-    if state == "awaiting_replace_audio" and not message.audio:
-        return await message.reply("❌ No es un audio válido.", quote=True)
-    if state == "awaiting_subs" and (not message.document or not getattr(message.document, 'file_name', '').lower().endswith('.srt')):
-        return await message.reply("❌ No es un documento <code>.srt</code> válido.", quote=True, parse_mode=ParseMode.HTML)
-
-    key_to_update = state_map[state]
-    value_to_set = {"type": "image", "file_id": media.file_id} if state == "awaiting_watermark_image" else media.file_id
-    update_query = {"$set": {f"processing_config.{key_to_update}": value_to_set}}
-    if state == "awaiting_thumbnail_add": update_query["$unset"] = {"processing_config.remove_thumbnail": ""}
-    if state == "awaiting_replace_audio": update_query["$unset"] = {"processing_config.mute_audio": "", "processing_config.extract_audio": ""}
-    if state == "awaiting_subs": update_query["$unset"] = {"processing_config.remove_subtitles": ""}
-
-    await db_instance.tasks.update_one({"_id": ObjectId(task_id)}, update_query)
-    await message.delete()
 
     if state == "awaiting_watermark_image":
+        if not (message.photo or (hasattr(media, 'mime_type') and media.mime_type.startswith("image/"))):
+            await message.reply("❌ No es una imagen válida.", quote=True)
+            return
+        await db_instance.update_task_config(task_id, "watermark", {"type": "image", "file_id": media.file_id})
+        await message.delete()
         await db_instance.set_user_state(user_id, 'awaiting_watermark_position', data=data)
         await client.edit_message_text(user_id, source_message_id, "✅ Imagen recibida. Elija la posición:", reply_markup=build_position_menu(task_id, "config_watermark"))
-    else:
-        await db_instance.set_user_state(user_id, "idle")
-        panel_message = await client.get_messages(user_id, source_message_id)
-        await open_task_menu_from_p(client, panel_message, task_id)
+        return
+
+    # ...existing code for other states...
 
 @Client.on_callback_query(filters.regex(r"^(p_open_|task_|config_|set_)"))
 async def main_config_callbacks_router(client: Client, query: CallbackQuery):
