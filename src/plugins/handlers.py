@@ -5,6 +5,7 @@ import re
 from datetime import datetime
 import asyncio
 import os
+import time
 from typing import Optional, Union, Tuple, Any
 
 from pyrogram import Client, filters, StopPropagation
@@ -326,19 +327,110 @@ async def process_channel_link(client: Client, message: Message, url: str):
         logger.error(f"Error in process_channel_link: {str(e)}", exc_info=True)
         await message.reply("❌ Ocurrió un error inesperado. Por favor, intenta nuevamente.")
 
-@Client.on_message(filters.text & filters.private, group=2)
+@Client.on_message(filters.text & filters.private)
 async def text_gatekeeper(client: Client, message: Message):
-    user_id = message.from_user.id
-    text = message.text.strip()
-    
-    if text.startswith('/'):
-        return
+    """Manejador principal para todos los mensajes de texto"""
+    try:
+        user_id = message.from_user.id
+        text = message.text.strip()
+        
+        # No procesar comandos aquí
+        if text.startswith('/'):
+            return
 
-    user_state = await db_instance.get_user_state(user_id)
-    
-    # Si detectamos un enlace de Telegram
-    if downloader.validate_url(text):
-        status_msg = await message.reply("🔄 Analizando enlace...")
+        # Verificar si es un enlace de Telegram (sea comando o no)
+        if "t.me/" in text:
+            logger.info(f"Received Telegram link: {text}")
+            
+            # Mensaje de estado inicial
+            status_msg = await message.reply("🔄 Analizando enlace...")
+            
+            try:
+                # Verificar si el enlace tiene formato válido
+                if not any(pattern in text for pattern in ['/+', '/joinchat/', 'c/', '/']):
+                    return await status_msg.edit(
+                        "❌ El enlace proporcionado no es válido.\n\n"
+                        "<b>Formatos válidos:</b>\n"
+                        "• Canal privado: https://t.me/+abc123...\n"
+                        "• Canal público: https://t.me/nombre_canal\n"
+                        "• Mensaje específico: https://t.me/nombre_canal/123",
+                        parse_mode=ParseMode.HTML
+                    )
+                    
+                # Intentar procesar el enlace
+                parts = text.split('/')
+                
+                # Es un enlace a un mensaje específico
+                if len(parts) > 4 and parts[-1].isdigit():
+                    message_id = int(parts[-1])
+                    chat_id = parts[-2]
+                    
+                    await status_msg.edit("🔄 Accediendo al contenido...")
+                    
+                    try:
+                        # Usar el userbot para acceder al contenido
+                        user_client = client.user_client
+                        target_chat = await user_client.get_chat(chat_id)
+                        
+                        # Verificar membresía
+                        try:
+                            member = await user_client.get_chat_member(target_chat.id, "me")
+                            is_member = True
+                        except Exception:
+                            is_member = False
+                            
+                        if not is_member:
+                            try:
+                                await user_client.join_chat(text)
+                                await status_msg.edit("✅ Unido al canal. Accediendo al contenido...")
+                            except Exception as e:
+                                return await status_msg.edit(f"❌ No se pudo unir al canal: {str(e)}")
+                        
+                        # Intentar obtener el mensaje
+                        target_message = await user_client.get_messages(target_chat.id, message_id)
+                        
+                        if not target_message:
+                            return await status_msg.edit("❌ No se encontró el mensaje específico.")
+                        
+                        if not target_message.media:
+                            return await status_msg.edit("❌ El mensaje no contiene archivos multimedia.")
+                        
+                        # Procesar el contenido multimedia
+                        await process_media_message(client, message, target_message, status_msg)
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing message: {str(e)}")
+                        return await status_msg.edit(f"❌ Error al procesar el mensaje: {str(e)}")
+                        
+                else:
+                    # Es un enlace de canal
+                    try:
+                        success, info_msg, chat, _ = await get_chat_info(client, text)
+                        if not success:
+                            return await status_msg.edit(info_msg)
+                            
+                        await status_msg.edit(
+                            f"✅ Canal verificado: <b>{chat.title}</b>\n"
+                            "📤 Ahora envía el enlace del mensaje específico que quieres descargar.\n"
+                            "Ejemplo: https://t.me/nombre_canal/123",
+                            parse_mode=ParseMode.HTML
+                        )
+                    except Exception as e:
+                        logger.error(f"Error processing channel: {str(e)}")
+                        return await status_msg.edit(f"❌ Error al procesar el canal: {str(e)}")
+                        
+            except Exception as e:
+                logger.error(f"Error in link processing: {str(e)}")
+                return await status_msg.edit("❌ Error al procesar el enlace.")
+                
+        # Manejar otros estados si es necesario
+        user_state = await db_instance.get_user_state(user_id)
+        if user_state.get("status") != "idle":
+            await processing_handler.handle_text_input_for_state(client, message, user_state)
+            
+    except Exception as e:
+        logger.error(f"Error in text_gatekeeper: {str(e)}")
+        await message.reply("❌ Ocurrió un error inesperado.")
         
         # Verificar si es un enlace a un mensaje específico
         parts = text.split('/')
@@ -577,7 +669,7 @@ def format_time(seconds: float) -> str:
     minutes = minutes % 60
     return f"{hours:.0f}h {minutes:.0f}m"
 
-async def show_progress(current: int, total: int, status_msg: Message, action: str, start_time: float):
+async def show_progress(current: int, total: int, status_msg: Message, action: str, start_time: float, user_client=None):
     """Muestra una barra de progreso detallada con estadísticas"""
     if total == 0:
         return
@@ -596,8 +688,13 @@ async def show_progress(current: int, total: int, status_msg: Message, action: s
         speed = current / elapsed_time
         eta = (total - current) / speed if speed > 0 else 0
         
-        # Obtener información del userbot
-        me = await client.user_client.get_me()
+        # Obtener información del userbot si está disponible
+        me = None
+        if user_client:
+            try:
+                me = await user_client.get_me()
+            except:
+                pass
         
         progress_bar = (
             f"Task is being Processed!\n"
