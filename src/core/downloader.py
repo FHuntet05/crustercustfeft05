@@ -16,9 +16,15 @@ def search_music(query: str, limit: int = 10) -> List[Dict]:
     return []
 
 def validate_url(url: str) -> bool:
-    """Valida si un enlace tiene un formato correcto."""
-    url_pattern = re.compile(r'^(https?://)?(www\.)?t\.me/.+$')
-    if not url_pattern.match(url):
-        logger.warning(f"URL inválida: {url}")
-        return False
-    return True
+    """Valida si el enlace proporcionado es un enlace de Telegram válido."""
+    telegram_url_patterns = [
+        r"https://t\.me/\+",  # Enlaces de invitación a canales privados
+        r"https://t\.me/[a-zA-Z0-9_]+",  # Enlaces de canales públicos o usuarios
+        r"https://t\.me/[a-zA-Z0-9_]+/\d+"  # Enlaces de mensajes específicos
+    ]
+
+    for pattern in telegram_url_patterns:
+        if re.match(pattern, url):
+            return True
+
+    return False

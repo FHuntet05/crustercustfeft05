@@ -384,8 +384,12 @@ async def get_restricted_command(client: Client, message: Message):
             if chat.is_member:
                 await message.reply(f"✅ El userbot ya está unido al canal: <b>{escape_html(chat.title)}</b>.\nPor favor, envíe el enlace del contenido que desea extraer.", parse_mode=ParseMode.HTML)
             else:
-                await client.join_chat(url)
-                await message.reply("✅ El userbot se ha unido al canal correctamente. Ahora puede enviar el enlace del contenido que desea extraer.")
+                try:
+                    await client.join_chat(url)
+                    await message.reply("✅ El userbot se ha unido al canal correctamente. Ahora puede enviar el enlace del contenido que desea extraer.")
+                except Exception as join_error:
+                    logger.error(f"Error al intentar unirse al canal: {join_error}", exc_info=True)
+                    await message.reply("❌ No se pudo unir al canal. Verifique que el enlace sea válido y que el userbot tenga permisos.")
         else:
             await message.reply("❌ El enlace proporcionado no corresponde a un canal válido.")
     except Exception as e:
