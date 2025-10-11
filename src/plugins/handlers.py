@@ -197,6 +197,7 @@ async def get_message_info(client: Client, chat_id: Union[int, str], message_id:
 async def get_chat_info(client: Client, url: str) -> tuple[bool, str, Optional[Union[Chat, Message]], Optional[int]]:
     """Obtiene información del chat o mensaje"""
     try:
+        user_client = client.user_client
         parts = url.split('/')
         message_id = None
         
@@ -206,6 +207,8 @@ async def get_chat_info(client: Client, url: str) -> tuple[bool, str, Optional[U
             chat_id = parts[-2]
         else:
             chat_id = parts[-1]
+            
+        logger.info(f"Processing chat_id: {chat_id}, message_id: {message_id}")
 
         try:
             # Intentar obtener información del chat
@@ -332,7 +335,53 @@ async def text_gatekeeper(client: Client, message: Message):
         return
 
     user_state = await db_instance.get_user_state(user_id)
-    if user_state.get("status") != "idle":
+    
+    # Si detectamos un enlace de Telegram
+    if downloader.validate_url(text):
+        status_msg = await message.reply("🔄 Analizando enlace...")
+        
+        # Verificar si es un enlace a un mensaje específico
+        parts = text.split('/')
+        if len(parts) > 4 and parts[-1].isdigit():
+            chat_id = parts[-2]
+            message_id = int(parts[-1])
+            
+            try:
+                # Usar el userbot para obtener el mensaje
+                user_client = client.user_client
+                
+                # Primero verificar si podemos acceder al chat
+                try:
+                    chat = await user_client.get_chat(chat_id)
+                except Exception as e:
+                    logger.error(f"Error getting chat: {e}")
+                    return await status_msg.edit("❌ No se puede acceder al chat. Asegúrate de que el userbot sea miembro.")
+                
+                # Intentar obtener el mensaje
+                try:
+                    target_message = await user_client.get_messages(chat.id, message_id)
+                    if not target_message:
+                        return await status_msg.edit("❌ No se encontró el mensaje específico.")
+                    
+                    if not target_message.media:
+                        return await status_msg.edit("❌ El mensaje no contiene archivos multimedia.")
+                    
+                    # Procesar el mensaje multimedia
+                    await process_media_message(client, message, target_message, status_msg)
+                    
+                except Exception as e:
+                    logger.error(f"Error getting message: {e}")
+                    return await status_msg.edit(f"❌ Error al obtener el mensaje: {str(e)}")
+            
+            except Exception as e:
+                logger.error(f"Error processing message link: {e}")
+                return await status_msg.edit("❌ Error al procesar el enlace del mensaje.")
+        else:
+            # Si es un enlace de canal, procesarlo normalmente
+            await process_channel_link(client, message, text)
+    
+    # Manejar otros estados
+    elif user_state.get("status") != "idle":
         if user_state.get("status") == "waiting_channel_link":
             await process_channel_link(client, message, text)
             await db_instance.set_user_state(user_id, "idle")
@@ -541,19 +590,26 @@ async def show_progress(current: int, total: int, status_msg: Message, action: s
             return
             
         percent = current * 100 / total
-        done = int(percent / 5)
-        pending = 20 - done
+        done = int(percent / 7.7)  # 13 bloques en total
+        pending = 13 - done
         
         speed = current / elapsed_time
         eta = (total - current) / speed if speed > 0 else 0
         
+        # Obtener información del userbot
+        me = await client.user_client.get_me()
+        
         progress_bar = (
-            f"💾 <b>{action}</b>\n\n"
-            f"<code>[{'█' * done}{'░' * pending}]</code> <b>{percent:.1f}%</b>\n\n"
-            f"📊 <b>Progreso:</b> {format_size(current)}/{format_size(total)}\n"
-            f"⚡️ <b>Velocidad:</b> {format_size(speed)}/s\n"
-            f"⏱ <b>Transcurrido:</b> {format_time(elapsed_time)}\n"
-            f"⏳ <b>Restante:</b> {format_time(eta)}"
+            f"Task is being Processed!\n"
+            f"[{'▤' * done}{'□' * pending}] {percent:.2f}%\n"
+            f"┠ Processed: {format_size(current)} of {format_size(total)}\n"
+            f"┠ File: 1/1\n"
+            f"┠ Status: #TelegramDownload\n"
+            f"┠ ETA: {format_time(eta)}\n"
+            f"┠ Speed: {format_size(speed)}/s\n"
+            f"┠ Elapsed: {format_time(elapsed_time)}\n"
+            f"┠ Engine: {me.first_name}\n"
+            f"┖ ID: {me.id}"
         )
         
         await status_msg.edit(progress_bar, parse_mode=ParseMode.HTML)
@@ -609,15 +665,15 @@ async def process_media_message(client: Client, original_message: Message, targe
         # Obtener información del archivo
         media_info = await get_media_info(target_message)
         
-        # Mostrar información inicial
+        # Mostrar mensaje inicial
         await status_msg.edit(
-            f"📦 <b>Procesando contenido multimedia</b>\n\n"
-            f"<b>Nombre:</b> {media_info['file_name']}\n"
-            f"<b>Tipo:</b> {media_info['type'].upper()}\n"
-            f"<b>Tamaño:</b> {format_size(media_info['file_size'])}\n"
-            f"{'<b>Duración:</b> ' + format_time(media_info['duration']) if media_info['duration'] else ''}\n"
-            f"{'<b>Resolución:</b> ' + f'{media_info['width']}x{media_info['height']}' if media_info['width'] and media_info['height'] else ''}",
-            parse_mode=ParseMode.HTML
+            f"Task is being Prepared!\n"
+            f"[□□□□□□□□□□□□□] 0.00%\n"
+            f"┠ File: {media_info['file_name']}\n"
+            f"┠ Size: {format_size(media_info['file_size'])}\n"
+            f"┠ Type: {media_info['type'].upper()}\n"
+            f"┠ Status: Starting Download...\n"
+            f"┖ Mode: Telegram"
         )
         await asyncio.sleep(2)  # Dar tiempo para leer la info
         
@@ -706,14 +762,17 @@ async def process_media_message(client: Client, original_message: Message, targe
             up_time = asyncio.get_event_loop().time() - start_up_time
             up_speed = media_info['file_size'] / up_time if up_time > 0 else 0
             
+            me = await user_client.get_me()
+            
             await status_msg.edit(
-                f"✅ <b>Proceso completado exitosamente</b>\n\n"
-                f"📝 <b>Archivo:</b> {media_info['file_name']}\n"
-                f"📊 <b>Tamaño:</b> {format_size(media_info['file_size'])}\n"
-                f"⚡️ <b>Velocidad de subida:</b> {format_size(up_speed)}/s\n"
-                f"⏱ <b>Tiempo total:</b> {format_time(total_time)}\n\n"
-                f"✨ <i>Contenido procesado y entregado</i>",
-                parse_mode=ParseMode.HTML
+                f"Task has been Completed!\n\n"
+                f"┠ File: {media_info['file_name']}\n"
+                f"┠ Total Files: 1\n"
+                f"┠ Size: {format_size(media_info['file_size'])}\n"
+                f"┠ Elapsed: {format_time(total_time)}\n"
+                f"┠ Mode: Telegram\n"
+                f"┠ Engine: {me.first_name}\n"
+                f"┖ ID: {me.id}"
             )
             
         except Exception as e:
