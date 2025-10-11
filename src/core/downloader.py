@@ -18,6 +18,7 @@ def _search_youtube_for_music(query: str, limit: int) -> List[Dict]:
     try:
         search_result = None  # Aquí debería ir la lógica para buscar en YouTube, actualmente es un placeholder
         if not search_result or not search_result.get('entries'):
+            logger.warning("No se encontraron resultados para la búsqueda.")
             return []
         
         results = []
@@ -37,3 +38,12 @@ def _search_youtube_for_music(query: str, limit: int) -> List[Dict]:
     except Exception as e:
         logger.error(f"La búsqueda en YouTube falló: {e}", exc_info=True)
         return []
+
+def validate_url(url: str) -> bool:
+    """Valida si un enlace tiene un formato correcto."""
+    import re
+    url_pattern = re.compile(r'^(https?://)?(www\.)?t\.me/.+$')
+    if not url_pattern.match(url):
+        logger.warning(f"URL inválida: {url}")
+        return False
+    return True
