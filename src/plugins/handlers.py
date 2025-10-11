@@ -180,6 +180,83 @@ async def media_gatekeeper(client: Client, message: Message):
 
 # [FIX] Se corrige el decorador para evitar el TypeError.
 # La lógica de grupos asegura que este manejador solo se ejecute si un manejador de comandos (group=0 por defecto) no lo ha hecho.
+async def process_channel_link(client: Client, message: Message, url: str):
+    """Procesa un enlace de canal para añadirlo o unirse"""
+    try:
+        # Validar el formato del enlace
+        if not downloader.validate_url(url):
+            return await message.reply(
+                "❌ El enlace proporcionado no es válido.\n"
+                "Formatos válidos:\n"
+                "• Canal privado: https://t.me/+abc123...\n"
+                "• Canal público: https://t.me/nombre_canal"
+            )
+
+        status_msg = await message.reply("🔄 Procesando enlace...")
+
+        try:
+            # Intentar unirse al canal
+            chat = None
+            try:
+                chat = await client.join_chat(url)
+            except Exception as join_error:
+                if "INVITE_REQUEST_SENT" in str(join_error):
+                    await status_msg.edit("📩 Se ha enviado una solicitud para unirse al canal. Procesando...")
+                elif "INVITE_HASH_EXPIRED" in str(join_error):
+                    return await status_msg.edit("❌ El enlace de invitación ha expirado.")
+                else:
+                    logger.warning(f"Join attempt warning: {str(join_error)}")
+
+            # Si no se pudo unir, intentar obtener info del chat directamente
+            if not chat:
+                if '+' in url or 'joinchat' in url:
+                    return await status_msg.edit("❌ No se pudo unirse al canal. Verifica que el enlace sea válido.")
+                
+                # Para enlaces públicos, intentar obtener info sin unirse
+                chat_id = url.split('/')[-1]
+                try:
+                    chat = await client.get_chat(chat_id)
+                except Exception as e:
+                    return await status_msg.edit(f"❌ No se pudo acceder al canal: {str(e)}")
+
+            # Verificar membresía actual
+            try:
+                member = await client.get_chat_member(chat.id, "me")
+                is_member = True
+            except Exception:
+                is_member = False
+
+            if not is_member:
+                return await status_msg.edit(
+                    "❌ No se pudo completar la operación.\n"
+                    "• Verifica que el enlace sea válido\n"
+                    "• Asegúrate de que el userbot tenga permisos para unirse\n"
+                    "• Si es un canal privado, espera a que se acepte la solicitud"
+                )
+
+            # Registrar el canal en la base de datos
+            await db_instance.add_monitored_channel(message.from_user.id, str(chat.id))
+            
+            await status_msg.edit(
+                f"✅ Canal añadido exitosamente:\n"
+                f"• Nombre: <b>{escape_html(chat.title)}</b>\n"
+                f"• ID: <code>{chat.id}</code>\n\n"
+                f"📝 Ahora puedes usar /get_restricted para descargar contenido.",
+                parse_mode=ParseMode.HTML
+            )
+
+        except Exception as e:
+            error_msg = str(e)
+            if "INVITE_HASH_EXPIRED" in error_msg:
+                await status_msg.edit("❌ El enlace de invitación ha expirado.")
+            else:
+                await status_msg.edit(f"❌ Error al procesar el canal: {error_msg}")
+            logger.error(f"Error processing channel {url}: {error_msg}")
+
+    except Exception as e:
+        logger.error(f"Error in process_channel_link: {str(e)}", exc_info=True)
+        await message.reply("❌ Ocurrió un error inesperado. Por favor, intenta nuevamente.")
+
 @Client.on_message(filters.text & filters.private, group=2)
 async def text_gatekeeper(client: Client, message: Message):
     user_id = message.from_user.id
@@ -190,12 +267,10 @@ async def text_gatekeeper(client: Client, message: Message):
 
     user_state = await db_instance.get_user_state(user_id)
     if user_state.get("status") != "idle":
-        # Si el estado no es idle, puede que esté esperando un input específico
-        # como un enlace de canal restringido.
-        if user_state.get("status") in ["waiting_channel_link", "waiting_restricted_link"] and downloader.validate_url(text):
-             # Aquí podrías añadir la lógica para manejar el enlace recibido
-             # por ahora, lo pasamos al manejador de estado.
-             pass
+        if user_state.get("status") == "waiting_channel_link":
+            await process_channel_link(client, message, text)
+            await db_instance.set_user_state(user_id, "idle")
+            return
         return await processing_handler.handle_text_input_for_state(client, message, user_state)
     
     # Nueva lógica para diferenciar enlaces
@@ -312,20 +387,24 @@ async def cancel_search_session(client: Client, query: CallbackQuery):
 async def add_channel_command(client: Client, message: Message):
     """Inicia el proceso de añadir un canal restringido"""
     user_id = message.from_user.id
+    text = message.text.split(maxsplit=1)
+
+    # Si se proporciona el enlace directamente con el comando
+    if len(text) > 1:
+        url = text[1].strip()
+        return await process_channel_link(client, message, url)
+
+    # Si no hay enlace, establecer estado de espera
+    await db_instance.set_user_state(user_id, "waiting_channel_link")
     
-    # Resetear estado anterior si existe
-    await db_instance.set_user_state(user_id, "idle")
-    
-    # Solicitar enlace del canal
     await message.reply(
         "🔒 <b>Añadir Canal Restringido</b>\n\n"
-        "Por favor, envíe el enlace del canal privado.\n"
-        "Puede ser un enlace de invitación (t.me/joinchat/...) o el @username del canal.",
+        "Por favor, envíe el enlace del canal.\n"
+        "Formatos válidos:\n"
+        "• Canal privado: https://t.me/+abc123...\n"
+        "• Canal público: https://t.me/nombre_canal",
         parse_mode=ParseMode.HTML
     )
-    
-    # Establecer estado de espera
-    await db_instance.set_user_state(user_id, "waiting_channel_link")
 
 @Client.on_message(filters.command("list_channels") & filters.private)
 async def list_channels_command(client: Client, message: Message):
@@ -372,7 +451,16 @@ async def get_restricted_command(client: Client, message: Message):
         text = message.text.split(maxsplit=1)
         
         if len(text) < 2:
-            return await message.reply("❌ Por favor, envíe un enlace válido después del comando.\nEjemplo: /get_restricted https://t.me/nombre_canal")
+            await db_instance.set_user_state(message.from_user.id, "waiting_restricted_link")
+            return await message.reply(
+                "📥 <b>Descarga de Contenido Restringido</b>\n\n"
+                "Por favor, envía el enlace del contenido que deseas descargar.\n\n"
+                "<b>Formatos válidos:</b>\n"
+                "• Canal privado: https://t.me/+abc123...\n"
+                "• Canal público: https://t.me/nombre_canal\n"
+                "• Mensaje específico: https://t.me/nombre_canal/123",
+                parse_mode=ParseMode.HTML
+            )
 
         url = text[1].strip()
         
