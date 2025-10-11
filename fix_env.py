@@ -1,17 +1,18 @@
 from urllib.parse import quote_plus
 
 # Credenciales de MongoDB
-username = quote_plus("enco")
-password = quote_plus("Cuba230405?")
+username = quote_plus("teratrinin2")
+password = quote_plus("hpK6PQPCn9b6ZaQh")
 
 # Crear la URL de MongoDB correctamente codificada
 mongo_uri = f"mongodb+srv://{username}:{password}@cluster0.gtvuxtd.mongodb.net/JefesMedia?retryWrites=true&w=majority"
 
 # Contenido del archivo .env
-env_content = f"""# Telegram API
-API_ID=22088113
-API_HASH=e2d24b4fe087c65780d5875b5a7216a0
-TELEGRAM_TOKEN=6855045588:AAFCUXtgKmxhIDNmZGVsQ3hh8pgZtpxtci4
+env_content = f"""# Credenciales para el Userbot
+API_ID=27026389
+API_HASH=158b014213c39d3b342a8792e495a5dc
+BOT_USERNAME=@theporfessionalfeft05_bot
+USERBOT_ID=1601545124
 
 # MongoDB Configuration
 MONGO_URI="{mongo_uri}"
