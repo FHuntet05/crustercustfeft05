@@ -472,14 +472,6 @@ async def text_gatekeeper(client: Client, message: Message):
             # Si es un enlace de canal, procesarlo normalmente
             await process_channel_link(client, message, text)
     
-    # Manejar otros estados
-    elif user_state.get("status") != "idle":
-        if user_state.get("status") == "waiting_channel_link":
-            await process_channel_link(client, message, text)
-            await db_instance.set_user_state(user_id, "idle")
-            return
-        return await processing_handler.handle_text_input_for_state(client, message, user_state)
-    
     # Nueva lógica para diferenciar enlaces
     if downloader.validate_url(text):
         # Si es una URL de Telegram, la manejamos como contenido restringido.
@@ -492,8 +484,15 @@ async def text_gatekeeper(client: Client, message: Message):
         # Para otras URLs, mantenemos el flujo anterior (que ya no debería usar yt-dlp)
         return await handle_url_input(client, message, text)
     
-    # Si no es una URL, se asume que es una búsqueda de música
-    await handle_music_search(client, message, text)
+    # Si no es una URL y no es un estado especial, se asume que es una búsqueda de música
+    if user_state.get("status") == "waiting_channel_link":
+        await process_channel_link(client, message, text)
+        await db_instance.set_user_state(user_id, "idle")
+        return
+    elif user_state.get("status") != "idle":
+        return await processing_handler.handle_text_input_for_state(client, message, user_state)
+    else:
+        await handle_music_search(client, message, text)
 
 async def handle_url_input(client: Client, message: Message, url: str):
     # Añadimos una guarda para ignorar explícitamente los enlaces de Telegram aquí
