@@ -2,10 +2,9 @@ import logging
 import os
 from datetime import datetime
 from typing import Union
-from pyrogram import Client, filters
+from pyrogram import Client, filters, StopPropagation
 from pyrogram.types import Message, CallbackQuery
 from pyrogram.enums import ParseMode
-from pyrogram.errors import MessageNotModified
 from pyrogram import StopPropagation  # Importación corregida
 
 from src.core.admin_manager import AdminManager
