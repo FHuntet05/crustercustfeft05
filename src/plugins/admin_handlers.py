@@ -14,11 +14,17 @@ from src.db.mongo_manager import db_instance
 logger = logging.getLogger(__name__)
 admin_manager = AdminManager()
 
+def get_admin_ids():
+    """Obtiene la lista de IDs de administradores desde las variables de entorno."""
+    import os
+    admin_ids_str = os.getenv("ADMIN_IDS", "")
+    return [int(x) for x in admin_ids_str.split(",") if x]
+
 def admin_only(func):
     """Decorador para restringir comandos solo a administradores."""
     async def wrapper(client: Client, update: Union[Message, CallbackQuery], *args, **kwargs):
         user_id = update.from_user.id
-        admins = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
+        admins = get_admin_ids()
         
         if user_id not in admins:
             if isinstance(update, CallbackQuery):
@@ -207,7 +213,7 @@ async def ban_check_middleware(client: Client, message: Message):
     user_id = message.from_user.id
     
     # No verificar baneos para administradores
-    admins = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
+    admins = get_admin_ids()
     if user_id in admins:
         return
         
