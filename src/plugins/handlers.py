@@ -205,7 +205,13 @@ async def get_chat_info(client: Client, url: str) -> tuple[bool, str, Optional[U
         # Si es un enlace a un mensaje específico
         if len(parts) > 4 and parts[-1].isdigit():
             message_id = int(parts[-1])
-            chat_id = parts[-2]
+            # Manejar enlaces de canales privados (formato c/123456789/123)
+            if 'c/' in url:
+                chat_id = int(parts[parts.index('c') + 1])
+                # Convertir a formato adecuado para canales
+                chat_id = int('-100' + str(chat_id))
+            else:
+                chat_id = parts[-2]
         else:
             chat_id = parts[-1]
             
@@ -674,9 +680,14 @@ async def show_progress(current: int, total: int, status_msg: Message, action: s
         return
     
     try:
+        # Evitar actualizaciones demasiado frecuentes (cada 0.5 segundos)
         now = asyncio.get_event_loop().time()
-        elapsed_time = now - start_time
+        if hasattr(show_progress, 'last_update'):
+            if now - show_progress.last_update < 0.5:
+                return
+        show_progress.last_update = now
         
+        elapsed_time = now - start_time
         if elapsed_time == 0:
             return
             
@@ -691,7 +702,11 @@ async def show_progress(current: int, total: int, status_msg: Message, action: s
         me = None
         if user_client:
             try:
-                me = await user_client.get_me()
+                if hasattr(show_progress, 'user_info'):
+                    me = show_progress.user_info
+                else:
+                    me = await user_client.get_me()
+                    show_progress.user_info = me
             except:
                 pass
         
@@ -761,17 +776,28 @@ async def process_media_message(client: Client, original_message: Message, targe
         # Obtener información del archivo
         media_info = await get_media_info(target_message)
         
-        # Mostrar mensaje inicial
-        await status_msg.edit(
-            f"Task is being Prepared!\n"
-            f"[□□□□□□□□□□□□□] 0.00%\n"
-            f"┠ File: {media_info['file_name']}\n"
-            f"┠ Size: {format_size(media_info['file_size'])}\n"
-            f"┠ Type: {media_info['type'].upper()}\n"
-            f"┠ Status: Starting Download...\n"
-            f"┖ Mode: Telegram"
+        # Asegurar que tenemos un nombre de archivo válido
+        if not media_info['file_name']:
+            media_info['file_name'] = f"{media_info['type']}_{int(time.time())}"
+        
+        # Mostrar mensaje inicial con información detallada
+        initial_message = (
+            f"📥 <b>Preparando Descarga</b>\n\n"
+            f"📁 <b>Archivo:</b> {media_info['file_name']}\n"
+            f"📊 <b>Tamaño:</b> {format_size(media_info['file_size'])}\n"
+            f"📱 <b>Tipo:</b> {media_info['type'].upper()}\n"
         )
-        await asyncio.sleep(2)  # Dar tiempo para leer la info
+        
+        if media_info['type'] == 'video':
+            initial_message += f"🎥 <b>Resolución:</b> {media_info['width']}x{media_info['height']}\n"
+            initial_message += f"⏱ <b>Duración:</b> {format_time(media_info['duration'])}\n"
+        elif media_info['type'] == 'audio':
+            initial_message += f"⏱ <b>Duración:</b> {format_time(media_info['duration'])}\n"
+        
+        initial_message += "\n⏳ Iniciando descarga..."
+        
+        await status_msg.edit(initial_message, parse_mode=ParseMode.HTML)
+        await asyncio.sleep(1)  # Breve pausa para mostrar la info
         
         # Preparar carpeta temporal si es necesario
         temp_path = os.path.join(os.getcwd(), "downloads")
@@ -815,6 +841,17 @@ async def process_media_message(client: Client, original_message: Message, targe
         start_up_time = asyncio.get_event_loop().time()
         try:
             if target_message.video:
+                # Preparar el thumbnail para videos
+                if target_message.video and target_message.video.thumbs:
+                    try:
+                        thumb = await user_client.download_media(
+                            target_message.video.thumbs[0],
+                            file_name=f"thumb_{int(time.time())}.jpg"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error descargando thumbnail: {e}")
+                        thumb = None
+
                 await user_client.send_video(
                     original_message.chat.id,
                     file_path,
@@ -824,7 +861,8 @@ async def process_media_message(client: Client, original_message: Message, targe
                     height=media_info['height'],
                     caption=caption,
                     progress=show_progress,
-                    progress_args=(status_msg, "Subiendo video", start_up_time)
+                    progress_args=(status_msg, "Subiendo video", start_up_time, user_client),
+                    supports_streaming=True
                 )
             elif target_message.document:
                 await user_client.send_document(
