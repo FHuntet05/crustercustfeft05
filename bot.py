@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from pyrogram import Client
+from pyrogram.enums import ParseMode
 
 # Importar componentes de la aplicación DESPUÉS de cargar el .env
 from src.db.mongo_manager import db_instance
@@ -47,15 +48,23 @@ async def main():
     """
     Función principal para inicializar y correr el bot de forma segura.
     """
+    # Cliente Bot
     app = Client(
         SESSION_NAME,
         api_id=int(API_ID),
         api_hash=API_HASH,
         bot_token=BOT_TOKEN,
         plugins=PLUGINS,
-        # Workers de Pyrogram para manejar múltiples updates de Telegram (mensajes, callbacks) a la vez.
-        # No confundir con los workers de procesamiento de FFmpeg.
         workers=20
+    )
+
+    # Cliente UserBot para operaciones restringidas
+    user_client = Client(
+        "user_bot",
+        api_id=int(API_ID),
+        api_hash=API_HASH,
+        session_string=os.getenv("USER_SESSION_STRING"),  # String de sesión del userbot
+        parse_mode=ParseMode.HTML  # Configurar parse_mode por defecto
     )
 
     try:
@@ -64,16 +73,24 @@ async def main():
         await db_instance.init_db()
         logger.info("Conexión con la base de datos establecida y índices asegurados.")
         
-        # 2. Iniciar el cliente de Pyrogram
-        logger.info("Iniciando cliente de Telegram...")
+        # 2. Iniciar los clientes de Telegram
+        logger.info("Iniciando clientes de Telegram...")
         await app.start()
-        logger.info("Cliente de Telegram iniciado correctamente.")
+        await user_client.start()
+        logger.info("Clientes de Telegram iniciados correctamente.")
         
         # Health check y log de información del bot
         bot_info = await app.get_me()
+        user_info = await user_client.get_me()
         logger.info(f"Bot conectado como:")
         logger.info(f"  -> Nombre: {bot_info.first_name}")
         logger.info(f"  -> Username: @{bot_info.username}")
+        logger.info(f"UserBot conectado como:")
+        logger.info(f"  -> Nombre: {user_info.first_name}")
+        logger.info(f"  -> Username: @{user_info.username}")
+        
+        # Guardar el cliente de userbot en un lugar accesible
+        app.user_client = user_client
         
         # 3. Iniciar el worker asíncrono que procesará las tareas en segundo plano
         logger.info("Iniciando el bucle del worker para procesar tareas...")

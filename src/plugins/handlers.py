@@ -509,48 +509,229 @@ async def list_channels_command(client: Client, message: Message):
     
     await message.reply("\n".join(response), parse_mode=ParseMode.HTML)
 
+def format_size(size: int) -> str:
+    """Formatea el tamaño en bytes a una forma legible"""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size < 1024.0:
+            return f"{size:.2f} {unit}"
+        size /= 1024.0
+    return f"{size:.2f} TB"
+
+def format_time(seconds: float) -> str:
+    """Formatea el tiempo en segundos a una forma legible"""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{minutes:.1f}m"
+    hours = minutes / 60
+    minutes = minutes % 60
+    return f"{hours:.0f}h {minutes:.0f}m"
+
+async def show_progress(current: int, total: int, status_msg: Message, action: str, start_time: float):
+    """Muestra una barra de progreso detallada con estadísticas"""
+    if total == 0:
+        return
+    
+    try:
+        now = asyncio.get_event_loop().time()
+        elapsed_time = now - start_time
+        
+        if elapsed_time == 0:
+            return
+            
+        percent = current * 100 / total
+        done = int(percent / 5)
+        pending = 20 - done
+        
+        speed = current / elapsed_time
+        eta = (total - current) / speed if speed > 0 else 0
+        
+        progress_bar = (
+            f"💾 <b>{action}</b>\n\n"
+            f"<code>[{'█' * done}{'░' * pending}]</code> <b>{percent:.1f}%</b>\n\n"
+            f"📊 <b>Progreso:</b> {format_size(current)}/{format_size(total)}\n"
+            f"⚡️ <b>Velocidad:</b> {format_size(speed)}/s\n"
+            f"⏱ <b>Transcurrido:</b> {format_time(elapsed_time)}\n"
+            f"⏳ <b>Restante:</b> {format_time(eta)}"
+        )
+        
+        await status_msg.edit(progress_bar, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.debug(f"Error showing progress: {e}")
+
+async def get_media_info(message: Message) -> dict:
+    """Obtiene información detallada del archivo multimedia"""
+    info = {
+        "file_name": "",
+        "mime_type": "",
+        "file_size": 0,
+        "duration": 0,
+        "width": 0,
+        "height": 0,
+        "type": ""
+    }
+    
+    if message.video:
+        media = message.video
+        info["type"] = "video"
+        info["duration"] = media.duration
+        info["width"] = media.width
+        info["height"] = media.height
+    elif message.document:
+        media = message.document
+        info["type"] = "document"
+    elif message.audio:
+        media = message.audio
+        info["type"] = "audio"
+        info["duration"] = media.duration
+    elif message.photo:
+        media = message.photo
+        info["type"] = "photo"
+        info["width"] = media.width
+        info["height"] = media.height
+    else:
+        return info
+
+    info["file_name"] = getattr(media, "file_name", f"{info['type']}_{int(time.time())}")
+    info["mime_type"] = getattr(media, "mime_type", "")
+    info["file_size"] = getattr(media, "file_size", 0)
+    
+    return info
+
 async def process_media_message(client: Client, original_message: Message, target_message: Message, status_msg: Message):
     """Procesa un mensaje que contiene media para descargarlo y reenviarlo"""
     try:
-        # Actualizar mensaje de estado
-        await status_msg.edit("⏬ Descargando contenido...")
+        # Usar el userbot para las operaciones
+        user_client = client.user_client
+        start_time = asyncio.get_event_loop().time()
+        
+        # Obtener información del archivo
+        media_info = await get_media_info(target_message)
+        
+        # Mostrar información inicial
+        await status_msg.edit(
+            f"📦 <b>Procesando contenido multimedia</b>\n\n"
+            f"<b>Nombre:</b> {media_info['file_name']}\n"
+            f"<b>Tipo:</b> {media_info['type'].upper()}\n"
+            f"<b>Tamaño:</b> {format_size(media_info['file_size'])}\n"
+            f"{'<b>Duración:</b> ' + format_time(media_info['duration']) if media_info['duration'] else ''}\n"
+            f"{'<b>Resolución:</b> ' + f'{media_info['width']}x{media_info['height']}' if media_info['width'] and media_info['height'] else ''}",
+            parse_mode=ParseMode.HTML
+        )
+        await asyncio.sleep(2)  # Dar tiempo para leer la info
         
         # Preparar carpeta temporal si es necesario
         temp_path = os.path.join(os.getcwd(), "downloads")
         os.makedirs(temp_path, exist_ok=True)
         
-        # Descargar el archivo
-        file_path = await target_message.download(
-            file_name=os.path.join(temp_path, target_message.file_name if hasattr(target_message, 'file_name') else "downloaded_file"),
-            progress=progress_callback,
-            progress_args=(status_msg, "⏬ Descargando")
+        # Descargar el archivo usando el userbot
+        start_dl_time = asyncio.get_event_loop().time()
+        file_path = await user_client.download_media(
+            target_message,
+            file_name=os.path.join(temp_path, media_info['file_name']),
+            progress=show_progress,
+            progress_args=(status_msg, "Descargando", start_dl_time)
         )
         
-        # Actualizar estado
-        await status_msg.edit("⏫ Subiendo contenido...")
+        if not file_path:
+            return await status_msg.edit("❌ No se pudo descargar el archivo.")
         
-        # Enviar el archivo
-        if target_message.video:
-            await client.send_video(
-                original_message.chat.id,
-                file_path,
-                progress=progress_callback,
-                progress_args=(status_msg, "⏫ Subiendo")
+        # Mostrar resumen de la descarga
+        dl_time = asyncio.get_event_loop().time() - start_dl_time
+        dl_speed = media_info['file_size'] / dl_time if dl_time > 0 else 0
+        
+        await status_msg.edit(
+            f"✅ <b>Descarga completada</b>\n\n"
+            f"⚡️ <b>Velocidad promedio:</b> {format_size(dl_speed)}/s\n"
+            f"⏱ <b>Tiempo total:</b> {format_time(dl_time)}\n\n"
+            f"🔄 Preparando para subir...",
+            parse_mode=ParseMode.HTML
+        )
+        await asyncio.sleep(1)
+        
+        # Preparar metadatos para la subida
+        caption = target_message.caption or f"@{original_message.from_user.username}"
+        thumb = None
+        
+        if target_message.video and hasattr(target_message.video, 'thumbs'):
+            thumb = await user_client.download_media(target_message.video.thumbs[0])
+        
+        # Iniciar subida
+        start_up_time = asyncio.get_event_loop().time()
+        # Enviar el archivo según su tipo
+        start_up_time = asyncio.get_event_loop().time()
+        try:
+            if target_message.video:
+                await user_client.send_video(
+                    original_message.chat.id,
+                    file_path,
+                    thumb=thumb,
+                    duration=media_info['duration'],
+                    width=media_info['width'],
+                    height=media_info['height'],
+                    caption=caption,
+                    progress=show_progress,
+                    progress_args=(status_msg, "Subiendo video", start_up_time)
+                )
+            elif target_message.document:
+                await user_client.send_document(
+                    original_message.chat.id,
+                    file_path,
+                    thumb=thumb,
+                    caption=caption,
+                    progress=show_progress,
+                    progress_args=(status_msg, "Subiendo documento", start_up_time)
+                )
+            elif target_message.audio:
+                await user_client.send_audio(
+                    original_message.chat.id,
+                    file_path,
+                    duration=media_info['duration'],
+                    caption=caption,
+                    progress=show_progress,
+                    progress_args=(status_msg, "Subiendo audio", start_up_time)
+                )
+            elif target_message.photo:
+                await user_client.send_photo(
+                    original_message.chat.id,
+                    file_path,
+                    caption=caption,
+                    progress=show_progress,
+                    progress_args=(status_msg, "Subiendo foto", start_up_time)
+                )
+                
+            # Mostrar resumen final
+            total_time = asyncio.get_event_loop().time() - start_time
+            up_time = asyncio.get_event_loop().time() - start_up_time
+            up_speed = media_info['file_size'] / up_time if up_time > 0 else 0
+            
+            await status_msg.edit(
+                f"✅ <b>Proceso completado exitosamente</b>\n\n"
+                f"📝 <b>Archivo:</b> {media_info['file_name']}\n"
+                f"📊 <b>Tamaño:</b> {format_size(media_info['file_size'])}\n"
+                f"⚡️ <b>Velocidad de subida:</b> {format_size(up_speed)}/s\n"
+                f"⏱ <b>Tiempo total:</b> {format_time(total_time)}\n\n"
+                f"✨ <i>Contenido procesado y entregado</i>",
+                parse_mode=ParseMode.HTML
             )
-        elif target_message.document:
-            await client.send_document(
-                original_message.chat.id,
-                file_path,
-                progress=progress_callback,
-                progress_args=(status_msg, "⏫ Subiendo")
+            
+        except Exception as e:
+            logger.error(f"Error sending file: {e}")
+            await status_msg.edit(
+                f"❌ <b>Error al enviar el archivo</b>\n\n"
+                f"<code>{str(e)}</code>",
+                parse_mode=ParseMode.HTML
             )
-        elif target_message.audio:
-            await client.send_audio(
-                original_message.chat.id,
-                file_path,
-                progress=progress_callback,
-                progress_args=(status_msg, "⏫ Subiendo")
-            )
+            
+        finally:
+            # Limpiar archivos temporales
+            try:
+                os.remove(file_path)
+                if thumb:
+                    os.remove(thumb)
+            except Exception as e:
+                logger.error(f"Error cleaning temporary files: {e}")
         
         # Limpiar
         try:
