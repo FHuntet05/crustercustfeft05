@@ -368,17 +368,23 @@ async def list_channels_command(client: Client, message: Message):
 async def get_restricted_command(client: Client, message: Message):
     """Inicia el proceso de obtener contenido de un canal restringido"""
     user_id = message.from_user.id
-    
-    # Resetear estado anterior si existe
-    await db_instance.set_user_state(user_id, "idle")
-    
-    # Solicitar enlace del contenido
-    await message.reply(
-        "🔒 <b>Obtener Contenido Restringido</b>\n\n"
-        "Por favor, envíe el enlace directo al contenido que desea descargar.\n"
-        "Debe ser un enlace a un mensaje específico del canal (t.me/c/...).",
-        parse_mode=ParseMode.HTML
-    )
-    
-    # Establecer estado de espera
-    await db_instance.set_user_state(user_id, "waiting_restricted_link")
+    text = message.text.split(maxsplit=1)
+
+    if len(text) < 2:
+        return await message.reply("❌ Por favor, envíe un enlace válido después del comando.")
+
+    url = text[1].strip()
+
+    if not downloader.validate_url(url):
+        return await message.reply("❌ El enlace proporcionado no es válido. Por favor, envíe un enlace de Telegram.")
+
+    try:
+        chat = await client.get_chat(url)
+        if chat:
+            await message.reply(f"✅ El userbot ya está unido al canal: <b>{escape_html(chat.title)}</b>.\nPor favor, envíe el enlace del contenido que desea extraer.", parse_mode=ParseMode.HTML)
+        else:
+            await client.join_chat(url)
+            await message.reply("✅ El userbot se ha unido al canal correctamente. Ahora puede enviar el enlace del contenido que desea extraer.")
+    except Exception as e:
+        logger.error(f"Error al procesar el enlace: {e}", exc_info=True)
+        await message.reply("❌ No se pudo procesar el enlace. Verifique que sea un enlace válido de Telegram.")
