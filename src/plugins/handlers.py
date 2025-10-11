@@ -367,31 +367,92 @@ async def list_channels_command(client: Client, message: Message):
 @Client.on_message(filters.command("get_restricted") & filters.private)
 async def get_restricted_command(client: Client, message: Message):
     """Inicia el proceso de obtener contenido de un canal restringido"""
-    user_id = message.from_user.id
-    text = message.text.split(maxsplit=1)
-
-    if len(text) < 2:
-        return await message.reply("❌ Por favor, envíe un enlace válido después del comando.")
-
-    url = text[1].strip()
-
-    if not downloader.validate_url(url):
-        return await message.reply("❌ El enlace proporcionado no es válido. Por favor, envíe un enlace de Telegram.")
-
     try:
-        chat = await client.get_chat(url)
-        if chat.type in ["private", "group", "supergroup"]:
-            if chat.is_member:
-                await message.reply(f"✅ El userbot ya está unido al canal: <b>{escape_html(chat.title)}</b>.\nPor favor, envíe el enlace del contenido que desea extraer.", parse_mode=ParseMode.HTML)
-            else:
+        # Obtener el enlace del mensaje
+        text = message.text.split(maxsplit=1)
+        
+        if len(text) < 2:
+            return await message.reply("❌ Por favor, envíe un enlace válido después del comando.\nEjemplo: /get_restricted https://t.me/nombre_canal")
+
+        url = text[1].strip()
+        
+        # Validar el formato del enlace
+        if not downloader.validate_url(url):
+            return await message.reply(
+                "❌ El enlace proporcionado no es válido.\n"
+                "Formatos válidos:\n"
+                "• Canal privado: https://t.me/+abc123...\n"
+                "• Canal público: https://t.me/nombre_canal\n"
+                "• Mensaje: https://t.me/nombre_canal/123"
+            )
+
+        status_msg = await message.reply("🔄 Procesando enlace...")
+        
+        try:
+            # Primero intentar unirse si es necesario
+            try:
+                await client.join_chat(url)
+                logger.info(f"Joined successfully: {url}")
+            except Exception as join_error:
+                if "INVITE_REQUEST_SENT" in str(join_error):
+                    return await status_msg.edit("❌ Se ha enviado una solicitud para unirse al canal. Por favor, espere a ser aceptado.")
+                logger.warning(f"Join attempt failed: {str(join_error)}")
+                # Continuamos aunque falle el join, podría estar ya unido
+
+            # Intentar obtener info del chat
+            if '/+' in url or '/joinchat/' in url:  # Enlaces de invitación
+                chat = await client.get_chat(url)
+            else:  # Enlaces públicos o mensajes específicos
+                parts = url.split('/')
+                chat_id = parts[-2] if len(parts) > 4 else parts[-1]
+                chat = await client.get_chat(chat_id)
+
+            # Verificar membresía
+            try:
+                member = await client.get_chat_member(chat.id, "me")
+                is_member = True
+            except Exception:
+                is_member = False
+
+            if not is_member:
+                return await status_msg.edit("❌ No se pudo unir al canal o no tienes acceso. Verifica que el enlace sea válido y que el userbot tenga los permisos necesarios.")
+
+            # Procesar según el tipo de enlace
+            if len(url.split('/')) > 4:  # Es un mensaje específico
+                msg_id = int(url.split('/')[-1])
                 try:
-                    await client.join_chat(url)
-                    await message.reply("✅ El userbot se ha unido al canal correctamente. Ahora puede enviar el enlace del contenido que desea extraer.")
-                except Exception as join_error:
-                    logger.error(f"Error al intentar unirse al canal: {join_error}", exc_info=True)
-                    await message.reply("❌ No se pudo unir al canal. Verifique que el enlace sea válido y que el userbot tenga permisos.")
-        else:
-            await message.reply("❌ El enlace proporcionado no corresponde a un canal válido.")
+                    msg = await client.get_messages(chat.id, msg_id)
+                    if msg and msg.media:
+                        await status_msg.edit("✅ Mensaje encontrado. Iniciando descarga...")
+                        # Aquí iría la lógica de descarga
+                        await client.copy_message(
+                            chat_id=message.chat.id,
+                            from_chat_id=chat.id,
+                            message_id=msg_id
+                        )
+                        await status_msg.delete()
+                    else:
+                        await status_msg.edit("❌ El mensaje no existe o no contiene archivos multimedia.")
+                except Exception as e:
+                    await status_msg.edit(f"❌ Error al obtener el mensaje: {str(e)}")
+            else:  # Es un enlace de canal
+                await status_msg.edit(
+                    f"✅ Conectado al canal: <b>{escape_html(chat.title)}</b>\n"
+                    "📤 Por favor, ahora envía el enlace del mensaje específico que quieres descargar.\n"
+                    "Ejemplo: https://t.me/nombre_canal/123",
+                    parse_mode=ParseMode.HTML
+                )
+
+        except Exception as e:
+            error_msg = str(e)
+            if "INVITE_HASH_EXPIRED" in error_msg:
+                await status_msg.edit("❌ El enlace de invitación ha expirado.")
+            elif "INVITE_REQUEST_SENT" in error_msg:
+                await status_msg.edit("📩 Se ha enviado una solicitud para unirse al canal. Por favor, espere a ser aceptado.")
+            else:
+                await status_msg.edit(f"❌ Error al procesar el enlace: {error_msg}")
+            logger.error(f"Error processing link {url}: {error_msg}")
+
     except Exception as e:
-        logger.error(f"Error al procesar el enlace: {e}", exc_info=True)
-        await message.reply("❌ No se pudo procesar el enlace. Verifique que sea un enlace válido de Telegram.")
+        logger.error(f"Error in get_restricted_command: {str(e)}", exc_info=True)
+        await message.reply("❌ Ocurrió un error inesperado. Por favor, intenta nuevamente.")
