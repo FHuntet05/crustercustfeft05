@@ -201,19 +201,69 @@ async def get_chat_info(client: Client, url: str) -> tuple[bool, str, Optional[U
         user_client = client.user_client
         parts = url.split('/')
         message_id = None
+        chat_id = None
         
-        # Si es un enlace a un mensaje específico
-        if len(parts) > 4 and parts[-1].isdigit():
-            message_id = int(parts[-1])
-            # Manejar enlaces de canales privados (formato c/123456789/123)
-            if 'c/' in url:
-                chat_id = int(parts[parts.index('c') + 1])
-                # Convertir a formato adecuado para canales
-                chat_id = int('-100' + str(chat_id))
-            else:
+        # Extraer información del enlace
+        if 'c/' in url:  # Canal privado
+            try:
+                c_index = parts.index('c')
+                if len(parts) > c_index + 1:
+                    raw_chat_id = parts[c_index + 1]
+                    if raw_chat_id.isdigit():
+                        # Convertir a formato de canal
+                        chat_id = int('-100' + raw_chat_id)
+                        
+                        # Si hay un ID de mensaje
+                        if len(parts) > c_index + 2 and parts[c_index + 2].isdigit():
+                            message_id = int(parts[c_index + 2])
+            except (ValueError, IndexError):
+                return False, "❌ Formato de enlace inválido para canal privado", None, None
+        else:  # Canal público o enlace normal
+            if len(parts) > 4 and parts[-1].isdigit():
+                message_id = int(parts[-1])
                 chat_id = parts[-2]
-        else:
-            chat_id = parts[-1]
+            else:
+                chat_id = parts[-1]
+        
+        if not chat_id:
+            return False, "❌ No se pudo extraer el ID del chat del enlace", None, None
+            
+        logger.info(f"Procesando - Chat ID: {chat_id}, Message ID: {message_id}")
+        
+        try:
+            # Intentar acceder con el usuario bot primero
+            try:
+                chat = await user_client.get_chat(chat_id)
+                logger.info("Chat accedido con usuario bot")
+            except Exception as e:
+                logger.warning(f"No se pudo acceder con usuario bot: {e}")
+                # Intentar con el bot normal
+                chat = await client.get_chat(chat_id)
+                logger.info("Chat accedido con bot normal")
+            
+            # Verificar membresía del usuario bot
+            try:
+                member = await user_client.get_chat_member(chat.id, "me")
+                is_member = True
+                logger.info("Usuario bot es miembro del chat")
+            except Exception:
+                is_member = False
+                logger.warning("Usuario bot no es miembro del chat")
+
+            if not is_member:
+                try:
+                    # Intentar unirse si no es miembro
+                    if 'joinchat' in url or '+' in url:
+                        await user_client.join_chat(url)
+                    else:
+                        await user_client.join_chat(chat.id)
+                    is_member = True
+                    logger.info("Usuario bot se unió al chat exitosamente")
+                except Exception as e:
+                    logger.error(f"Error al unirse al chat: {e}")
+                    if "INVITE_REQUEST_SENT" in str(e):
+                        return False, "📩 Se ha enviado una solicitud para unirse al canal.", None, None
+                    return False, f"❌ No se pudo unir al canal: {str(e)}", None, None
             
         logger.info(f"Processing chat_id: {chat_id}, message_id: {message_id}")
 
@@ -349,10 +399,14 @@ async def text_gatekeeper(client: Client, message: Message):
             logger.info(f"Received Telegram link: {text}")
             
             # Mensaje de estado inicial
-            status_msg = await message.reply("🔄 Analizando enlace...")
+            status_msg = await message.reply(
+                "🔄 <b>Procesando enlace...</b>\n"
+                "Por favor, espere mientras verifico el acceso.",
+                parse_mode=ParseMode.HTML
+            )
             
             try:
-                # Verificar si el enlace tiene formato válido
+                # Validar el formato del enlace
                 if not any(pattern in text for pattern in ['/+', '/joinchat/', 'c/', '/']):
                     return await status_msg.edit(
                         "❌ El enlace proporcionado no es válido.\n\n"
@@ -673,6 +727,29 @@ def format_time(seconds: float) -> str:
     hours = minutes / 60
     minutes = minutes % 60
     return f"{hours:.0f}h {minutes:.0f}m"
+
+def normalize_chat_id(chat_id: Union[str, int]) -> int:
+    """Normaliza un ID de chat al formato correcto de Telegram"""
+    try:
+        # Si es string, intentar convertir a int
+        if isinstance(chat_id, str):
+            if chat_id.startswith('-100'):
+                return int(chat_id)
+            elif chat_id.isdigit():
+                return int('-100' + chat_id)
+            else:
+                return int(chat_id)
+        # Si es int
+        elif isinstance(chat_id, int):
+            if str(chat_id).startswith('-100'):
+                return chat_id
+            else:
+                return int('-100' + str(abs(chat_id)))
+        else:
+            raise ValueError(f"Tipo de chat_id no soportado: {type(chat_id)}")
+    except Exception as e:
+        logger.error(f"Error normalizando chat_id {chat_id}: {e}")
+        raise ValueError(f"No se pudo normalizar el chat_id: {chat_id}")
 
 async def show_progress(current: int, total: int, status_msg: Message, action: str, start_time: float, user_client=None):
     """Muestra una barra de progreso detallada con estadísticas"""
