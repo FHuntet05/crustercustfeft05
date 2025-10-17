@@ -202,9 +202,11 @@ async def get_chat_info(client: Client, url: str) -> tuple[bool, str, Optional[U
         parts = url.split('/')
         message_id = None
         chat_id = None
+        is_private_link = False
         
         # Extraer información del enlace
-        if 'c/' in url:  # Canal privado
+        if 'c/' in url:  # Canal privado (enlace interno)
+            is_private_link = True
             try:
                 c_index = parts.index('c')
                 if len(parts) > c_index + 1:
@@ -216,8 +218,12 @@ async def get_chat_info(client: Client, url: str) -> tuple[bool, str, Optional[U
                         # Si hay un ID de mensaje
                         if len(parts) > c_index + 2 and parts[c_index + 2].isdigit():
                             message_id = int(parts[c_index + 2])
+                    else:
+                        return False, "❌ El ID del canal en el enlace privado no es válido", None, None
+                else:
+                    return False, "❌ Enlace privado incompleto. Debe incluir el ID del canal", None, None
             except (ValueError, IndexError):
-                return False, "❌ Formato de enlace inválido para canal privado", None, None
+                return False, "❌ Formato de enlace privado inválido. Debe ser del tipo: https://t.me/c/ID_CANAL/ID_MENSAJE", None, None
         else:  # Canal público o enlace normal
             if len(parts) > 4 and parts[-1].isdigit():
                 message_id = int(parts[-1])
@@ -232,14 +238,49 @@ async def get_chat_info(client: Client, url: str) -> tuple[bool, str, Optional[U
         
         try:
             # Intentar acceder con el usuario bot primero
+            # Primero intentar con el userbot (tu cuenta personal)
             try:
                 chat = await user_client.get_chat(chat_id)
-                logger.info("Chat accedido con usuario bot")
+                logger.info("Chat accedido con userbot")
+                
+                # Verificar si el userbot es miembro
+                try:
+                    member = await user_client.get_chat_member(chat.id, "me")
+                    is_member = True
+                    logger.info("Userbot ya es miembro del chat")
+                    
+                    # Si es un enlace privado y no hay ID de mensaje, solicitar el enlace específico
+                    if is_private_link and not message_id:
+                        return False, (
+                            "✅ Ya eres miembro de este canal.\n\n"
+                            "📝 Por favor, envía ahora el enlace privado del mensaje que quieres descargar.\n"
+                            "Ejemplo: https://t.me/c/ID_CANAL/ID_MENSAJE"
+                        ), None, None
+                        
+                except Exception:
+                    is_member = False
+                    if is_private_link:
+                        return False, "❌ No tienes acceso a este canal privado. Debes ser miembro para acceder.", None, None
+                
             except Exception as e:
-                logger.warning(f"No se pudo acceder con usuario bot: {e}")
-                # Intentar con el bot normal
-                chat = await client.get_chat(chat_id)
-                logger.info("Chat accedido con bot normal")
+                error_msg = str(e).lower()
+                logger.warning(f"No se pudo acceder con userbot: {e}")
+                
+                if "peer_id_invalid" in error_msg and is_private_link:
+                    return False, "❌ No tienes acceso a este canal privado. Debes ser miembro para acceder.", None, None
+                    
+                # Solo para enlaces públicos, intentar con el bot normal
+                if not is_private_link:
+                    try:
+                        chat = await client.get_chat(chat_id)
+                        logger.info("Chat accedido con bot normal")
+                    except Exception as e:
+                        error_msg = str(e).lower()
+                        if "peer_id_invalid" in error_msg:
+                            return False, "❌ El canal no existe o no es accesible. Verifica que el enlace sea correcto.", None, None
+                        elif "username_not_occupied" in error_msg:
+                            return False, "❌ El nombre de usuario del canal no existe o ya no está en uso.", None, None
+                        return False, f"❌ No se pudo acceder al chat: {str(e)}", None, None
             
             # Verificar membresía del usuario bot
             try:
@@ -261,8 +302,19 @@ async def get_chat_info(client: Client, url: str) -> tuple[bool, str, Optional[U
                     logger.info("Usuario bot se unió al chat exitosamente")
                 except Exception as e:
                     logger.error(f"Error al unirse al chat: {e}")
-                    if "INVITE_REQUEST_SENT" in str(e):
-                        return False, "📩 Se ha enviado una solicitud para unirse al canal.", None, None
+                    error_msg = str(e).lower()
+                    
+                    if "invite_request_sent" in error_msg:
+                        return False, "📩 Se ha enviado una solicitud para unirse al canal. Por favor, espera a que sea aceptada.", None, None
+                    elif "peer_id_invalid" in error_msg:
+                        return False, "❌ El enlace de invitación no es válido o ha expirado.", None, None
+                    elif "username_not_occupied" in error_msg:
+                        return False, "❌ El nombre de usuario del canal ya no existe.", None, None
+                    elif "flood" in error_msg:
+                        return False, "⏳ Has realizado demasiadas solicitudes. Por favor, espera unos minutos antes de intentar nuevamente.", None, None
+                    elif "privacy" in error_msg or "private" in error_msg:
+                        return False, "🔒 No se puede acceder al canal porque es privado. Necesitas una invitación válida.", None, None
+                        
                     return False, f"❌ No se pudo unir al canal: {str(e)}", None, None
             
             logger.info(f"Processing chat_id: {chat_id}, message_id: {message_id}")
