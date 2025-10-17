@@ -17,3 +17,7 @@ spotipy==2.23.0
 
 # Dependencia para descargas genéricas
 requests==2.31.0
+
+# Biblioteca para mostrar barras de progreso
+# Utilizada en descargas y subidas
+tqdm==4.66.1
