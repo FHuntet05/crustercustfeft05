@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional, Union, Tuple, Dict, Any
 
 from pyrogram import Client, filters, StopPropagation
-from pyrogram.types import Message, CallbackQuery, Chat
+from pyrogram.types import Message, CallbackQuery, Chat, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.enums import ParseMode
 from pyrogram.errors import (
     PeerIdInvalid, UsernameNotOccupied, ChannelPrivate, 
@@ -1127,26 +1127,48 @@ async def start_command(client: Client, message: Message):
             "¡Estoy listo para ayudarte! 🚀"
         )
         
-        # Enviar mensaje de bienvenida
-        await message.reply(
-            welcome_message,
-            parse_mode=ParseMode.HTML,
-            reply_markup=build_profiles_keyboard()
-        )
-        
-        # Registrar o actualizar usuario en la base de datos
+        # Registrar o actualizar usuario en la base de datos primero
         try:
             await db_instance.register_user(user_id)
         except Exception as db_error:
             logger.error(f"Error registrando usuario en DB: {db_error}")
+        
+        # Crear teclado básico sin parámetros adicionales
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📥 Descargar Video", callback_data="download_video")],
+            [InlineKeyboardButton("⚙️ Panel de Control", callback_data="open_panel")],
+            [InlineKeyboardButton("ℹ️ Ayuda", callback_data="show_help")]
+        ])
+        
+        # Enviar mensaje de bienvenida con teclado básico
+        await message.reply(
+            welcome_message,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard
+        )
             
     except Exception as e:
-        logger.error(f"Error en comando start: {e}")
-        await message.reply(
-            "❌ <b>Ocurrió un error al iniciar el bot.</b>\n"
-            "Por favor, intenta nuevamente en unos momentos.",
-            parse_mode=ParseMode.HTML
+        logger.error(f"Error en comando start: {e}", exc_info=True)  # Agregado exc_info para más detalles
+        
+        # Mensaje de error más informativo
+        error_message = (
+            "❌ <b>Ocurrió un error al iniciar el bot.</b>\n\n"
+            "Detalles técnicos:\n"
+            f"<code>{escape_html(str(e))}</code>\n\n"
+            "Por favor, intenta nuevamente en unos momentos o contacta al administrador."
         )
+        
+        try:
+            await message.reply(
+                error_message,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as reply_error:
+            # Si falla incluso el mensaje de error, intentar un mensaje simple
+            try:
+                await message.reply("Error al iniciar. Por favor, intenta más tarde.")
+            except:
+                pass  # Si todo falla, al menos tenemos el error en los logs
 
 @Client.on_message(filters.private & filters.video, group=1)
 async def handle_direct_video(client: Client, message: Message):
@@ -1176,10 +1198,20 @@ async def handle_direct_video(client: Client, message: Message):
             f"📋 El video ha sido agregado al panel."
         )
         
+        # Construir el mensaje y teclado para el panel
+        panel_message = (
+            f"{info_message}\n\n"
+            f"✨ <b>Acciones disponibles:</b>\n"
+            f"• Procesar video\n"
+            f"• Cortar/recortar\n"
+            f"• Extraer audio"
+        )
+        
+        # Usar el teclado simplificado sin parámetros
         await status_msg.edit(
-            info_message,
+            panel_message,
             parse_mode=ParseMode.HTML,
-            reply_markup=build_detailed_format_menu()
+            reply_markup=build_detailed_format_menu()  # Ahora acepta None por defecto
         )
         
         # Registrar el video en la base de datos

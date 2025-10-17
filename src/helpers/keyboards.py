@@ -162,18 +162,35 @@ def build_thumbnail_menu(task_id: str, config: Dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔙 Volver", callback_data=f"p_open_{task_id}")]
     ])
 
-def build_detailed_format_menu(url_info_id: str, formats: List[Dict]) -> InlineKeyboardMarkup:
+def build_detailed_format_menu(url_info_id: str = None, formats: List[Dict] = None) -> InlineKeyboardMarkup:
+    """
+    Construye el menú de formatos detallados.
+    Si no se proporcionan parámetros, devuelve un menú básico para videos.
+    """
     keyboard = []
-    video_formats = sorted([f for f in formats if f.get('vcodec', 'none') != 'none' and f.get('height')], key=lambda x: x['height'], reverse=True)
-    for f in video_formats[:6]:
-        label = f"🎬 {f['height']}p ({f['ext']})"
-        if fsize := f.get('filesize'): label += f" - {format_bytes(fsize)}"
-        keyboard.append([InlineKeyboardButton(label, callback_data=f"set_dlformat_{url_info_id}_{f['format_id']}")])
-    keyboard.extend([
-        [InlineKeyboardButton("🎵 Mejor Audio (MP3)", callback_data=f"set_dlformat_{url_info_id}_mp3")],
-        [InlineKeyboardButton("🏆 Mejor Calidad General", callback_data=f"set_dlformat_{url_info_id}_best")],
-        [InlineKeyboardButton("❌ Cancelar", callback_data=f"cancel_search_session")]
-    ])
+    
+    if url_info_id and formats:
+        # Menú detallado para descarga de videos
+        video_formats = sorted([f for f in formats if f.get('vcodec', 'none') != 'none' and f.get('height')], 
+                             key=lambda x: x['height'], reverse=True)
+        for f in video_formats[:6]:
+            label = f"🎬 {f['height']}p ({f['ext']})"
+            if fsize := f.get('filesize'): label += f" - {format_bytes(fsize)}"
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"set_dlformat_{url_info_id}_{f['format_id']}")])
+        keyboard.extend([
+            [InlineKeyboardButton("🎵 Mejor Audio (MP3)", callback_data=f"set_dlformat_{url_info_id}_mp3")],
+            [InlineKeyboardButton("🏆 Mejor Calidad General", callback_data=f"set_dlformat_{url_info_id}_best")],
+        ])
+    else:
+        # Menú básico para videos locales
+        keyboard.extend([
+            [InlineKeyboardButton("🎬 Procesar Video", callback_data="process_video")],
+            [InlineKeyboardButton("✂️ Cortar Video", callback_data="trim_video")],
+            [InlineKeyboardButton("🎵 Extraer Audio", callback_data="extract_audio")],
+        ])
+    
+    # Botón de cancelar común para ambos casos
+    keyboard.append([InlineKeyboardButton("❌ Cancelar", callback_data="cancel_operation")])
     return InlineKeyboardMarkup(keyboard)
 
 def build_search_results_keyboard(all_results: List[Dict], search_id: str, page: int = 1, page_size: int = 5) -> InlineKeyboardMarkup:
