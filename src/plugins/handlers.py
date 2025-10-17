@@ -2,7 +2,7 @@
 
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 import asyncio
 import os
 import time
@@ -33,6 +33,12 @@ try:
     ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))
 except (TypeError, ValueError):
     ADMIN_USER_ID = 0
+
+# Definir las variables globales dentro de las funciones para asegurar su acceso
+base_download_dir = "downloads"
+os.makedirs(base_download_dir, exist_ok=True)
+
+start_date = datetime(2024, 4, 1, tzinfo=timezone.utc)  # Mensajes desde abril de 2024 en adelante
 
 @Client.on_message(filters.private & filters.text & filters.regex(r"^/"), group=-1)
 async def state_guardian(client: Client, message: Message):
@@ -1226,3 +1232,60 @@ async def get_restricted_command(client: Client, message: Message):
     except Exception as e:
         logger.error(f"Error in get_restricted_command: {str(e)}", exc_info=True)
         await message.reply("❌ Ocurrió un error inesperado. Por favor, intenta nuevamente.")
+
+def download_files_with_progress(client, message, file_path):
+    with tqdm(total=message.video.file_size, unit='B', unit_scale=True, desc=f"Downloading {os.path.basename(file_path)}") as pbar:
+        def progress_callback(current, total):
+            pbar.update(current - pbar.n)
+
+        try:
+            client.download_media(message.video.file_id, file_path, progress=progress_callback)
+            pbar.close()
+        except Exception as e:
+            pbar.close()
+            print(f"Failed to download {file_path}: {e}")
+
+def download_files_from_private_channels(client):
+    print("Fetching private channels...")
+
+    dialogs = client.get_dialogs()
+
+    private_channels = [
+        dialog.chat for dialog in dialogs if isinstance(dialog.chat, Chat) and dialog.chat.username is None
+    ]
+
+    if not private_channels:
+        print("No private channels found.")
+        return
+
+    print(f"Found {len(private_channels)} private channels.")
+
+    for channel in private_channels:
+        channel_name = sanitize_filename(channel.title)
+        channel_dir = os.path.join(base_download_dir, channel_name)
+
+        os.makedirs(channel_dir, exist_ok=True)
+        print(f"\nProcessing channel: {channel_name}")
+
+        messages = [
+            msg for msg in client.iter_history(channel.id)
+            if msg.video and msg.date >= start_date
+        ]
+
+        if not messages:
+            print(f"No media found in {channel_name} from April 2024 onwards.")
+            continue
+
+        for message in tqdm(messages, desc=f"Messages in {channel_name}", unit="msg"):
+            file_path = os.path.join(channel_dir, sanitize_filename(message.video.file_name or f"file_{message.id}"))
+            if os.path.exists(file_path):
+                print(f"File already exists, skipping: {file_path}")
+            else:
+                download_files_with_progress(client, message, file_path)
+
+@Client.on_message(filters.command("download_private") & filters.private)
+async def download_private_command(client: Client, message: Message):
+    """Manejador para descargar archivos de canales privados."""
+    await message.reply("🔄 Iniciando descarga de archivos desde canales privados...")
+    download_files_from_private_channels(client)
+    await message.reply("✅ Descarga completada.")
