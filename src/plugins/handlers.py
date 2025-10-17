@@ -591,16 +591,107 @@ async def handle_telegram_link(client: Client, message: Message, url: str = None
                     )
             
             except PeerIdInvalid:
-                # Este es el caso crítico: PEER_ID_INVALID
+                # Implementación de resiliencia para PeerIdInvalid
                 await status_msg.edit(
-                    "❌ <b>No tengo acceso a este canal privado.</b>\n\n"
-                    "Para acceder a canales privados, necesito:\n"
-                    "1. Un enlace de invitación (t.me/+...)\n"
-                    "2. Ser añadido manualmente al canal\n\n"
-                    "Por favor, envíame un enlace de invitación para poder unirme.",
+                    "🔄 <b>Sincronizando caché de sesión...</b>\n\n"
+                    "Estoy verificando mi acceso a todos los canales.\n"
+                    "Por favor, espera un momento...",
                     parse_mode=ParseMode.HTML
                 )
-                return
+
+                try:
+                    # Intentar refrescar la caché iterando a través de los diálogos
+                    found_in_dialogs = False
+                    dialog_count = 0
+                    
+                    async for dialog in user_client.get_dialogs():
+                        dialog_count += 1
+                        if dialog.chat.id == chat_id:
+                            found_in_dialogs = True
+                            logger.info(f"Canal {chat_id} encontrado durante el refresco de diálogos")
+                            break
+                            
+                        # Actualizar mensaje de estado cada 20 diálogos
+                        if dialog_count % 20 == 0:
+                            await status_msg.edit(
+                                f"🔄 <b>Sincronizando caché de sesión...</b>\n\n"
+                                f"Chats procesados: {dialog_count}\n"
+                                f"Buscando acceso al canal...",
+                                parse_mode=ParseMode.HTML
+                            )
+                    
+                    if found_in_dialogs:
+                        await status_msg.edit(
+                            "✅ <b>¡Canal encontrado!</b>\n\n"
+                            "Intentando acceder nuevamente...",
+                            parse_mode=ParseMode.HTML
+                        )
+                        
+                        # Intentar acceder al chat nuevamente después del refresco
+                        try:
+                            chat = await user_client.get_chat(chat_id)
+                            
+                            if message_id:
+                                await status_msg.edit(f"🔄 Accediendo al mensaje {message_id}...")
+                                target_message = await user_client.get_messages(chat.id, message_id)
+                                
+                                if not target_message:
+                                    await status_msg.edit(
+                                        "❌ <b>No se encontró el mensaje especificado.</b>",
+                                        parse_mode=ParseMode.HTML
+                                    )
+                                    return
+                                    
+                                if not target_message.media:
+                                    await status_msg.edit(
+                                        "❌ <b>El mensaje no contiene archivos multimedia.</b>",
+                                        parse_mode=ParseMode.HTML
+                                    )
+                                    return
+                                    
+                                # Procesar y descargar el mensaje
+                                await process_media_message(client, original_message, target_message, status_msg)
+                            else:
+                                await status_msg.edit(
+                                    f"✅ <b>Acceso verificado al canal privado</b>\n\n"
+                                    f"Nombre: <b>{escape_html(chat.title)}</b>\n\n"
+                                    f"📤 Ahora envía el enlace del mensaje específico que quieres descargar.\n"
+                                    f"Ejemplo: <code>https://t.me/c/{raw_chat_id}/123</code>",
+                                    parse_mode=ParseMode.HTML
+                                )
+                                
+                        except PeerIdInvalid:
+                            logger.error(f"PeerIdInvalid persistente para {chat_id} incluso después del refresco")
+                            await status_msg.edit(
+                                "❌ <b>Error persistente de acceso</b>\n\n"
+                                "A pesar de encontrar el canal en mis diálogos, no puedo acceder.\n"
+                                "Esto puede indicar un problema con los permisos o la sesión.\n\n"
+                                "Por favor, intenta:\n"
+                                "1. Enviar un nuevo enlace de invitación (t.me/+...)\n"
+                                "2. Verificar que el userbot siga siendo miembro del canal",
+                                parse_mode=ParseMode.HTML
+                            )
+                            return
+                    else:
+                        await status_msg.edit(
+                            "❌ <b>No tengo acceso a este canal privado.</b>\n\n"
+                            "No encontré el canal en mi lista de diálogos.\n"
+                            "Posibles soluciones:\n"
+                            "1. Envía un enlace de invitación (t.me/+...)\n"
+                            "2. Asegúrate de que el userbot sea miembro del canal",
+                            parse_mode=ParseMode.HTML
+                        )
+                        return
+                        
+                except Exception as refresh_error:
+                    logger.error(f"Error durante el refresco de diálogos: {refresh_error}")
+                    await status_msg.edit(
+                        "❌ <b>Error durante la sincronización</b>\n\n"
+                        f"No se pudo completar el proceso: {escape_html(str(refresh_error))}\n\n"
+                        "Por favor, intenta nuevamente o proporciona un enlace de invitación.",
+                        parse_mode=ParseMode.HTML
+                    )
+                    return
             except Exception as e:
                 logger.error(f"Error accediendo al canal privado {chat_id}: {e}")
                 await status_msg.edit(
