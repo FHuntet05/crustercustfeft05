@@ -112,31 +112,51 @@ async def force_dialog_sync(client: Client, chat_id: int, status_msg: Message = 
         return False
 
 def normalize_chat_id(chat_id: Union[str, int]) -> int:
-    """Normaliza un ID de chat al formato correcto de Telegram (-100...)."""
+    """
+    Normaliza un ID de chat al formato correcto de Telegram (-100...).
+    
+    Args:
+        chat_id: ID del chat a normalizar (string o int)
+        
+    Returns:
+        int: ID del chat normalizado con el formato -100...
+        
+    Esta función maneja varios casos:
+    1. IDs que ya tienen el prefijo -100
+    2. IDs positivos que necesitan el prefijo -100
+    3. IDs negativos que necesitan convertirse al formato correcto
+    """
     try:
-        # Si es string, intentar convertir a int
-        if isinstance(chat_id, str):
-            if chat_id.startswith('-100'):
-                return int(chat_id)
-            elif chat_id.isdigit():
-                return int('-100' + chat_id)
-            else:
-                return int(chat_id)
-        # Si es int
-        elif isinstance(chat_id, int):
-            chat_id_str = str(chat_id)
-            if chat_id_str.startswith('-100'):
-                return chat_id
-            elif chat_id < 0:
-                # Posiblemente ya es un ID de grupo/canal sin el formato -100
-                return int('-100' + chat_id_str[1:])
-            else:
-                return int('-100' + str(abs(chat_id)))
+        # Convertir a string para manipulación uniforme
+        chat_id_str = str(chat_id)
+        
+        # Remover cualquier espacio en blanco
+        chat_id_str = chat_id_str.strip()
+        
+        # Caso 1: Ya tiene el formato correcto -100...
+        if chat_id_str.startswith('-100'):
+            return int(chat_id_str)
+            
+        # Caso 2: Es un número positivo (necesita -100)
+        if chat_id_str.isdigit():
+            return int(f'-100{chat_id_str}')
+            
+        # Caso 3: Es un número negativo
+        if chat_id_str.startswith('-'):
+            # Remover el signo negativo y agregar -100
+            return int(f'-100{chat_id_str[1:]}')
+            
+        # Si llegamos aquí, intentar convertir directamente
+        numeric_id = int(chat_id_str)
+        if numeric_id > 0:
+            return int(f'-100{numeric_id}')
         else:
-            raise ValueError(f"Tipo de chat_id no soportado: {type(chat_id)}")
+            return int(f'-100{abs(numeric_id)}')
+            
     except Exception as e:
-        logger.error(f"Error normalizando chat_id {chat_id}: {e}")
-        raise ValueError(f"No se pudo normalizar el chat_id: {chat_id}")
+        error_msg = f"Error normalizando chat_id {chat_id}: {e}"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
 
 def parse_telegram_url(url: str) -> Dict[str, Any]:
     """
@@ -708,17 +728,66 @@ async def handle_telegram_link(client: Client, message: Message, url: str = None
                             )
                             
                             try:
-                                # Intentar reconectar el cliente
-                                await user_client.disconnect()
+                                await status_msg.edit(
+                                    "🔄 <b>Reiniciando sesión...</b>\n"
+                                    "Esto puede tomar unos momentos.",
+                                    parse_mode=ParseMode.HTML
+                                )
+                                
+                                # Forzar reconexión del cliente
+                                try:
+                                    await user_client.disconnect()
+                                except Exception:
+                                    pass
+                                    
                                 await asyncio.sleep(2)
-                                await user_client.connect()
-                                await asyncio.sleep(1)
+                                
+                                # Intentar reconectar varias veces si es necesario
+                                for attempt in range(3):
+                                    try:
+                                        if not user_client.is_connected:
+                                            await user_client.connect()
+                                        
+                                        # Verificar que realmente estamos conectados
+                                        me = await user_client.get_me()
+                                        if me:
+                                            logger.info(f"Reconexión exitosa después del intento {attempt + 1}")
+                                            break
+                                    except Exception as conn_error:
+                                        logger.warning(f"Intento de reconexión {attempt + 1} falló: {conn_error}")
+                                        await asyncio.sleep(2)
+                                
+                                await status_msg.edit(
+                                    "🔄 <b>Verificando acceso...</b>\n"
+                                    "Realizando comprobación final.",
+                                    parse_mode=ParseMode.HTML
+                                )
+                                
+                                # Esperar a que la sesión se estabilice
+                                await asyncio.sleep(2)
                                 
                                 # Intentar sincronización una última vez
                                 found_in_dialogs = await force_dialog_sync(user_client, chat_id, status_msg)
+                                
+                                if not found_in_dialogs:
+                                    # Último intento: acceso directo
+                                    try:
+                                        chat = await user_client.get_chat(chat_id)
+                                        if chat:
+                                            found_in_dialogs = True
+                                            logger.info(f"Acceso recuperado a {chat_id} después de reconexión")
+                                    except Exception as final_error:
+                                        logger.error(f"Error en intento final de acceso: {final_error}")
+                                        
                             except Exception as e:
                                 logger.error(f"Error durante la reconexión: {e}")
                                 found_in_dialogs = False
+                                await status_msg.edit(
+                                    "❌ <b>Error de conexión</b>\n"
+                                    "No se pudo restablecer la sesión.\n"
+                                    "Por favor, intenta nuevamente en unos momentos.",
+                                    parse_mode=ParseMode.HTML
+                                )
                             
                         # Actualizar mensaje de estado cada 20 diálogos
                         if dialog_count % 20 == 0:
@@ -1030,6 +1099,127 @@ async def process_media_message(client: Client, original_message: Message, targe
             logger.error(f"Error al limpiar archivos temporales: {cleanup_error}")
 
 # --- Manejadores de Pyrogram ---
+
+@Client.on_message(filters.command("start") & filters.private)
+async def start_command(client: Client, message: Message):
+    """Maneja el comando /start."""
+    try:
+        # Obtener información del usuario
+        user_id = message.from_user.id
+        first_name = message.from_user.first_name
+        
+        # Mensaje de bienvenida personalizado con el nombre del usuario
+        welcome_message = (
+            f"👋 ¡Hola {first_name}!\n\n"
+            "🤖 Soy tu asistente para descargar contenido multimedia de Telegram.\n\n"
+            "📱 <b>¿Qué puedo hacer?</b>\n"
+            "• Descargar videos de canales privados\n"
+            "• Procesar archivos multimedia\n"
+            "• Gestionar descargas masivas\n\n"
+            "🔑 <b>Comandos principales:</b>\n"
+            "• /start - Muestra este mensaje\n"
+            "• /get_restricted - Descarga de canales privados\n"
+            "• /panel - Accede al panel de control\n\n"
+            "📤 También puedes enviarme directamente:\n"
+            "• Enlaces de Telegram (t.me/...)\n"
+            "• Enlaces de invitación a canales\n"
+            "• Videos para procesar\n\n"
+            "¡Estoy listo para ayudarte! 🚀"
+        )
+        
+        # Enviar mensaje de bienvenida
+        await message.reply(
+            welcome_message,
+            parse_mode=ParseMode.HTML,
+            reply_markup=build_profiles_keyboard()
+        )
+        
+        # Registrar o actualizar usuario en la base de datos
+        try:
+            await db_instance.register_user(user_id)
+        except Exception as db_error:
+            logger.error(f"Error registrando usuario en DB: {db_error}")
+            
+    except Exception as e:
+        logger.error(f"Error en comando start: {e}")
+        await message.reply(
+            "❌ <b>Ocurrió un error al iniciar el bot.</b>\n"
+            "Por favor, intenta nuevamente en unos momentos.",
+            parse_mode=ParseMode.HTML
+        )
+
+@Client.on_message(filters.private & filters.video, group=1)
+async def handle_direct_video(client: Client, message: Message):
+    """Maneja videos enviados directamente al bot."""
+    try:
+        # Enviar mensaje de estado inicial
+        status_msg = await message.reply(
+            "🎥 <b>Video recibido</b>\n"
+            "Procesando información...",
+            parse_mode=ParseMode.HTML
+        )
+        
+        # Obtener información del video
+        video_info = await get_media_info(message)
+        
+        if not video_info["file_name"]:
+            video_info["file_name"] = f"video_{int(time.time())}.mp4"
+            
+        # Mostrar información del video
+        info_message = (
+            f"📹 <b>Detalles del Video</b>\n\n"
+            f"📁 <b>Nombre:</b> {escape_html(video_info['file_name'])}\n"
+            f"📊 <b>Tamaño:</b> {format_size(video_info['file_size'])}\n"
+            f"🎬 <b>Duración:</b> {format_time(video_info['duration'])}\n"
+            f"📺 <b>Resolución:</b> {video_info['width']}x{video_info['height']}\n\n"
+            f"⚙️ <b>Estado:</b> Listo para procesar\n"
+            f"📋 El video ha sido agregado al panel."
+        )
+        
+        await status_msg.edit(
+            info_message,
+            parse_mode=ParseMode.HTML,
+            reply_markup=build_detailed_format_menu()
+        )
+        
+        # Registrar el video en la base de datos
+        try:
+            video_data = {
+                "user_id": message.from_user.id,
+                "file_name": video_info["file_name"],
+                "file_size": video_info["file_size"],
+                "duration": video_info["duration"],
+                "width": video_info["width"],
+                "height": video_info["height"],
+                "mime_type": video_info["mime_type"],
+                "message_id": message.id,
+                "status": "pending",
+                "created_at": datetime.now(timezone.utc)
+            }
+            await db_instance.add_pending_video(video_data)
+            
+        except Exception as db_error:
+            logger.error(f"Error registrando video en DB: {db_error}")
+            await status_msg.edit(
+                f"{info_message}\n\n"
+                "⚠️ <b>Advertencia:</b> No se pudo registrar en la base de datos.",
+                parse_mode=ParseMode.HTML
+            )
+            
+    except Exception as e:
+        logger.error(f"Error procesando video: {e}")
+        if 'status_msg' in locals():
+            await status_msg.edit(
+                "❌ <b>Error al procesar el video</b>\n"
+                f"Detalles: {escape_html(str(e))}",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await message.reply(
+                "❌ <b>Error al procesar el video</b>\n"
+                "Por favor, intenta nuevamente.",
+                parse_mode=ParseMode.HTML
+            )
 
 @Client.on_message(filters.private & filters.text & filters.regex(r"^/"), group=-1)
 async def state_guardian(client: Client, message: Message):
