@@ -506,7 +506,7 @@ async def text_gatekeeper(client: Client, message: Message):
                                 await user_client.join_chat(text)
                                 await status_msg.edit("✅ Unido al canal. Accediendo al contenido...")
                             except Exception as e:
-                                return await status_msg.edit(f"❌ No se pudo unir al canal: {str(e)}")
+                                return await status_msg.edit(f"❌ No se pudo unirse al canal: {str(e)}")
                         
                         # Intentar obtener el mensaje
                         target_message = await user_client.get_messages(target_chat.id, message_id)
@@ -1289,3 +1289,81 @@ async def download_private_command(client: Client, message: Message):
     await message.reply("🔄 Iniciando descarga de archivos desde canales privados...")
     download_files_from_private_channels(client)
     await message.reply("✅ Descarga completada.")
+
+@Client.on_message(filters.text & filters.private)
+async def handle_links(client: Client, message: Message):
+    """Manejador automático para procesar enlaces enviados por el usuario."""
+    user_client = client.user_client
+    text = message.text.strip()
+
+    if "t.me/" not in text:
+        await message.reply("❌ Por favor, envía un enlace válido de Telegram.")
+        return
+
+    if "+" in text or "joinchat" in text:
+        # Enlace de invitación a canal privado
+        try:
+            response = await join_channel(user_client, text)
+            await message.reply(response)
+            if "✅ Unido" in response:
+                await message.reply("✅ Ya estoy unido al canal. Envíame el enlace del archivo a descargar.")
+        except Exception as e:
+            await message.reply(f"❌ Error al procesar el enlace: {str(e)}")
+
+    elif "c/" in text:
+        # Enlace privado con ID de canal y mensaje
+        try:
+            parts = text.split("/")
+            chat_id = int("-100" + parts[-2])
+            message_id = int(parts[-1])
+
+            if await is_member(user_client, chat_id):
+                target_message = await user_client.get_messages(chat_id, message_id)
+                if target_message:
+                    await download_and_forward_file(user_client, target_message, message.chat.id)
+                else:
+                    await message.reply("❌ No se pudo encontrar el mensaje especificado.")
+            else:
+                await message.reply("❌ No tienes acceso al canal. Usa un enlace de invitación válido.")
+        except Exception as e:
+            await message.reply(f"❌ Error al procesar el enlace: {str(e)}")
+    else:
+        await message.reply("❌ Formato de enlace no reconocido.")
+
+# Asegurar que las funciones necesarias estén definidas y accesibles
+
+async def join_channel(user_client, url: str) -> str:
+    """Intenta unirse a un canal usando el userbot."""
+    try:
+        chat = await user_client.join_chat(url)
+        return f"✅ Unido al canal: {chat.title}"
+    except PeerIdInvalid:
+        return "❌ El enlace proporcionado no es válido o el canal no existe."
+    except UsernameNotOccupied:
+        return "❌ El nombre de usuario del canal no está ocupado por nadie."
+    except Exception as e:
+        return f"❌ Error al unirse al canal: {str(e)}"
+
+async def is_member(user_client, chat_id: int) -> bool:
+    """Verifica si el userbot ya es miembro de un canal."""
+    try:
+        await user_client.get_chat_member(chat_id, "me")
+        return True
+    except Exception:
+        return False
+
+async def download_and_forward_file(user_client, message, target_chat_id: int):
+    """Descarga un archivo y lo reenvía al usuario."""
+    try:
+        file_path = await user_client.download_media(
+            message,
+            progress=tqdm,
+            progress_args=("Descargando archivo",)
+        )
+        await user_client.send_document(
+            target_chat_id,
+            file_path,
+            caption=message.caption or "Archivo reenviado"
+        )
+    except Exception as e:
+        return f"❌ Error al descargar o reenviar el archivo: {str(e)}"
