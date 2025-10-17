@@ -265,7 +265,10 @@ async def get_chat_info(client: Client, url: str) -> tuple[bool, str, Optional[U
                         return False, "📩 Se ha enviado una solicitud para unirse al canal.", None, None
                     return False, f"❌ No se pudo unir al canal: {str(e)}", None, None
             
-        logger.info(f"Processing chat_id: {chat_id}, message_id: {message_id}")
+            logger.info(f"Processing chat_id: {chat_id}, message_id: {message_id}")
+        except Exception as e:
+            logger.error(f"Error accessing chat: {e}")
+            return False, f"❌ Error al acceder al chat: {str(e)}", None, None
 
         try:
             # Intentar obtener información del chat
