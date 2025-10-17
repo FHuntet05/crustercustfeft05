@@ -50,6 +50,67 @@ os.makedirs(base_download_dir, exist_ok=True)
 
 # --- Funciones de utilidad para manejo de enlaces ---
 
+async def force_dialog_sync(client: Client, chat_id: int, status_msg: Message = None) -> bool:
+    """
+    Fuerza una sincronización de diálogos para resolver problemas de caché de PeerIdInvalid.
+    
+    Args:
+        client: Cliente de Pyrogram
+        chat_id: ID del chat a buscar
+        status_msg: Mensaje opcional para actualizar el progreso
+        
+    Returns:
+        bool: True si se encontró el chat en los diálogos, False en caso contrario
+    """
+    try:
+        # Primer intento: sincronización rápida
+        if status_msg:
+            await status_msg.edit(
+                "🔄 <b>Sincronizando caché...</b>\n"
+                "Buscando el canal en los diálogos recientes...",
+                parse_mode=ParseMode.HTML
+            )
+        
+        async for dialog in client.get_dialogs(limit=50):
+            if dialog.chat.id == chat_id:
+                logger.info(f"Canal {chat_id} encontrado en sincronización rápida")
+                return True
+                
+        # Segundo intento: sincronización profunda
+        if status_msg:
+            await status_msg.edit(
+                "🔄 <b>Realizando sincronización profunda...</b>\n"
+                "Esto puede tomar un momento...",
+                parse_mode=ParseMode.HTML
+            )
+            
+        dialog_count = 0
+        async for dialog in client.get_dialogs():
+            dialog_count += 1
+            if dialog.chat.id == chat_id:
+                logger.info(f"Canal {chat_id} encontrado en sincronización profunda")
+                return True
+                
+            if status_msg and dialog_count % 50 == 0:
+                await status_msg.edit(
+                    f"🔄 <b>Sincronización en progreso...</b>\n"
+                    f"Chats procesados: {dialog_count}",
+                    parse_mode=ParseMode.HTML
+                )
+                
+        logger.warning(f"Canal {chat_id} no encontrado después de sincronización completa")
+        return False
+        
+    except Exception as e:
+        logger.error(f"Error durante la sincronización de diálogos: {e}")
+        if status_msg:
+            await status_msg.edit(
+                "❌ <b>Error durante la sincronización</b>\n"
+                f"Detalles: {escape_html(str(e))}",
+                parse_mode=ParseMode.HTML
+            )
+        return False
+
 def normalize_chat_id(chat_id: Union[str, int]) -> int:
     """Normaliza un ID de chat al formato correcto de Telegram (-100...)."""
     try:
@@ -380,6 +441,30 @@ async def handle_telegram_link(client: Client, message: Message, url: str = None
             
             try:
                 chat = await user_client.join_chat(url)
+                
+                # Forzar sincronización inmediata después de unirse
+                await status_msg.edit(
+                    "🔄 <b>Unido al canal. Sincronizando caché...</b>\n"
+                    "Esto puede tomar unos segundos...",
+                    parse_mode=ParseMode.HTML
+                )
+                
+                # Forzar actualización de diálogos
+                dialog_count = 0
+                async for dialog in user_client.get_dialogs(limit=100):
+                    dialog_count += 1
+                    if dialog.chat.id == chat.id:
+                        break
+                        
+                # Esperar un momento para que Telegram procese la unión
+                await asyncio.sleep(2)
+                
+                # Intentar obtener el chat nuevamente para asegurar la sincronización
+                try:
+                    chat = await user_client.get_chat(chat.id)
+                except Exception as e:
+                    logger.warning(f"Error en segunda verificación del chat: {e}")
+                
                 await status_msg.edit(
                     f"✅ <b>¡Unido exitosamente al canal!</b>\n\n"
                     f"Nombre: <b>{escape_html(chat.title)}</b>\n\n"
@@ -536,6 +621,9 @@ async def handle_telegram_link(client: Client, message: Message, url: str = None
             message_id = parsed_url["message_id"]
             raw_chat_id = parsed_url["raw_chat_id"]
             
+            # Guardar referencia al mensaje original para uso en callbacks
+            original_message = message
+            
             if not chat_id:
                 await status_msg.edit(
                     "❌ <b>No se pudo procesar el ID del canal.</b>\n\n"
@@ -591,25 +679,46 @@ async def handle_telegram_link(client: Client, message: Message, url: str = None
                     )
             
             except PeerIdInvalid:
-                # Implementación de resiliencia para PeerIdInvalid
+                # Implementar múltiples intentos de recuperación
+                logger.warning(f"PeerIdInvalid inicial para {chat_id}. Iniciando proceso de recuperación...")
+                
                 await status_msg.edit(
-                    "🔄 <b>Sincronizando caché de sesión...</b>\n\n"
-                    "Estoy verificando mi acceso a todos los canales.\n"
-                    "Por favor, espera un momento...",
+                    "🔄 <b>Verificando acceso al canal...</b>\n"
+                    "Iniciando proceso de sincronización...",
                     parse_mode=ParseMode.HTML
                 )
-
+                
                 try:
-                    # Intentar refrescar la caché iterando a través de los diálogos
-                    found_in_dialogs = False
-                    dialog_count = 0
-                    
-                    async for dialog in user_client.get_dialogs():
-                        dialog_count += 1
-                        if dialog.chat.id == chat_id:
-                            found_in_dialogs = True
-                            logger.info(f"Canal {chat_id} encontrado durante el refresco de diálogos")
-                            break
+                    # Primer intento: Esperar y reintentar directamente
+                    await asyncio.sleep(2)
+                    try:
+                        chat = await user_client.get_chat(chat_id)
+                        logger.info(f"Acceso recuperado al canal {chat_id} después de una breve espera")
+                        found_in_dialogs = True
+                    except PeerIdInvalid:
+                        # Segundo intento: Forzar sincronización de diálogos
+                        found_in_dialogs = await force_dialog_sync(user_client, chat_id, status_msg)
+                        
+                        if not found_in_dialogs:
+                            # Tercer intento: Forzar recarga de sesión
+                            await status_msg.edit(
+                                "🔄 <b>Intentando reconexión...</b>\n"
+                                "Por favor, espera un momento...",
+                                parse_mode=ParseMode.HTML
+                            )
+                            
+                            try:
+                                # Intentar reconectar el cliente
+                                await user_client.disconnect()
+                                await asyncio.sleep(2)
+                                await user_client.connect()
+                                await asyncio.sleep(1)
+                                
+                                # Intentar sincronización una última vez
+                                found_in_dialogs = await force_dialog_sync(user_client, chat_id, status_msg)
+                            except Exception as e:
+                                logger.error(f"Error durante la reconexión: {e}")
+                                found_in_dialogs = False
                             
                         # Actualizar mensaje de estado cada 20 diálogos
                         if dialog_count % 20 == 0:
