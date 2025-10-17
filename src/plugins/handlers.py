@@ -1233,103 +1233,6 @@ async def get_restricted_command(client: Client, message: Message):
         logger.error(f"Error in get_restricted_command: {str(e)}", exc_info=True)
         await message.reply("❌ Ocurrió un error inesperado. Por favor, intenta nuevamente.")
 
-def download_files_with_progress(client, message, file_path):
-    with tqdm(total=message.video.file_size, unit='B', unit_scale=True, desc=f"Downloading {os.path.basename(file_path)}") as pbar:
-        def progress_callback(current, total):
-            pbar.update(current - pbar.n)
-
-        try:
-            client.download_media(message.video.file_id, file_path, progress=progress_callback)
-            pbar.close()
-        except Exception as e:
-            pbar.close()
-            print(f"Failed to download {file_path}: {e}")
-
-def download_files_from_private_channels(client):
-    print("Fetching private channels...")
-
-    dialogs = client.get_dialogs()
-
-    private_channels = [
-        dialog.chat for dialog in dialogs if isinstance(dialog.chat, Chat) and dialog.chat.username is None
-    ]
-
-    if not private_channels:
-        print("No private channels found.")
-        return
-
-    print(f"Found {len(private_channels)} private channels.")
-
-    for channel in private_channels:
-        channel_name = sanitize_filename(channel.title)
-        channel_dir = os.path.join(base_download_dir, channel_name)
-
-        os.makedirs(channel_dir, exist_ok=True)
-        print(f"\nProcessing channel: {channel_name}")
-
-        messages = [
-            msg for msg in client.iter_history(channel.id)
-            if msg.video and msg.date >= start_date
-        ]
-
-        if not messages:
-            print(f"No media found in {channel_name} from April 2024 onwards.")
-            continue
-
-        for message in tqdm(messages, desc=f"Messages in {channel_name}", unit="msg"):
-            file_path = os.path.join(channel_dir, sanitize_filename(message.video.file_name or f"file_{message.id}"))
-            if os.path.exists(file_path):
-                print(f"File already exists, skipping: {file_path}")
-            else:
-                download_files_with_progress(client, message, file_path)
-
-@Client.on_message(filters.command("download_private") & filters.private)
-async def download_private_command(client: Client, message: Message):
-    """Manejador para descargar archivos de canales privados."""
-    await message.reply("🔄 Iniciando descarga de archivos desde canales privados...")
-    download_files_from_private_channels(client)
-    await message.reply("✅ Descarga completada.")
-
-@Client.on_message(filters.text & filters.private)
-async def handle_links(client: Client, message: Message):
-    """Manejador automático para procesar enlaces enviados por el usuario."""
-    user_client = client.user_client
-    text = message.text.strip()
-
-    if "t.me/" not in text:
-        await message.reply("❌ Por favor, envía un enlace válido de Telegram.")
-        return
-
-    if "+" in text or "joinchat" in text:
-        # Enlace de invitación a canal privado
-        try:
-            response = await join_channel(user_client, text)
-            await message.reply(response)
-            if "✅ Unido" in response:
-                await message.reply("✅ Ya estoy unido al canal. Envíame el enlace del archivo a descargar.")
-        except Exception as e:
-            await message.reply(f"❌ Error al procesar el enlace: {str(e)}")
-
-    elif "c/" in text:
-        # Enlace privado con ID de canal y mensaje
-        try:
-            parts = text.split("/")
-            chat_id = int("-100" + parts[-2])
-            message_id = int(parts[-1])
-
-            if await is_member(user_client, chat_id):
-                target_message = await user_client.get_messages(chat_id, message_id)
-                if target_message:
-                    await download_and_forward_file(user_client, target_message, message.chat.id)
-                else:
-                    await message.reply("❌ No se pudo encontrar el mensaje especificado.")
-            else:
-                await message.reply("❌ No tienes acceso al canal. Usa un enlace de invitación válido.")
-        except Exception as e:
-            await message.reply(f"❌ Error al procesar el enlace: {str(e)}")
-    else:
-        await message.reply("❌ Formato de enlace no reconocido.")
-
 # Asegurar que las funciones necesarias estén definidas y accesibles
 
 async def join_channel(user_client, url: str) -> str:
@@ -1367,3 +1270,69 @@ async def download_and_forward_file(user_client, message, target_chat_id: int):
         )
     except Exception as e:
         return f"❌ Error al descargar o reenviar el archivo: {str(e)}"
+
+@Client.on_message(filters.command("download_private") & filters.private)
+async def download_private_command(client: Client, message: Message):
+    """Manejador para descargar archivos de canales privados."""
+    await message.reply("🔄 Iniciando descarga de archivos desde canales privados...")
+    download_files_from_private_channels(client)
+    await message.reply("✅ Descarga completada.")
+
+@Client.on_message(filters.text & filters.private)
+async def handle_links(client: Client, message: Message):
+    """Manejador automático para procesar enlaces enviados por el usuario."""
+    user_client = client.user_client
+    text = message.text.strip()
+
+    if "t.me/" not in text:
+        await message.reply("❌ Por favor, envía un enlace válido de Telegram.")
+        return
+
+    try:
+        if "+" in text or "joinchat" in text:
+            # Enlace de invitación a canal privado
+            response = await join_channel(user_client, text)
+            await message.reply(response)
+            if "✅ Unido" in response:
+                await message.reply("✅ Ya estoy unido al canal. Envíame el enlace del archivo a descargar.")
+
+        elif "c/" in text:
+            # Enlace privado con ID de canal y mensaje
+            parts = text.split("/")
+            chat_id = int("-100" + parts[-2])
+            message_id = int(parts[-1])
+
+            if await is_member(user_client, chat_id):
+                try:
+                    target_message = await user_client.get_messages(chat_id, message_id)
+                    if target_message:
+                        await download_and_forward_file(user_client, target_message, message.chat.id)
+                    else:
+                        await message.reply("❌ No se pudo encontrar el mensaje especificado.")
+                except Exception as e:
+                    await message.reply(f"❌ Error al acceder al mensaje: {str(e)}")
+            else:
+                await message.reply("❌ No tienes acceso al canal. Usa un enlace de invitación válido.")
+
+        else:
+            await message.reply("❌ Formato de enlace no reconocido.")
+
+    except UsernameNotOccupied:
+        await message.reply("❌ El nombre de usuario del canal no existe o ya no está en uso.")
+    except PeerIdInvalid:
+        await message.reply("❌ El ID del canal o mensaje no es válido o no es conocido. Verifica que el userbot esté unido al canal.")
+    except Exception as e:
+        await message.reply(f"❌ Error inesperado: {str(e)}")
+
+async def download_files_from_private_channels(user_client):
+    """Descarga archivos de canales privados a los que el userbot tiene acceso."""
+    try:
+        dialogs = await user_client.get_dialogs()
+        for dialog in dialogs:
+            if dialog.chat.type in ["channel", "supergroup"]:
+                messages = await user_client.get_history(dialog.chat.id, limit=10)
+                for message in messages:
+                    if message.document:
+                        await download_and_forward_file(user_client, message, target_chat_id=dialog.chat.id)
+    except Exception as e:
+        print(f"❌ Error al descargar archivos de canales privados: {str(e)}")
