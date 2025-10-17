@@ -27,6 +27,8 @@ class TaskProcessor:
         self.resource_manager = uploader.resource_manager
         self.path_resolver = PathResolver()
         self.temp_dir = self.resource_manager.create_temp_dir(self.task_id)
+        self.quality_manager = QualityManager()  # Añadido: gestor de calidad
+        self._cancel_requested = False
 
     async def process_task(self):
         operation_name = "inicialización"
@@ -85,21 +87,70 @@ class TaskProcessor:
         return source_path
 
     async def _handle_processing(self, source_path: str) -> tuple[Optional[str], Optional[str]]:
-        await self.update_task_status("processing", "⚙️ Procesando...")
-        
-        config = self.task.get('processing_config', {})
-        media_info = get_media_info(source_path)
-        final_filename = generate_final_filename(self.task, media_info, config)
-
-        ffmpeg_processor = FfmpegProcessor(source_path, self.temp_dir, config, media_info)
-        processed_path = ffmpeg_processor.run()
-        
-        if not processed_path:
-            logger.info(f"[TASK:{self.task_id}] No se requirió procesamiento FFmpeg, usando archivo original.")
-            return final_filename, source_path
-        
-        logger.info(f"[TASK:{self.task_id}] Archivo procesado por FFmpeg en: {processed_path}")
-        return final_filename, processed_path
+        """Maneja el procesamiento del archivo con FFmpeg"""
+        try:
+            await self.update_task_status("processing", "🔍 Analizando archivo...")
+            
+            # Obtener información del archivo
+            config = self.task.get('processing_config', {})
+            media_info = get_media_info(source_path)
+            if not media_info:
+                raise ProcessingError("No se pudo obtener información del archivo")
+            
+            # Determinar nombre final
+            final_filename = generate_final_filename(self.task, media_info, config)
+            
+            # Para archivos de video, determinar la calidad óptima
+            if self.task.get('file_type') == 'video':
+                content_type = config.get('content_type', 'default')
+                video_info = {
+                    'height': media_info.get('streams', [{}])[0].get('height', 0),
+                    'size': os.path.getsize(source_path),
+                    'duration': float(media_info.get('format', {}).get('duration', 0))
+                }
+                
+                quality_settings = self.quality_manager.get_optimal_quality(video_info, content_type)
+                config.update({'quality_settings': quality_settings})
+                
+                # Actualizar mensaje con detalles de la compresión
+                await self.update_task_status(
+                    "processing",
+                    f"⚙️ Procesando Video\n"
+                    f"📊 Calidad objetivo: {quality_settings['height']}p\n"
+                    f"🎯 CRF: {quality_settings['crf']}\n"
+                    f"⚡️ Preset: {quality_settings['preset']}"
+                )
+            
+            # Procesar el archivo
+            ffmpeg_processor = FfmpegProcessor(source_path, self.temp_dir, config, media_info)
+            processed_path = ffmpeg_processor.run()
+            
+            if not processed_path:
+                logger.info(f"[TASK:{self.task_id}] No se requirió procesamiento FFmpeg.")
+                return final_filename, source_path
+            
+            # Verificar el resultado
+            if not os.path.exists(processed_path):
+                raise ProcessingError("El archivo procesado no existe")
+                
+            # Calcular estadísticas
+            original_size = os.path.getsize(source_path)
+            processed_size = os.path.getsize(processed_path)
+            saved_size = original_size - processed_size
+            compression_ratio = (saved_size / original_size) * 100 if original_size > 0 else 0
+            
+            logger.info(
+                f"[TASK:{self.task_id}] Procesamiento completado:\n"
+                f"• Tamaño original: {format_bytes(original_size)}\n"
+                f"• Tamaño final: {format_bytes(processed_size)}\n"
+                f"• Ahorro: {format_bytes(saved_size)} ({compression_ratio:.1f}%)"
+            )
+            
+            return final_filename, processed_path
+            
+        except Exception as e:
+            logger.error(f"[TASK:{self.task_id}] Error en procesamiento: {e}")
+            raise ProcessingError(f"Error procesando archivo: {str(e)}")
 
     async def _handle_copy_to_final_destination(self, final_filename: str, source_path: str) -> Optional[str]:
         if not Config.ENABLE_COPY_TO_DESTINATION:

@@ -8,8 +8,33 @@ from datetime import timedelta
 import re
 from typing import Dict, Union, Optional
 
-from pyrogram.enums import ParseMode
-from pyrogram.errors import MessageNotModified, FloodWait, BadRequest
+# Handle Python 3.12+ compatibility
+try:
+    from enum import StrEnum
+    class ParseMode(StrEnum):
+        HTML = "html"
+        MARKDOWN = "markdown"
+        DISABLED = "disabled"
+except ImportError:
+    try:
+        from pyrogram.enums import ParseMode
+    except ImportError:
+        from enum import Enum
+        class ParseMode(str, Enum):
+            HTML = "html"
+            MARKDOWN = "markdown"
+            DISABLED = "disabled"
+
+try:
+    from pyrogram.errors import MessageNotModified, FloodWait, BadRequest
+except ImportError:
+    # Define dummy error classes if Pyrogram is not available
+    class PyrogramError(Exception): pass
+    class MessageNotModified(PyrogramError): pass
+    class FloodWait(PyrogramError):
+        def __init__(self, value):
+            self.value = value
+    class BadRequest(PyrogramError): pass
 import logging
 
 logger = logging.getLogger(__name__)
@@ -19,26 +44,49 @@ try:
 except (TypeError, ValueError):
     ADMIN_USER_ID = 0
 
+from .retry import retry_async
+
+@retry_async(retry_exceptions=(FloodWait, BadRequest), max_attempts=3)
+async def _try_edit_message(bot, chat_id, message_id, text):
+    """Try to edit a message with retries."""
+    await bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=text,
+        parse_mode=ParseMode.HTML
+    )
+
 async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
     """Edita un mensaje de estado de forma segura, evitando spam y manejando errores."""
     ctx = progress_tracker.get(user_id)
-    if not ctx or not ctx.message or text == ctx.last_update_text: return
-    ctx.last_update_text = text
+    if not ctx or not ctx.message or text == ctx.last_update_text: 
+        return
+
+    # Rate limiting for status updates (max 1 update per second)
+    now = time.time()
+    if hasattr(ctx, 'last_edit_time') and now - ctx.last_edit_time < 1:
+        return
+    ctx.last_edit_time = now
+    
     try:
-        await ctx.bot.edit_message_text(
-            chat_id=ctx.message.chat.id, message_id=ctx.message.id,
-            text=text, parse_mode=ParseMode.HTML
-        )
-    except MessageNotModified: pass
+        # Only update if content changed
+        if text != ctx.last_update_text:
+            await _try_edit_message(
+                ctx.bot,
+                ctx.message.chat.id,
+                ctx.message.id,
+                text
+            )
+            ctx.last_update_text = text
+    except MessageNotModified:
+        pass
     except FloodWait as e:
         logger.warning(f"FloodWait al editar mensaje para {user_id}. Esperando {e.value}s.")
         await asyncio.sleep(e.value + 1)
-    # [FIX] Captura específica para mensajes borrados o inválidos. Esto evita que el worker crashee.
     except BadRequest as e:
         if "MESSAGE_ID_INVALID" in str(e):
-            logger.warning(f"No se pudo editar el mensaje de estado para {user_id} (ID: {ctx.message.id}). Probablemente fue borrado. La tarea continúa.")
-            # Opcional: Anular el mensaje para no intentar editarlo más.
-            ctx.message = None
+            logger.warning(f"No se pudo editar el mensaje de estado para {user_id} (ID: {ctx.message.id}). Probablemente fue borrado.")
+            ctx.message = None  # Prevent further edit attempts
         else:
             logger.error(f"Error BadRequest no manejado al editar mensaje para {user_id}: {e}")
     except Exception as e:

@@ -52,7 +52,19 @@ def _build_standard_video_command(
 ) -> Tuple[List[List[str]], str]:
     config = task.get('processing_config', {})
     media_info = get_media_info(input_path)
-    content_type = config.get('content_type', 'default')
+    
+    # Configuración de marca de agua por defecto si no se especifica
+    if 'watermark' not in config:
+        config['watermark'] = {
+            'type': 'text',
+            'text': '@TuNombreDeBot',  # Cambia esto por tu marca de agua
+            'position': 'bottom_right',
+            'fontsize': 24,
+            'font_color': 'white@0.8',
+            'box': True,
+            'box_color': 'black@0.5',
+            'box_border': 5
+        }
     
     command = ["ffmpeg", "-y", "-hide_banner"]
     
@@ -81,27 +93,60 @@ def _build_standard_video_command(
     filter_complex_parts = []
     current_video_chain = "[0:v]"
     
-    # Detectar resolución y ajustar calidad
+        # Detección mejorada de resolución y ajuste de calidad
     video_stream = next((s for s in media_info.get('streams', []) if s.get('codec_type') == 'video'), None)
     if video_stream:
         width = int(video_stream.get('width', 1920))
         height = int(video_stream.get('height', 1080))
+        bitrate = float(video_stream.get('bit_rate', 0)) / 1024 if video_stream.get('bit_rate') else 0
+        duration = float(media_info.get('format', {}).get('duration', 0))
+        filesize = float(media_info.get('format', {}).get('size', 0)) / (1024 * 1024)  # en MB
         
-        # Ajustar calidad según el tipo de contenido
-        if content_type == "movies":
-            target_height = min(height, 1080)
-        elif content_type == "series":
-            target_height = min(height, 720)
-        else:
-            target_height = min(height, 720)
+        # Calcular target_height basado en el tamaño del archivo y la duración
+        if filesize > 0 and duration > 0:
+            mb_per_minute = filesize / (duration / 60)
+            logger.info(f"MB por minuto: {mb_per_minute}")
             
+            if content_type == "movies":
+                if mb_per_minute > 50:  # Archivos muy pesados
+                    target_height = 720
+                elif mb_per_minute > 25:
+                    target_height = min(height, 1080)
+                else:
+                    target_height = height  # Mantener calidad original si ya es eficiente
+            elif content_type == "series":
+                if mb_per_minute > 30:
+                    target_height = 480
+                elif mb_per_minute > 15:
+                    target_height = 720
+                else:
+                    target_height = min(height, 1080)
+            else:  # default
+                if mb_per_minute > 20:
+                    target_height = 480
+                elif mb_per_minute > 10:
+                    target_height = 720
+                else:
+                    target_height = min(height, 1080)
+        else:
+            # Fallback a resoluciones predeterminadas si no hay datos de tamaño/duración
+            if content_type == "movies":
+                target_height = min(height, 1080)
+            elif content_type == "series":
+                target_height = min(height, 720)
+            else:
+                target_height = min(height, 720)
+        
         if height > target_height:
             next_chain = "[scaled_v]"
-            filter_complex_parts.append(f"{current_video_chain}scale=-2:{target_height}{next_chain}")
+            filter_complex_parts.append(f"{current_video_chain}scale=-2:{target_height}:flags=lanczos{next_chain}")
             current_video_chain = next_chain
-    
-    if wm_conf := config.get('watermark'):
-        next_chain = "[watermarked_v]"
+            
+        logger.info(f"Resolución original: {width}x{height}, Nueva altura objetivo: {target_height}")
+        
+        # Manejo de marca de agua
+        if wm_conf := config.get('watermark'):
+            next_chain = "[watermarked_v]"
         if wm_conf.get('type') == 'image' and watermark_path:
             pos_map = {'top_left': '10:10', 'top_right': 'main_w-overlay_w-10:10', 'bottom_left': '10:main_h-overlay_h-10', 'bottom_right': 'main_w-overlay_w-10:main_h-overlay_h-10'}
             overlay_pos = pos_map.get(wm_conf.get('position', 'br'), pos_map['bottom_right'])
@@ -143,43 +188,86 @@ def _build_standard_video_command(
         # Mantener subtítulos existentes
         command.extend(["-map", "0:s?"])
     
-    # Configuración de calidad adaptativa basada en el tipo de contenido
+    # Configuración de calidad fija con parámetros optimizados
     compression_settings = {
-        "movies": {
-            "1080p": {"preset": "slow", "crf": "18", "profile": "high"},
-            "720p": {"preset": "medium", "crf": "20", "profile": "high"}
+        "2160p": {
+            "preset": "slow",
+            "crf": "18",
+            "profile": "high",
+            "max_rate": "25000k",
+            "buf_size": "50000k",
+            "audio_bitrate": "320k",
+            "scale": "3840:-2"
         },
-        "series": {
-            "1080p": {"preset": "medium", "crf": "21", "profile": "high"},
-            "720p": {"preset": "medium", "crf": "23", "profile": "main"}
+        "1080p": {
+            "preset": "medium",
+            "crf": "20",
+            "profile": "high",
+            "max_rate": "8000k",
+            "buf_size": "16000k",
+            "audio_bitrate": "192k",
+            "scale": "1920:-2"
         },
-        "default": {
-            "1080p": {"preset": "veryfast", "crf": "23", "profile": "main"},
-            "720p": {"preset": "veryfast", "crf": "25", "profile": "main"}
+        "720p": {
+            "preset": "medium",
+            "crf": "23",
+            "profile": "high",
+            "max_rate": "4000k",
+            "buf_size": "8000k",
+            "audio_bitrate": "128k",
+            "scale": "1280:-2"
+        },
+        "480p": {
+            "preset": "medium",
+            "crf": "26",
+            "profile": "main",
+            "max_rate": "2000k",
+            "buf_size": "4000k",
+            "audio_bitrate": "96k",
+            "scale": "854:-2"
         }
     }
     
     if config.get('transcode') or replace_audio_path:
-        quality_key = "1080p" if height >= 1080 else "720p"
+        # Determinar la calidad basada en target_height
+        if target_height >= 1080:
+            quality_key = "1080p"
+        elif target_height >= 720:
+            quality_key = "720p"
+        else:
+            quality_key = "480p"
+            
         settings = compression_settings.get(content_type, compression_settings["default"]).get(quality_key)
         
+        # Configuración base de compresión
+        scale_value = settings.get("scale", "1920:-2")  # valor por defecto 1080p
         command.extend([
             "-c:v", "libx264",
+            "-vf", f"scale={scale_value}",  # Escalar según la calidad seleccionada
             "-preset", settings["preset"],
             "-crf", settings["crf"],
             "-profile:v", settings["profile"],
             "-level:v", "4.1" if quality_key == "1080p" else "3.1",
+            "-maxrate", settings["max_rate"],
+            "-bufsize", settings["buf_size"],
             "-c:a", "aac",
-            "-b:a", "192k" if quality_key == "1080p" else "128k",
-            "-movflags", "+faststart"
+            "-b:a", settings["audio_bitrate"],
+            "-ac", "2",  # Forzar audio estéreo
+            "-movflags", "+faststart",
+            # Generar thumbnail
+            "-vf", f"scale={scale_value},select=eq(n\\,100)",  # Tomar frame 100 como thumbnail
+            "-vframes", "1",
+            "-q:v", "2"
         ])
         
-        # Configuración adicional para mejor calidad
+        # Configuración x264 avanzada según tipo de contenido
         if content_type == "movies":
             command.extend([
-                "-x264-params", "ref=6:me=umh:subme=8:trellis=2",
-                "-maxrate", f"{int(height * 2.5)}k",
-                "-bufsize", f"{int(height * 5)}k"
+                "-x264-params", "ref=4:me=umh:subme=7:trellis=1:8x8dct=1:partitions=all",
+            ])
+        else:
+            command.extend([
+                "-x264-params", "ref=2:me=hex:subme=6:trellis=1:8x8dct=0:partitions=none",
             ])
     else: 
         command.extend(["-c:v", "copy", "-c:a", "copy"])

@@ -43,28 +43,73 @@ def build_profile_delete_confirmation_keyboard(preset_id: str) -> InlineKeyboard
 
 # --- Teclado Principal de Procesamiento ---
 
+def build_quality_menu(task_id: str) -> InlineKeyboardMarkup:
+    """Construye el menú de selección de calidad"""
+    keyboard = [
+        [InlineKeyboardButton("🎬 4K (2160p)", callback_data=f"quality_{task_id}_2160")],
+        [InlineKeyboardButton("🎥 FHD (1080p)", callback_data=f"quality_{task_id}_1080")],
+        [InlineKeyboardButton("📺 HD (720p)", callback_data=f"quality_{task_id}_720")],
+        [InlineKeyboardButton("📱 SD (480p)", callback_data=f"quality_{task_id}_480")],
+        [InlineKeyboardButton("🔙 Volver", callback_data=f"menu_{task_id}")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 def build_processing_menu(task_id: str, file_type: str, task_data: Dict) -> InlineKeyboardMarkup:
     keyboard, config = [], task_data.get('processing_config', {})
+    
+    # Sección de Compresión/Calidad para videos
     if file_type == 'video':
-        mute_text = "🔇 Silenciar Video" if not config.get('mute_audio') else "🔊 Restaurar Audio"
-        transcode_res = config.get('transcode', {}).get('resolution', 'Original').upper()
+        quality = config.get('quality', '1080p')
+        mute_text = "🔇 Silenciar" if not config.get('mute_audio') else "🔊 Restaurar Audio"
+        
         keyboard.extend([
-            [InlineKeyboardButton(f"📉 Transcodificar ({transcode_res})", callback_data=f"config_transcode_{task_id}")],
-            [InlineKeyboardButton("✂️ Cortar (Trim)", callback_data=f"config_trim_{task_id}"), InlineKeyboardButton("🎞️ Crear GIF", callback_data=f"config_gif_{task_id}")],
-            [InlineKeyboardButton("💧 Marca de Agua", callback_data=f"config_watermark_{task_id}"), InlineKeyboardButton("🖼️ Miniatura (Thumbnail)", callback_data=f"config_thumbnail_{task_id}")],
-            [InlineKeyboardButton("📜 Pistas (Audio/Subs)", callback_data=f"config_tracks_{task_id}"), InlineKeyboardButton(mute_text, callback_data=f"set_mute_{task_id}_toggle")],
+            # Calidad y Compresión
+            [InlineKeyboardButton(f"{quality_emoji} Tipo: {quality.title()}", callback_data=f"set_content_type_{task_id}")],
+            [InlineKeyboardButton(f"📉 Calidad: {transcode_res}", callback_data=f"config_transcode_{task_id}")],
+            # Herramientas de Video
+            [
+                InlineKeyboardButton("✂️ Cortar", callback_data=f"config_trim_{task_id}"),
+                InlineKeyboardButton("🎞️ GIF", callback_data=f"config_gif_{task_id}"),
+                InlineKeyboardButton(mute_text, callback_data=f"set_mute_{task_id}_toggle")
+            ],
+            # Personalización
+            [
+                InlineKeyboardButton("💧 Marca Agua", callback_data=f"config_watermark_{task_id}"),
+                InlineKeyboardButton("🖼️ Miniatura", callback_data=f"config_thumbnail_{task_id}")
+            ],
+            # Pistas y Subtítulos
+            [InlineKeyboardButton("📜 Pistas (Audio/Subs)", callback_data=f"config_tracks_{task_id}")]
         ])
     elif file_type == 'audio':
-         keyboard.extend([
-            [InlineKeyboardButton("✂️ Cortar (Trim)", callback_data=f"config_trim_{task_id}")],
-            [InlineKeyboardButton("📝 Editar Metadatos", callback_data=f"config_audiometadata_{task_id}")],
-         ])
+        keyboard.extend([
+            [
+                InlineKeyboardButton("✂️ Cortar", callback_data=f"config_trim_{task_id}"),
+                InlineKeyboardButton("📝 Metadatos", callback_data=f"config_audiometadata_{task_id}")
+            ],
+        ])
+        
+    # Controles Comunes (para todos los tipos)
     keyboard.extend([
-        [InlineKeyboardButton("✏️ Renombrar Archivo", callback_data=f"config_rename_{task_id}")],
-        [InlineKeyboardButton("💾 Guardar como Perfil", callback_data=f"profile_save_request_{task_id}")],
-        [InlineKeyboardButton("🗑️ Descartar", callback_data=f"task_delete_{task_id}"), InlineKeyboardButton("🔥 Procesar Ahora", callback_data=f"task_queuesingle_{task_id}")]
+        # Opciones de Archivo
+        [
+            InlineKeyboardButton("✏️ Renombrar", callback_data=f"config_rename_{task_id}"),
+            InlineKeyboardButton("💾 Guardar Perfil", callback_data=f"profile_save_request_{task_id}")
+        ],
     ])
+    
+    # Botones de Acción Principal
+    keyboard.append([
+        InlineKeyboardButton("❌ Cancelar", callback_data=f"task_delete_{task_id}"),
+        InlineKeyboardButton("⚡️ Procesar", callback_data=f"task_queuesingle_{task_id}")
+    ])
+    
     return InlineKeyboardMarkup(keyboard)
+    
+def build_cancel_button(task_id: str) -> InlineKeyboardMarkup:
+    """Construye un teclado con solo el botón de cancelar"""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("❌ Cancelar Proceso", callback_data=f"cancel_task_{task_id}")
+    ]])
 
 # --- Sub-menús de Configuración ---
 

@@ -378,34 +378,72 @@ async def process_restricted_content(bot, task: dict) -> None:
         await db_instance.update_task(str(task['_id']), "status", "error")
         await db_instance.update_task(str(task['_id']), "last_error", str(e))
 
+class TaskQueue:
+    def __init__(self, max_concurrent_tasks=3, min_task_interval=5):
+        self.active_tasks = {}  # user_id -> Task
+        self.max_concurrent_tasks = max_concurrent_tasks
+        self.min_task_interval = min_task_interval
+        self.last_task_time = {}  # user_id -> timestamp
+        self.task_semaphore = asyncio.Semaphore(max_concurrent_tasks)
+
+    def can_start_task(self, user_id):
+        """Check if a new task can be started for the user."""
+        now = time.time()
+        if user_id in self.last_task_time:
+            if now - self.last_task_time[user_id] < self.min_task_interval:
+                return False
+        return True
+
+    def register_task(self, user_id, task):
+        """Register a new task for a user."""
+        self.active_tasks[user_id] = task
+        self.last_task_time[user_id] = time.time()
+
+    def remove_task(self, user_id):
+        """Remove a completed task."""
+        self.active_tasks.pop(user_id, None)
+
+    async def process_with_rate_limit(self, bot_instance, task):
+        """Process a task with rate limiting."""
+        async with self.task_semaphore:
+            try:
+                return await process_task(bot_instance, task)
+            finally:
+                self.remove_task(task['user_id'])
+
 async def worker_loop(bot_instance):
     logger.info("[WORKER] Bucle del worker iniciado.")
     os.makedirs(DOWNLOAD_DIR, exist_ok=True); os.makedirs(OUTPUT_DIR, exist_ok=True)
-    active_tasks = {}  # user_id -> Task
+    
+    task_queue = TaskQueue(max_concurrent_tasks=3, min_task_interval=5)
     
     while True:
         try:
-            # Limpiar tareas completadas
-            for user_id in list(active_tasks.keys()):
-                task = active_tasks[user_id]
+            # Clean up completed tasks
+            for user_id in list(task_queue.active_tasks.keys()):
+                task = task_queue.active_tasks[user_id]
                 if task.done():
                     try:
                         await task
                     except Exception as e:
                         logger.error(f"Task for user {user_id} failed: {e}")
-                    del active_tasks[user_id]
+                    task_queue.remove_task(user_id)
             
-            # Verificar usuarios que pueden procesar nuevas tareas
-            available_users = [uid for uid in (await db_instance.tasks.distinct("user_id", {"status": "queued"}))
-                             if uid not in active_tasks]
+            # Get available users not currently processing tasks
+            available_users = [
+                uid for uid in (await db_instance.tasks.distinct("user_id", {"status": "queued"}))
+                if uid not in task_queue.active_tasks and task_queue.can_start_task(uid)
+            ]
             
             if not available_users:
                 await asyncio.sleep(2)
                 continue
-                
-            # Procesar una tarea por usuario disponible
+            
+            # Process one task per available user
             for user_id in available_users:
-                # Obtener la próxima tarea para este usuario
+                if len(task_queue.active_tasks) >= task_queue.max_concurrent_tasks:
+                    break
+                    
                 task = await db_instance.tasks.find_one_and_update(
                     {
                         "status": "queued",
@@ -418,11 +456,10 @@ async def worker_loop(bot_instance):
                             "queue_position": await db_instance.tasks.count_documents({"status": "processing"}) + 1
                         }
                     },
-                    sort=[('priority', -1), ('created_at', 1)]  # Prioridad alta primero, luego por orden de llegada
+                    sort=[('priority', -1), ('created_at', 1)]
                 )
                 
                 if task:
-                    # Informar posición en cola
                     try:
                         queue_msg = (
                             f"⌛ <b>Tarea en cola</b>\n"
@@ -433,9 +470,8 @@ async def worker_loop(bot_instance):
                     except Exception as e:
                         logger.error(f"Error sending queue message: {e}")
                     
-                    # Crear y registrar la tarea
-                    process_task_obj = asyncio.create_task(process_task(bot_instance, task))
-                    active_tasks[user_id] = process_task_obj
+                    process_task_obj = asyncio.create_task(task_queue.process_with_rate_limit(bot_instance, task))
+                    task_queue.register_task(user_id, process_task_obj)
             
             await asyncio.sleep(2)
             

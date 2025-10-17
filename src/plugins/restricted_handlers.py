@@ -1,11 +1,22 @@
 # --- Comandos para Canales Restringidos ---
 
-from pyrogram import Client, filters
-from pyrogram.types import Message
-from pyrogram.enums import ParseMode
-from src.helpers.utils import escape_html
-from src.db.mongo_manager import db_instance
+import logging
+import asyncio
+from typing import Optional, Dict
 
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.enums import ParseMode
+from pyrogram.errors import FloodWait
+
+from src.helpers.utils import escape_html, format_bytes, format_time
+from src.db.mongo_manager import db_instance
+from src.core.channel_joiner import channel_joiner
+from src.core.restricted_handler import restricted_handler
+
+logger = logging.getLogger(__name__)
+
+# Comando para añadir un canal
 @Client.on_message(filters.command("add_channel") & filters.private)
 async def add_channel_command(client: Client, message: Message):
     """Comando para añadir un canal restringido."""
@@ -91,67 +102,73 @@ async def get_restricted_command(client: Client, message: Message):
     """Descarga contenido de un canal restringido."""
     user_id = message.from_user.id
     
-    if len(message.command) != 3:
+    # Si no se proporciona enlace, mostrar instrucciones
+    if len(message.text.split()) == 1:
         await message.reply(
-            "📝 <b>Uso del comando:</b>\n"
-            "/get_restricted <code>canal_id mensaje_id</code>\n\n"
-            "Ejemplo:\n"
-            "/get_restricted -1001234567890 123",
-            parse_mode=ParseMode.HTML
+            "� <b>Descarga de Contenido Restringido</b>\n\n"
+            "Por favor, envía el enlace del mensaje que quieres descargar.\n\n"
+            "<b>Formatos válidos:</b>\n"
+            "• Mensaje específico: https://t.me/canal/123\n"
+            "• Canal privado: https://t.me/+abc123...\n"
+            "• Canal público: https://t.me/nombre_canal",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❓ Ayuda", callback_data="help_restricted")]
+            ])
         )
         return
 
-    try:
-        channel_id = int(message.command[1])
-        message_id = int(message.command[2])
-    except ValueError:
-        await message.reply("❌ El canal_id y mensaje_id deben ser números.")
-        return
-
-    channels = await db_instance.get_restricted_channels(user_id)
-    if str(channel_id) not in channels:
-        await message.reply(
-            "❌ Canal no registrado.\n"
-            "Use /list_channels para ver sus canales disponibles.",
+    # Obtener enlace del mensaje
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.reply(
+            "❌ Por favor, proporciona el enlace del mensaje a descargar.\n"
+            "Ejemplo: /get_restricted https://t.me/canal/123",
             parse_mode=ParseMode.HTML
         )
-        return
 
-    status_msg = await message.reply("🔄 Obteniendo información del mensaje...")
+    link = args[1].strip()
+    status_msg = await message.reply("🔄 Procesando enlace...")
 
-    from src.core.userbot_handler import userbot_handler
-    if not await userbot_handler.check_rate_limit(user_id):
-        await status_msg.edit_text(
-            "⚠️ <b>Rate Limit:</b> Debe esperar 5 minutos entre usos del userbot.",
-            parse_mode=ParseMode.HTML
+    # Procesar el enlace
+    success, status_text, data = await restricted_handler.process_message_link(
+        client, link,
+        progress_callback=lambda current, total: _show_progress(
+            status_msg, "Descargando", current, total
         )
+    )
+
+    if not success:
+        await status_msg.edit_text(status_text, parse_mode=ParseMode.HTML)
         return
 
-    # Primero obtener información del mensaje
-    message_info = await userbot_handler.get_message_info(channel_id, message_id)
-    if not message_info:
-        await status_msg.edit_text(
-            "❌ No se encontró contenido descargable en ese mensaje.\n"
-            "Asegúrese de que:\n"
-            "• El mensaje existe\n"
-            "• Contiene un archivo multimedia\n"
-            "• El userbot tiene acceso al mensaje",
-            parse_mode=ParseMode.HTML
-        )
-        return
+    # Extraer información
+    msg = data['message']
+    media_info = data['media_info']
 
-    # Crear tarea para procesar el archivo
-    task_id = await db_instance.add_task(
-        user_id=user_id,
-        file_type=message_info['type'],
-        file_name=message_info.get('file_name', f"restricted_{message_id}"),
-        file_id=message_info['file_id'],
-        status="pending_processing",
-        metadata={
-            "size": message_info.get('file_size', 0),
-            "duration": message_info.get('duration', 0),
-            "resolution": f"{message_info.get('width', 0)}x{message_info.get('height', 0)}" if message_info.get('width') else None
-        }
+    # Preparar y mostrar información del archivo
+    info_text = (
+        f"📁 <b>Archivo encontrado:</b>\n\n"
+        f"💾 Tamaño: {format_bytes(media_info['file_size'])}\n"
+    )
+
+    if media_info['duration']:
+        info_text += f"⏱ Duración: {format_time(media_info['duration'])}\n"
+    if media_info['width'] and media_info['height']:
+        info_text += f"📐 Resolución: {media_info['width']}x{media_info['height']}\n"
+
+    info_text += "\n¿Deseas descargar este archivo?"
+
+    # Mostrar confirmación con botones
+    await status_msg.edit_text(
+        info_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Descargar", callback_data=f"dl_restricted_{msg.chat.id}_{msg.id}"),
+                InlineKeyboardButton("❌ Cancelar", callback_data="cancel_restricted")
+            ]
+        ])
     )
 
     if task_id:
