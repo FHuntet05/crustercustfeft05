@@ -274,9 +274,14 @@ async def get_chat_info(client: Client, url: str) -> tuple[bool, str, Optional[U
                 logger.warning(f"No se pudo acceder con userbot: {e}")
                 
                 if "peer_id_invalid" in error_msg and is_private_link:
-                    return False, "❌ No tienes acceso a este canal privado. Debes ser miembro para acceder.", None, None
-                    
-                # Solo para enlaces públicos, intentar con el bot normal
+                    try:
+                        # Intentar unirse al canal privado
+                        await user_client.join_chat(url)
+                        logger.info("Usuario bot se unió al canal exitosamente tras PEER_ID_INVALID")
+                        return False, "✅ Se unió al canal. Por favor, reenvía el enlace del mensaje para continuar.", None, None
+                    except Exception as join_error:
+                        logger.error(f"Error al unirse al canal tras PEER_ID_INVALID: {join_error}")
+                        return False, "❌ No se pudo acceder al canal privado tras intentar unirse.", None, None
                 if not is_private_link:
                     try:
                         chat = await client.get_chat(chat_id)
