@@ -11,8 +11,9 @@ from typing import Optional, Union, Tuple, Any
 from pyrogram import Client, filters, StopPropagation
 from pyrogram.types import Message, CallbackQuery, Chat
 from pyrogram.enums import ParseMode
-from pyrogram.errors import MessageNotModified
+from pyrogram.errors import MessageNotModified, PeerIdInvalid, UsernameNotOccupied
 from bson.objectid import ObjectId
+from tqdm import tqdm
 
 from src.db.mongo_manager import db_instance
 from src.helpers.keyboards import (build_confirmation_keyboard, build_profiles_management_keyboard,
@@ -1101,7 +1102,7 @@ async def get_restricted_command(client: Client, message: Message):
             
         url = text[1].strip()
         
-        # Validar formato del enlace
+        # Validar el formato del enlace
         if not downloader.validate_url(url):
             return await message.reply(
                 "❌ El enlace proporcionado no es válido.\n"
