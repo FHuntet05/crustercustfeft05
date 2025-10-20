@@ -218,6 +218,32 @@ class Database:
         settings = await self.get_user_settings(user_id)
         return settings.get("user_state", {"status": "idle", "data": {}})
 
+    async def register_user(self, user_id: int) -> bool:
+        """Registra un nuevo usuario en la base de datos"""
+        try:
+            # Verificar si el usuario ya existe
+            existing_user = await self.user_settings.find_one({"_id": user_id})
+            if existing_user:
+                logger.info(f"Usuario {user_id} ya existe en la base de datos")
+                return True
+            
+            # Crear nuevo usuario
+            user_doc = {
+                "_id": user_id,
+                "created_at": datetime.utcnow(),
+                "user_state": {"status": "idle", "data": {}},
+                "restricted_channels": {},
+                "last_used_userbot": datetime.utcnow()
+            }
+            
+            await self.user_settings.insert_one(user_doc)
+            logger.info(f"Usuario {user_id} registrado exitosamente")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error registrando usuario {user_id}: {e}")
+            return False
+
     # --- Métodos para Canales Monitoreados ---
     
     async def add_monitored_channel(self, channel_id: int, user_id: int) -> bool:

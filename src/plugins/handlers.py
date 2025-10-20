@@ -677,7 +677,8 @@ async def handle_telegram_link(client: Client, message: Message, url: str = None
             await status_msg.edit(f"🔄 Verificando acceso al canal privado...")
             
             try:
-                # Intentar acceder al chat con el userbot
+                # Intentar acceder al chat con el userbot usando el ID normalizado
+                logger.info(f"Intentando acceder al canal privado: {chat_id}")
                 chat = await user_client.get_chat(chat_id)
                 
                 # Si llegamos aquí, tenemos acceso al canal
@@ -1130,39 +1131,41 @@ async def start_command(client: Client, message: Message):
         user_id = message.from_user.id
         first_name = message.from_user.first_name
         
-        # Mensaje de bienvenida personalizado con el nombre del usuario
-        welcome_message = (
-            f"👋 ¡Hola {first_name}!\n\n"
-            "🤖 Soy tu asistente para descargar contenido multimedia de Telegram.\n\n"
-            "📱 <b>¿Qué puedo hacer?</b>\n"
-            "• Descargar videos de canales privados\n"
-            "• Procesar archivos multimedia\n"
-            "• Gestionar descargas masivas\n\n"
-            "🔑 <b>Comandos principales:</b>\n"
-            "• /start - Muestra este mensaje\n"
-            "• /get_restricted - Descarga de canales privados\n"
-            "• /panel - Accede al panel de control\n\n"
-            "📤 También puedes enviarme directamente:\n"
-            "• Enlaces de Telegram (t.me/...)\n"
-            "• Enlaces de invitación a canales\n"
-            "• Videos para procesar\n\n"
-            "¡Estoy listo para ayudarte! 🚀"
-        )
-        
         # Registrar o actualizar usuario en la base de datos primero
         try:
             await db_instance.register_user(user_id)
         except Exception as db_error:
             logger.error(f"Error registrando usuario en DB: {db_error}")
         
-        # Crear teclado básico sin parámetros adicionales
+        # Mensaje de bienvenida personalizado y funcional
+        welcome_message = (
+            f"👋 ¡Hola {first_name}!\n\n"
+            "🤖 <b>Bienvenido a tu Bot Profesional de Descarga</b>\n\n"
+            "📱 <b>Funcionalidades disponibles:</b>\n"
+            "• 📥 Descargar videos de canales privados\n"
+            "• 🎬 Procesar y comprimir archivos multimedia\n"
+            "• 📋 Gestionar archivos en el panel\n"
+            "• ⚙️ Aplicar marcas de agua y efectos\n\n"
+            "🔑 <b>Comandos principales:</b>\n"
+            "• <code>/panel</code> - Ver archivos en cola\n"
+            "• <code>/get_restricted</code> - Descargar de canales privados\n"
+            "• <code>/help</code> - Ayuda detallada\n\n"
+            "📤 <b>Envíame directamente:</b>\n"
+            "• Enlaces de Telegram (t.me/...)\n"
+            "• Videos para procesar\n"
+            "• Enlaces de canales privados\n\n"
+            "¡Estoy listo para ayudarte! 🚀"
+        )
+        
+        # Crear teclado funcional
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📥 Descargar Video", callback_data="download_video")],
-            [InlineKeyboardButton("⚙️ Panel de Control", callback_data="open_panel")],
-            [InlineKeyboardButton("ℹ️ Ayuda", callback_data="show_help")]
+            [InlineKeyboardButton("📋 Abrir Panel", callback_data="open_panel_main")],
+            [InlineKeyboardButton("📥 Descargar Video", callback_data="download_video_guide")],
+            [InlineKeyboardButton("⚙️ Configuraciones", callback_data="open_settings")],
+            [InlineKeyboardButton("ℹ️ Ayuda", callback_data="show_help_detailed")]
         ])
         
-        # Enviar mensaje de bienvenida con teclado básico
+        # Enviar mensaje de bienvenida con teclado funcional
         await message.reply(
             welcome_message,
             parse_mode=ParseMode.HTML,
@@ -1170,27 +1173,19 @@ async def start_command(client: Client, message: Message):
         )
             
     except Exception as e:
-        logger.error(f"Error en comando start: {e}", exc_info=True)  # Agregado exc_info para más detalles
+        logger.error(f"Error en comando start: {e}", exc_info=True)
         
         # Mensaje de error más informativo
         error_message = (
-            "❌ <b>Ocurrió un error al iniciar el bot.</b>\n\n"
-            "Detalles técnicos:\n"
-            f"<code>{escape_html(str(e))}</code>\n\n"
-            "Por favor, intenta nuevamente en unos momentos o contacta al administrador."
+            "❌ <b>Error al iniciar el bot</b>\n\n"
+            "Detalles: <code>{}</code>\n\n"
+            "Por favor, intenta nuevamente o contacta al administrador.".format(escape_html(str(e)))
         )
         
         try:
-            await message.reply(
-                error_message,
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as reply_error:
-            # Si falla incluso el mensaje de error, intentar un mensaje simple
-            try:
-                await message.reply("Error al iniciar. Por favor, intenta más tarde.")
-            except:
-                pass  # Si todo falla, al menos tenemos el error en los logs
+            await message.reply(error_message, parse_mode=ParseMode.HTML)
+        except Exception:
+            await message.reply("Error al iniciar. Por favor, intenta más tarde.")
 
 @Client.on_message(filters.private & filters.video, group=1)
 async def handle_direct_video(client: Client, message: Message):
@@ -1296,6 +1291,67 @@ async def state_guardian(client: Client, message: Message):
         await db_instance.set_user_state(user_id, "idle")
         await message.reply("✔️ Operación anterior cancelada.")
 
+@Client.on_message(filters.command("panel") & filters.private)
+async def panel_command(client: Client, message: Message):
+    """Muestra el panel de control con todas las tareas del usuario."""
+    try:
+        user_id = message.from_user.id
+        
+        # Obtener tareas pendientes del usuario
+        pending_tasks = await db_instance.get_pending_tasks(user_id, status_filter="pending_processing")
+        
+        if not pending_tasks:
+            await message.reply(
+                "📋 <b>Panel de Control</b>\n\n"
+                "No tienes archivos en el panel.\n\n"
+                "💡 <b>Para agregar archivos:</b>\n"
+                "• Envía videos directamente al bot\n"
+                "• Usa enlaces de Telegram con /get_restricted\n"
+                "• Reenvía contenido multimedia",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        # Construir mensaje del panel
+        panel_text = f"📋 <b>Panel de Control</b>\n\n"
+        panel_text += f"📊 <b>Total de archivos:</b> {len(pending_tasks)}\n\n"
+        
+        for i, task in enumerate(pending_tasks, 1):
+            file_name = task.get('original_filename', 'Archivo sin nombre')
+            file_type = task.get('file_type', 'document')
+            file_size = task.get('file_metadata', {}).get('size', 0)
+            duration = task.get('file_metadata', {}).get('duration', 0)
+            
+            # Emoji según tipo de archivo
+            emoji_map = {'video': '🎬', 'audio': '🎵', 'document': '📄'}
+            emoji = emoji_map.get(file_type, '📁')
+            
+            # Información del archivo
+            panel_text += f"{i}. {emoji} <code>{escape_html(file_name[:50])}</code>\n"
+            if file_size > 0:
+                panel_text += f"   📊 {format_size(file_size)}"
+            if duration > 0:
+                panel_text += f" | ⏱️ {format_time(duration)}"
+            panel_text += "\n\n"
+        
+        # Crear teclado con opciones
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Actualizar Panel", callback_data="refresh_panel")],
+            [InlineKeyboardButton("🗑️ Limpiar Todo", callback_data="panel_delete_all_confirm")],
+            [InlineKeyboardButton("⚙️ Configurar Archivo", callback_data="select_file_to_configure")]
+        ])
+        
+        await message.reply(panel_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        
+    except Exception as e:
+        logger.error(f"Error en panel_command: {e}", exc_info=True)
+        await message.reply(
+            "❌ <b>Error al abrir el panel</b>\n\n"
+            f"Detalles: {escape_html(str(e))}\n\n"
+            "Por favor, intenta nuevamente.",
+            parse_mode=ParseMode.HTML
+        )
+
 @Client.on_message(filters.command("get_restricted") & filters.private)
 async def get_restricted_command(client: Client, message: Message):
     """Inicia el proceso de obtener contenido de un canal restringido."""
@@ -1322,6 +1378,38 @@ async def get_restricted_command(client: Client, message: Message):
     except Exception as e:
         logger.error(f"Error en get_restricted_command: {str(e)}", exc_info=True)
         await message.reply("❌ Ocurrió un error inesperado. Por favor, intenta nuevamente.")
+
+@Client.on_message(filters.command("help") & filters.private)
+async def help_command(client: Client, message: Message):
+    """Muestra la ayuda detallada del bot."""
+    try:
+        help_text = (
+            "📚 <b>Ayuda del Bot Profesional</b>\n\n"
+            "🔑 <b>Comandos disponibles:</b>\n\n"
+            "• <code>/start</code> - Iniciar el bot y ver el menú principal\n"
+            "• <code>/panel</code> - Ver archivos en cola de procesamiento\n"
+            "• <code>/get_restricted</code> - Descargar de canales privados\n"
+            "• <code>/help</code> - Mostrar esta ayuda\n\n"
+            "📤 <b>Envío directo:</b>\n"
+            "• Videos, audios o documentos para procesar\n"
+            "• Enlaces de Telegram (t.me/...)\n"
+            "• Enlaces de canales privados\n\n"
+            "⚙️ <b>Funcionalidades:</b>\n"
+            "• Compresión inteligente de videos\n"
+            "• Aplicación de marcas de agua\n"
+            "• Extracción de audio\n"
+            "• Cortar y recortar videos\n"
+            "• Conversión a GIF\n"
+            "• Gestión de metadatos\n\n"
+            "❓ <b>¿Necesitas ayuda?</b>\n"
+            "Envía un mensaje al administrador o usa /start para comenzar."
+        )
+        
+        await message.reply(help_text, parse_mode=ParseMode.HTML)
+        
+    except Exception as e:
+        logger.error(f"Error en help_command: {e}")
+        await message.reply("❌ Error al mostrar la ayuda. Intenta /start")
 
 @Client.on_message(filters.text & filters.private)
 async def text_message_handler(client: Client, message: Message):

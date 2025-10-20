@@ -183,7 +183,7 @@ async def main_config_callbacks_router(client: Client, query: CallbackQuery):
     elif data.startswith("config_"): await show_config_menu_and_set_state(client, query)
     elif data.startswith("set_"): await set_value_callback(client, query)
 
-@Client.on_callback_query(filters.regex(r"^(profile_|batch_|join_|zip_|panel_delete_all_|cancel_task_)"))
+@Client.on_callback_query(filters.regex(r"^(profile_|batch_|join_|zip_|panel_delete_all_|cancel_task_|open_panel_main|download_video_guide|open_settings|show_help_detailed|refresh_panel|select_file_to_configure)"))
 async def advanced_features_callbacks_router(client: Client, query: CallbackQuery):
     try: await query.answer()
     except Exception: pass
@@ -194,6 +194,12 @@ async def advanced_features_callbacks_router(client: Client, query: CallbackQuer
     elif data.startswith("zip_"): await handle_zip_actions(client, query)
     elif data.startswith("panel_delete_all_"): await handle_panel_delete_all(client, query)
     elif data.startswith("cancel_task_"): await handle_cancel_task(client, query)
+    elif data == "open_panel_main": await handle_open_panel_main(client, query)
+    elif data == "download_video_guide": await handle_download_video_guide(client, query)
+    elif data == "open_settings": await handle_open_settings(client, query)
+    elif data == "show_help_detailed": await handle_show_help_detailed(client, query)
+    elif data == "refresh_panel": await handle_refresh_panel(client, query)
+    elif data == "select_file_to_configure": await handle_select_file_to_configure(client, query)
 
 async def open_task_menu_callback(client: Client, query: CallbackQuery):
     task_id = query.data.split("_")[2]
@@ -381,3 +387,193 @@ async def handle_cancel_task(client: Client, query: CallbackQuery):
     except Exception as e:
         logger.error(f"Error cancelando tarea: {e}")
         await query.answer("❌ Error al cancelar la tarea.", show_alert=True)
+
+async def handle_open_panel_main(client: Client, query: CallbackQuery):
+    """Maneja el botón de abrir panel principal"""
+    try:
+        user_id = query.from_user.id
+        pending_tasks = await db_instance.get_pending_tasks(user_id, status_filter="pending_processing")
+        
+        if not pending_tasks:
+            await query.message.edit_text(
+                "📋 <b>Panel de Control</b>\n\n"
+                "No tienes archivos en el panel.\n\n"
+                "💡 <b>Para agregar archivos:</b>\n"
+                "• Envía videos directamente al bot\n"
+                "• Usa enlaces de Telegram con /get_restricted\n"
+                "• Reenvía contenido multimedia",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        # Construir mensaje del panel
+        panel_text = f"📋 <b>Panel de Control</b>\n\n"
+        panel_text += f"📊 <b>Total de archivos:</b> {len(pending_tasks)}\n\n"
+        
+        for i, task in enumerate(pending_tasks, 1):
+            file_name = task.get('original_filename', 'Archivo sin nombre')
+            file_type = task.get('file_type', 'document')
+            file_size = task.get('file_metadata', {}).get('size', 0)
+            duration = task.get('file_metadata', {}).get('duration', 0)
+            
+            # Emoji según tipo de archivo
+            emoji_map = {'video': '🎬', 'audio': '🎵', 'document': '📄'}
+            emoji = emoji_map.get(file_type, '📁')
+            
+            # Información del archivo
+            panel_text += f"{i}. {emoji} <code>{escape_html(file_name[:50])}</code>\n"
+            if file_size > 0:
+                panel_text += f"   📊 {format_size(file_size)}"
+            if duration > 0:
+                panel_text += f" | ⏱️ {format_time(duration)}"
+            panel_text += "\n\n"
+        
+        # Crear teclado con opciones
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Actualizar Panel", callback_data="refresh_panel")],
+            [InlineKeyboardButton("🗑️ Limpiar Todo", callback_data="panel_delete_all_confirm")],
+            [InlineKeyboardButton("⚙️ Configurar Archivo", callback_data="select_file_to_configure")]
+        ])
+        
+        await query.message.edit_text(panel_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        
+    except Exception as e:
+        logger.error(f"Error en handle_open_panel_main: {e}")
+        await query.answer("❌ Error al abrir el panel.", show_alert=True)
+
+async def handle_download_video_guide(client: Client, query: CallbackQuery):
+    """Maneja el botón de guía de descarga"""
+    try:
+        guide_text = (
+            "📥 <b>Guía de Descarga de Videos</b>\n\n"
+            "🔗 <b>Enlaces soportados:</b>\n"
+            "• Canales públicos: <code>https://t.me/canal/123</code>\n"
+            "• Canales privados: <code>https://t.me/c/123456789/123</code>\n"
+            "• Enlaces de invitación: <code>https://t.me/+ABC123</code>\n\n"
+            "📤 <b>Envío directo:</b>\n"
+            "• Reenvía videos desde otros chats\n"
+            "• Envía videos directamente al bot\n\n"
+            "⚙️ <b>Procesamiento:</b>\n"
+            "• Compresión automática\n"
+            "• Aplicación de marcas de agua\n"
+            "• Extracción de audio\n"
+            "• Conversión a GIF\n\n"
+            "💡 <b>Consejo:</b> Usa /panel para ver archivos en cola"
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 Ver Panel", callback_data="open_panel_main")],
+            [InlineKeyboardButton("🔙 Volver", callback_data="back_to_start")]
+        ])
+        
+        await query.message.edit_text(guide_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        
+    except Exception as e:
+        logger.error(f"Error en handle_download_video_guide: {e}")
+        await query.answer("❌ Error al mostrar la guía.", show_alert=True)
+
+async def handle_open_settings(client: Client, query: CallbackQuery):
+    """Maneja el botón de configuraciones"""
+    try:
+        settings_text = (
+            "⚙️ <b>Configuraciones del Bot</b>\n\n"
+            "🔧 <b>Configuraciones disponibles:</b>\n"
+            "• Calidad de compresión\n"
+            "• Marca de agua por defecto\n"
+            "• Formatos de salida\n"
+            "• Límites de tamaño\n\n"
+            "📋 <b>Gestionar archivos:</b>\n"
+            "• Ver panel de archivos\n"
+            "• Configurar procesamiento\n"
+            "• Aplicar efectos\n\n"
+            "💡 <b>Nota:</b> Las configuraciones se aplican a cada archivo individualmente."
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 Ver Panel", callback_data="open_panel_main")],
+            [InlineKeyboardButton("🔙 Volver", callback_data="back_to_start")]
+        ])
+        
+        await query.message.edit_text(settings_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        
+    except Exception as e:
+        logger.error(f"Error en handle_open_settings: {e}")
+        await query.answer("❌ Error al abrir configuraciones.", show_alert=True)
+
+async def handle_show_help_detailed(client: Client, query: CallbackQuery):
+    """Maneja el botón de ayuda detallada"""
+    try:
+        help_text = (
+            "📚 <b>Ayuda Detallada del Bot</b>\n\n"
+            "🔑 <b>Comandos principales:</b>\n"
+            "• <code>/start</code> - Menú principal\n"
+            "• <code>/panel</code> - Ver archivos en cola\n"
+            "• <code>/get_restricted</code> - Descargar de canales privados\n"
+            "• <code>/help</code> - Ayuda básica\n\n"
+            "📤 <b>Envío directo:</b>\n"
+            "• Videos, audios, documentos\n"
+            "• Enlaces de Telegram\n"
+            "• Enlaces de canales privados\n\n"
+            "⚙️ <b>Funcionalidades:</b>\n"
+            "• Compresión inteligente\n"
+            "• Marcas de agua\n"
+            "• Extracción de audio\n"
+            "• Cortar videos\n"
+            "• Conversión a GIF\n"
+            "• Gestión de metadatos\n\n"
+            "❓ <b>¿Problemas?</b>\n"
+            "Contacta al administrador o revisa los logs."
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 Ver Panel", callback_data="open_panel_main")],
+            [InlineKeyboardButton("🔙 Volver", callback_data="back_to_start")]
+        ])
+        
+        await query.message.edit_text(help_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        
+    except Exception as e:
+        logger.error(f"Error en handle_show_help_detailed: {e}")
+        await query.answer("❌ Error al mostrar la ayuda.", show_alert=True)
+
+async def handle_refresh_panel(client: Client, query: CallbackQuery):
+    """Maneja el botón de actualizar panel"""
+    try:
+        await handle_open_panel_main(client, query)
+    except Exception as e:
+        logger.error(f"Error en handle_refresh_panel: {e}")
+        await query.answer("❌ Error al actualizar el panel.", show_alert=True)
+
+async def handle_select_file_to_configure(client: Client, query: CallbackQuery):
+    """Maneja el botón de seleccionar archivo para configurar"""
+    try:
+        user_id = query.from_user.id
+        pending_tasks = await db_instance.get_pending_tasks(user_id, status_filter="pending_processing")
+        
+        if not pending_tasks:
+            await query.answer("❌ No hay archivos para configurar.", show_alert=True)
+            return
+        
+        # Mostrar lista de archivos para configurar
+        files_text = "⚙️ <b>Seleccionar Archivo para Configurar</b>\n\n"
+        
+        keyboard = []
+        for i, task in enumerate(pending_tasks[:10], 1):  # Máximo 10 archivos
+            file_name = task.get('original_filename', 'Archivo sin nombre')
+            task_id = str(task['_id'])
+            keyboard.append([InlineKeyboardButton(
+                f"{i}. {file_name[:30]}...", 
+                callback_data=f"p_open_{task_id}"
+            )])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Volver al Panel", callback_data="open_panel_main")])
+        
+        await query.message.edit_text(
+            files_text, 
+            parse_mode=ParseMode.HTML, 
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    except Exception as e:
+        logger.error(f"Error en handle_select_file_to_configure: {e}")
+        await query.answer("❌ Error al seleccionar archivo.", show_alert=True)
