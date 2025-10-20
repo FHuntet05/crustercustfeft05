@@ -674,12 +674,23 @@ async def handle_telegram_link(client: Client, message: Message, url: str = None
                 )
                 return
                 
-            await status_msg.edit(f"🔄 Verificando acceso al canal privado...")
+            await status_msg.edit(f"🔄 Uniendo al canal privado...")
             
             try:
-                # Intentar acceder al chat con el userbot usando el ID normalizado
-                logger.info(f"Intentando acceder al canal privado: {chat_id}")
+                # Intentar unirse al canal con el userbot
+                logger.info(f"Intentando unirse al canal privado: {chat_id}")
                 chat = await user_client.get_chat(chat_id)
+                
+                # Si llegamos aquí, el userbot se unió exitosamente
+                await status_msg.edit(
+                    "✅ <b>Ya eres miembro de este canal.</b>\n\n"
+                    "Por favor, envía el enlace del mensaje específico que quieres descargar.",
+                    parse_mode=ParseMode.HTML
+                )
+                
+                # Cambiar estado del usuario para esperar enlace específico
+                await db_instance.set_user_state(user_id, "waiting_specific_message")
+                return
                 
                 # Si llegamos aquí, tenemos acceso al canal
                 if message_id:
@@ -1233,19 +1244,39 @@ async def handle_direct_video(client: Client, message: Message):
         
         # Registrar el video en la base de datos
         try:
-            video_data = {
+            task_data = {
                 "user_id": message.from_user.id,
-                "file_name": video_info["file_name"],
-                "file_size": video_info["file_size"],
-                "duration": video_info["duration"],
-                "width": video_info["width"],
-                "height": video_info["height"],
-                "mime_type": video_info["mime_type"],
-                "message_id": message.id,
-                "status": "pending",
-                "created_at": datetime.now(timezone.utc)
+                "file_id": message.video.file_id,
+                "original_filename": video_info["file_name"],
+                "file_type": "video",
+                "file_metadata": {
+                    "size": video_info["file_size"],
+                    "duration": video_info["duration"],
+                    "width": video_info["width"],
+                    "height": video_info["height"],
+                    "mime_type": video_info["mime_type"]
+                },
+                "status": "pending_processing",
+                "created_at": datetime.utcnow(),
+                "processing_config": {
+                    "quality": "1080p",
+                    "content_type": "default"
+                }
             }
-            await db_instance.add_pending_video(video_data)
+            
+            task_id = await db_instance.create_task(task_data)
+            
+            if task_id:
+                # Actualizar el mensaje con el ID de la tarea
+                await status_msg.edit(
+                    f"{panel_message}\n\n"
+                    f"🆔 <b>ID de Tarea:</b> <code>{task_id}</code>\n"
+                    f"💡 Usa <code>/p {task_id}</code> para configurar este video",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=build_detailed_format_menu()
+                )
+            else:
+                raise Exception("No se pudo crear la tarea")
             
         except Exception as db_error:
             logger.error(f"Error registrando video en DB: {db_error}")
@@ -1360,14 +1391,17 @@ async def get_restricted_command(client: Client, message: Message):
         text = message.text.split(maxsplit=1)
         
         if len(text) < 2:
-            await db_instance.set_user_state(message.from_user.id, "waiting_restricted_link")
+            await db_instance.set_user_state(message.from_user.id, "waiting_channel_link")
             return await message.reply(
                 "📥 <b>Descarga de Contenido Restringido</b>\n\n"
-                "Por favor, envía el enlace del contenido que deseas descargar.\n\n"
+                "Por favor, envía el enlace del canal al que deseas acceder.\n\n"
                 "<b>Formatos válidos:</b>\n"
                 "• Canal privado: https://t.me/+abc123...\n"
-                "• Canal público: https://t.me/nombre_canal\n"
-                "• Mensaje específico: https://t.me/nombre_canal/123 o https://t.me/c/123456789/123",
+                "• Canal público: https://t.me/nombre_canal\n\n"
+                "💡 <b>Proceso:</b>\n"
+                "1. Te uniré al canal con el userbot\n"
+                "2. Luego me enviarás el enlace específico del mensaje\n"
+                "3. Descargaré el contenido automáticamente",
                 parse_mode=ParseMode.HTML
             )
             
@@ -1379,6 +1413,130 @@ async def get_restricted_command(client: Client, message: Message):
         logger.error(f"Error en get_restricted_command: {str(e)}", exc_info=True)
         await message.reply("❌ Ocurrió un error inesperado. Por favor, intenta nuevamente.")
 
+@Client.on_message(filters.command("p") & filters.private)
+async def p_command(client: Client, message: Message):
+    """Maneja el comando /p # para abrir funcionalidades de un video específico."""
+    try:
+        user_id = message.from_user.id
+        text = message.text.strip()
+        
+        # Extraer el número del comando
+        parts = text.split()
+        if len(parts) < 2:
+            await message.reply(
+                "❌ <b>Uso incorrecto del comando</b>\n\n"
+                "Uso: <code>/p #</code>\n"
+                "Donde # es el número del video en el panel\n\n"
+                "Ejemplo: <code>/p 1</code>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        try:
+            video_number = int(parts[1])
+        except ValueError:
+            await message.reply(
+                "❌ <b>Número inválido</b>\n\n"
+                "El número debe ser un entero válido.\n"
+                "Ejemplo: <code>/p 1</code>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        # Obtener tareas del usuario
+        pending_tasks = await db_instance.get_pending_tasks(user_id, status_filter="pending_processing")
+        
+        if not pending_tasks:
+            await message.reply(
+                "❌ <b>No hay archivos en el panel</b>\n\n"
+                "Usa <code>/panel</code> para ver tus archivos o envía un video al bot.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        if video_number < 1 or video_number > len(pending_tasks):
+            await message.reply(
+                f"❌ <b>Número fuera de rango</b>\n\n"
+                f"Tienes {len(pending_tasks)} archivo(s) en el panel.\n"
+                f"Usa un número entre 1 y {len(pending_tasks)}",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        # Obtener la tarea seleccionada
+        selected_task = pending_tasks[video_number - 1]
+        task_id = str(selected_task['_id'])
+        
+        # Abrir el menú de funcionalidades para este video
+        await open_task_menu_from_p(client, message, task_id)
+        
+    except Exception as e:
+        logger.error(f"Error en p_command: {e}", exc_info=True)
+        await message.reply("❌ Error al procesar el comando. Intenta nuevamente.")
+
+async def open_task_menu_from_p(client: Client, message: Message, task_id: str):
+    """Abre el menú de funcionalidades para una tarea específica desde el comando /p"""
+    try:
+        # Obtener información de la tarea
+        task = await db_instance.get_task(task_id)
+        if not task:
+            await message.reply("❌ Tarea no encontrada.")
+            return
+        
+        # Verificar que la tarea pertenece al usuario
+        if task.get('user_id') != message.from_user.id:
+            await message.reply("❌ No tienes permisos para acceder a esta tarea.")
+            return
+        
+        # Obtener información del archivo
+        file_name = task.get('original_filename', 'Archivo sin nombre')
+        file_type = task.get('file_type', 'document')
+        file_size = task.get('file_metadata', {}).get('size', 0)
+        duration = task.get('file_metadata', {}).get('duration', 0)
+        
+        # Construir mensaje de información
+        info_text = (
+            f"🎬 <b>Configuración de Video</b>\n\n"
+            f"📁 <b>Archivo:</b> <code>{escape_html(file_name)}</code>\n"
+            f"📊 <b>Tamaño:</b> {format_size(file_size)}\n"
+            f"⏱️ <b>Duración:</b> {format_time(duration)}\n"
+            f"🆔 <b>ID:</b> <code>{task_id}</code>\n\n"
+            f"⚙️ <b>Selecciona una funcionalidad:</b>"
+        )
+        
+        # Crear teclado con todas las funcionalidades de video
+        keyboard = InlineKeyboardMarkup([
+            # Primera fila - Funciones básicas
+            [InlineKeyboardButton("🎵 Extraer Audio", callback_data=f"extract_audio_{task_id}"),
+             InlineKeyboardButton("✂️ Cortar Video", callback_data=f"trim_video_{task_id}")],
+            
+            # Segunda fila - Conversiones
+            [InlineKeyboardButton("🎞️ Convertir a GIF", callback_data=f"convert_gif_{task_id}"),
+             InlineKeyboardButton("🔄 Convertir Formato", callback_data=f"convert_format_{task_id}")],
+            
+            # Tercera fila - Optimización
+            [InlineKeyboardButton("📦 Comprimir Video", callback_data=f"compress_video_{task_id}"),
+             InlineKeyboardButton("🖼️ Agregar Marca de Agua", callback_data=f"add_watermark_{task_id}")],
+            
+            # Cuarta fila - Funciones avanzadas
+            [InlineKeyboardButton("🔇 Silenciar Audio", callback_data=f"mute_audio_{task_id}"),
+             InlineKeyboardButton("📸 Generar Screenshots", callback_data=f"generate_screenshots_{task_id}")],
+            
+            # Quinta fila - Información y configuración
+            [InlineKeyboardButton("ℹ️ Información del Media", callback_data=f"media_info_{task_id}"),
+             InlineKeyboardButton("⚙️ Configuraciones", callback_data=f"config_task_{task_id}")],
+            
+            # Fila de navegación
+            [InlineKeyboardButton("📋 Volver al Panel", callback_data="open_panel_main"),
+             InlineKeyboardButton("❌ Cancelar", callback_data=f"cancel_task_{task_id}")]
+        ])
+        
+        await message.reply(info_text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        
+    except Exception as e:
+        logger.error(f"Error en open_task_menu_from_p: {e}", exc_info=True)
+        await message.reply("❌ Error al abrir el menú de funcionalidades.")
+
 @Client.on_message(filters.command("help") & filters.private)
 async def help_command(client: Client, message: Message):
     """Muestra la ayuda detallada del bot."""
@@ -1388,6 +1546,7 @@ async def help_command(client: Client, message: Message):
             "🔑 <b>Comandos disponibles:</b>\n\n"
             "• <code>/start</code> - Iniciar el bot y ver el menú principal\n"
             "• <code>/panel</code> - Ver archivos en cola de procesamiento\n"
+            "• <code>/p #</code> - Abrir funcionalidades del video #N\n"
             "• <code>/get_restricted</code> - Descargar de canales privados\n"
             "• <code>/help</code> - Mostrar esta ayuda\n\n"
             "📤 <b>Envío directo:</b>\n"
@@ -1439,6 +1598,12 @@ async def text_message_handler(client: Client, message: Message):
             
         # Si el usuario está esperando un enlace de canal
         elif user_state.get("status") == "waiting_channel_link":
+            await handle_telegram_link(client, message)
+            await db_instance.set_user_state(user_id, "idle")
+            return
+            
+        # Si el usuario está esperando un mensaje específico
+        elif user_state.get("status") == "waiting_specific_message":
             await handle_telegram_link(client, message)
             await db_instance.set_user_state(user_id, "idle")
             return
