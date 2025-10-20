@@ -117,6 +117,17 @@ async def handle_text_input_for_state(client: Client, message: Message, user_sta
                 return
             await db_instance.update_task_config(task_id, "trim_times", user_input)
             await message.reply("✅ Tiempos de corte configurados.", quote=True)
+            # Encolar automáticamente al definir trim
+            await db_instance.update_task_field(task_id, "status", "queued")
+            try:
+                await client.edit_message_text(
+                    user_id,
+                    source_message_id,
+                    text="✅ Corte configurado.\n⏳ <b>En Cola...</b>",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
             
         elif state == "awaiting_gif":
             parts = user_input.split()
@@ -182,6 +193,63 @@ async def main_config_callbacks_router(client: Client, query: CallbackQuery):
     elif data.startswith("task_"): await handle_task_actions(client, query)
     elif data.startswith("config_"): await show_config_menu_and_set_state(client, query)
     elif data.startswith("set_"): await set_value_callback(client, query)
+
+@Client.on_callback_query(filters.regex(r"^(quality_|set_transcode_|config_extract_audio_|config_trim_)"))
+async def quick_actions_router(client: Client, query: CallbackQuery):
+    """Router ligero para acciones rápidas (compresión, extraer audio, trim)."""
+    try: await query.answer()
+    except Exception: pass
+    data = query.data
+    user_id = query.from_user.id
+    # quality_{taskId}_{res}
+    if data.startswith("quality_") or data.startswith("set_transcode_"):
+        parts = data.split("_")
+        # Ambos patrones terminan con ..._{taskId}_resolution_{res} o ..._{taskId}_{res}
+        if data.startswith("set_transcode_"):
+            # set_transcode_{taskId}_resolution_{res}
+            task_id = parts[2]
+            if len(parts) >= 5 and parts[3] == "resolution":
+                res = parts[4]
+            else:
+                res = parts[-1]
+        else:
+            # quality_{taskId}_{res}
+            task_id = parts[1]
+            res = parts[2] if len(parts) > 2 else "1080"
+        # Guardar resolución y encolar
+        await db_instance.update_task_config(task_id, "transcode.resolution", res)
+        await db_instance.update_task_field(task_id, "status", "queued")
+        try:
+            await query.message.edit_text(
+                f"✅ Compresión seleccionada: {res}p\n⏳ <b>En Cola...</b>",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass
+        return
+    
+    # config_extract_audio_{taskId}
+    if data.startswith("config_extract_audio_"):
+        task_id = data.split("_")[-1]
+        await db_instance.update_task_config(task_id, "extract_audio", True)
+        await db_instance.update_task_field(task_id, "status", "queued")
+        try:
+            await query.message.edit_text("✅ Extracción de audio enviada.\n⏳ <b>En Cola...</b>", parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        return
+    
+    # config_trim_{taskId} abre el estado para pedir tiempos, luego encolará al recibir el texto
+    if data.startswith("config_trim_"):
+        task_id = data.split("_")[-1]
+        await db_instance.set_user_state(user_id, "awaiting_trim", data={"task_id": task_id, "source_message_id": query.message.id})
+        back_button = build_back_button(f"p_open_{task_id}")
+        await query.message.edit_text(
+            "✂️ Envíe tiempos de corte:\n• <code>00:10-00:50</code> (inicio-fin)\n• <code>01:23</code> (corta hasta ahí)",
+            reply_markup=back_button,
+            parse_mode=ParseMode.HTML
+        )
+        return
 
 @Client.on_callback_query(filters.regex(r"^(profile_|batch_|join_|zip_|panel_delete_all_|cancel_task_|open_panel_main|download_video_guide|open_settings|show_help_detailed|refresh_panel|select_file_to_configure)"))
 async def advanced_features_callbacks_router(client: Client, query: CallbackQuery):

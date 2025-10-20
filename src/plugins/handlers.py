@@ -1504,8 +1504,13 @@ async def p_command(client: Client, message: Message):
         selected_task = pending_tasks[video_number - 1]
         task_id = str(selected_task['_id'])
         
-        # Abrir el menú de funcionalidades para este video
-        await open_task_menu_from_p(client, message, task_id)
+        # Abrir el menú de funcionalidades para este video usando el router central
+        try:
+            from . import processing_handler as ph
+            await ph.open_task_menu_from_p(client, message, task_id)
+        except Exception:
+            # Fallback a la función local si falla la importación
+            await open_task_menu_from_p(client, message, task_id)
         
     except Exception as e:
         logger.error(f"Error en p_command: {e}", exc_info=True)
