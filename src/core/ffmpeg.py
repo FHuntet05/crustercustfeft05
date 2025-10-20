@@ -93,7 +93,7 @@ def _build_standard_video_command(
     filter_complex_parts = []
     current_video_chain = "[0:v]"
     
-        # Detección mejorada de resolución y ajuste de calidad
+    # Detección mejorada de resolución y ajuste de calidad
     video_stream = next((s for s in media_info.get('streams', []) if s.get('codec_type') == 'video'), None)
     if video_stream:
         width = int(video_stream.get('width', 1920))
@@ -101,6 +101,9 @@ def _build_standard_video_command(
         bitrate = float(video_stream.get('bit_rate', 0)) / 1024 if video_stream.get('bit_rate') else 0
         duration = float(media_info.get('format', {}).get('duration', 0))
         filesize = float(media_info.get('format', {}).get('size', 0)) / (1024 * 1024)  # en MB
+        
+        # Obtener tipo de contenido de la configuración o usar default
+        content_type = config.get('content_type', 'default')
         
         # Calcular target_height basado en el tamaño del archivo y la duración
         if filesize > 0 and duration > 0:
@@ -136,7 +139,7 @@ def _build_standard_video_command(
                 target_height = min(height, 720)
             else:
                 target_height = min(height, 720)
-        
+    
         if height > target_height:
             next_chain = "[scaled_v]"
             filter_complex_parts.append(f"{current_video_chain}scale=-2:{target_height}:flags=lanczos{next_chain}")
@@ -237,7 +240,7 @@ def _build_standard_video_command(
         else:
             quality_key = "480p"
             
-        settings = compression_settings.get(content_type, compression_settings["default"]).get(quality_key)
+        settings = compression_settings.get(quality_key)
         
         # Configuración base de compresión
         scale_value = settings.get("scale", "1920:-2")  # valor por defecto 1080p

@@ -65,50 +65,72 @@ async def force_dialog_sync(client: Client, chat_id: int, status_msg: Message = 
     try:
         # Primer intento: sincronización rápida
         if status_msg:
-            await status_msg.edit(
-                "🔄 <b>Sincronizando caché...</b>\n"
-                "Buscando el canal en los diálogos recientes...",
-                parse_mode=ParseMode.HTML
-            )
+            try:
+                await status_msg.edit(
+                    "🔄 <b>Sincronizando caché...</b>\n"
+                    "Buscando el canal en los diálogos recientes...",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as edit_error:
+                logger.warning(f"Error editando mensaje de estado: {edit_error}")
         
-        async for dialog in client.get_dialogs(limit=50):
+        # Buscar en diálogos recientes (más eficiente)
+        dialog_count = 0
+        async for dialog in client.get_dialogs(limit=100):
+            dialog_count += 1
             if dialog.chat.id == chat_id:
-                logger.info(f"Canal {chat_id} encontrado en sincronización rápida")
+                logger.info(f"Canal {chat_id} encontrado en sincronización rápida (diálogo {dialog_count})")
                 return True
                 
-        # Segundo intento: sincronización profunda
+        # Segundo intento: sincronización profunda solo si es necesario
         if status_msg:
-            await status_msg.edit(
-                "🔄 <b>Realizando sincronización profunda...</b>\n"
-                "Esto puede tomar un momento...",
-                parse_mode=ParseMode.HTML
-            )
+            try:
+                await status_msg.edit(
+                    "🔄 <b>Realizando sincronización profunda...</b>\n"
+                    "Esto puede tomar un momento...",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as edit_error:
+                logger.warning(f"Error editando mensaje de estado: {edit_error}")
             
-        dialog_count = 0
+        # Sincronización profunda con límite para evitar timeouts
+        max_dialogs = 500
         async for dialog in client.get_dialogs():
             dialog_count += 1
             if dialog.chat.id == chat_id:
-                logger.info(f"Canal {chat_id} encontrado en sincronización profunda")
+                logger.info(f"Canal {chat_id} encontrado en sincronización profunda (diálogo {dialog_count})")
                 return True
                 
+            # Actualizar progreso cada 50 diálogos
             if status_msg and dialog_count % 50 == 0:
-                await status_msg.edit(
-                    f"🔄 <b>Sincronización en progreso...</b>\n"
-                    f"Chats procesados: {dialog_count}",
-                    parse_mode=ParseMode.HTML
-                )
+                try:
+                    await status_msg.edit(
+                        f"🔄 <b>Sincronización en progreso...</b>\n"
+                        f"Chats procesados: {dialog_count}",
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception as edit_error:
+                    logger.debug(f"Error actualizando progreso: {edit_error}")
+                    
+            # Límite de seguridad para evitar bucles infinitos
+            if dialog_count >= max_dialogs:
+                logger.warning(f"Límite de {max_dialogs} diálogos alcanzado")
+                break
                 
-        logger.warning(f"Canal {chat_id} no encontrado después de sincronización completa")
+        logger.warning(f"Canal {chat_id} no encontrado después de procesar {dialog_count} diálogos")
         return False
         
     except Exception as e:
         logger.error(f"Error durante la sincronización de diálogos: {e}")
         if status_msg:
-            await status_msg.edit(
-                "❌ <b>Error durante la sincronización</b>\n"
-                f"Detalles: {escape_html(str(e))}",
-                parse_mode=ParseMode.HTML
-            )
+            try:
+                await status_msg.edit(
+                    "❌ <b>Error durante la sincronización</b>\n"
+                    f"Detalles: {escape_html(str(e))}",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as edit_error:
+                logger.error(f"Error editando mensaje de error: {edit_error}")
         return False
 
 def normalize_chat_id(chat_id: Union[str, int]) -> int:
@@ -1358,44 +1380,23 @@ async def text_message_handler(client: Client, message: Message):
 
 async def handle_url_input(client: Client, message: Message, url: str):
     """Maneja un enlace que no es de Telegram."""
-    # Esta función es un placeholder para mantener compatibilidad
-    # con la implementación anterior, en caso de que se necesite manejar
-    # otros tipos de URLs (YouTube, etc.)
-    
     # Si es un enlace de Telegram, redirigir a la función especializada
     if "t.me/" in url:
         return await handle_telegram_link(client, message, url)
         
-    # Para otros tipos de URL, implementar lógica según sea necesario
+    # Para otros tipos de URL, mostrar mensaje informativo
     await message.reply(
         "🔗 <b>Enlace detectado</b>\n\n"
-        "Este tipo de enlace no está soportado actualmente.",
+        "Este tipo de enlace no está soportado actualmente.\n"
+        "Solo se soportan enlaces de Telegram (t.me/...).",
         parse_mode=ParseMode.HTML
     )
 
 async def handle_music_search(client: Client, message: Message, query: str):
     """Maneja una búsqueda de música."""
-    # Esta función es un placeholder para mantener compatibilidad
-    # con la implementación anterior
-    
     await message.reply(
         "🎵 <b>Búsqueda de música</b>\n\n"
-        "Esta función está en mantenimiento.",
+        "Esta función está en desarrollo.\n"
+        "Por ahora, puedes enviar enlaces de Telegram para descargar contenido.",
         parse_mode=ParseMode.HTML
     )
-
-# Funciones auxiliares para mantener compatibilidad con código existente
-
-def format_time(seconds: float) -> str:
-    """Formatea el tiempo en segundos a una forma legible."""
-    if seconds < 0:
-        return "0s"
-    elif seconds < 60:
-        return f"{seconds:.1f}s"
-    elif seconds < 3600:
-        minutes = seconds / 60
-        return f"{minutes:.1f}m"
-    else:
-        hours = seconds / 3600
-        minutes = (seconds % 3600) / 60
-        return f"{hours:.0f}h {minutes:.0f}m"

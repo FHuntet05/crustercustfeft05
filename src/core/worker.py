@@ -199,6 +199,12 @@ async def process_task(bot, task: dict):
     status_message, files_to_clean = None, set()
     original_filename = "Tarea sin nombre"
     
+    # Verificar si la tarea fue cancelada antes de procesar
+    current_task = await db_instance.get_task(task_id)
+    if not current_task or current_task.get('status') == 'cancelled':
+        logger.info(f"Tarea {task_id} fue cancelada, saltando procesamiento")
+        return
+    
     # Manejar descargas de canales restringidos
     if task.get('is_restricted', False):
         try:
@@ -215,6 +221,12 @@ async def process_task(bot, task: dict):
     try:
         task = await db_instance.get_task(task_id)
         if not task: raise Exception("Tarea no encontrada.")
+        
+        # Verificar cancelación nuevamente después de obtener la tarea
+        if task.get('status') == 'cancelled':
+            logger.info(f"Tarea {task_id} fue cancelada durante el procesamiento")
+            return
+            
         file_type = task.get('file_type', 'video')
         original_filename = task.get('original_filename') or task.get('url', 'Tarea sin nombre')
         status_message = await bot.send_message(user_id, "✅ Tarea recibida. Preparando...", parse_mode=ParseMode.HTML)

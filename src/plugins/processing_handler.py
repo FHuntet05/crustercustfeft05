@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 from datetime import datetime
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery
@@ -55,17 +56,36 @@ async def handle_text_input_for_state(client: Client, message: Message, user_sta
     task_id, source_message_id = data.get('task_id'), data.get('source_message_id')
 
     if not task_id or not source_message_id:
-        await db_instance.set_user_state(user_id, "idle"); return
+        await db_instance.set_user_state(user_id, "idle")
+        await message.reply("❌ Error: No se encontró la tarea asociada. Por favor, inténtalo de nuevo.", quote=True)
+        return
 
     try:
         if state == "awaiting_watermark_text":
             if not user_input:
-                await message.reply("❌ El texto para la marca de agua no puede estar vacío.", quote=True)
+                await message.reply("❌ El texto para la marca de agua no puede estar vacío. Por favor, envía un texto válido.", quote=True)
                 return
+            
+            # Validar que el texto no sea demasiado largo
+            if len(user_input) > 50:
+                await message.reply("❌ El texto de la marca de agua es demasiado largo. Máximo 50 caracteres.", quote=True)
+                return
+                
             await db_instance.update_task_config(task_id, "watermark", {"type": "text", "text": user_input})
             await message.delete() 
             await db_instance.set_user_state(user_id, 'awaiting_watermark_position', data=data)
-            await client.edit_message_text(user_id, source_message_id, text="✅ Texto recibido. Elija la posición:", reply_markup=build_position_menu(task_id, "config_watermark"))
+            
+            try:
+                await client.edit_message_text(
+                    user_id, 
+                    source_message_id, 
+                    text="✅ <b>Texto recibido:</b> " + escape_html(user_input) + "\n\n📍 <b>Elija la posición:</b>", 
+                    reply_markup=build_position_menu(task_id, "config_watermark"),
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as edit_error:
+                logger.error(f"Error editando mensaje de posición: {edit_error}")
+                await message.reply("✅ Texto recibido. Por favor, usa el botón de configuración para continuar.", quote=True)
             return 
 
         task = await db_instance.get_task(task_id)
@@ -77,14 +97,43 @@ async def handle_text_input_for_state(client: Client, message: Message, user_sta
             await db_instance.add_preset(user_id, user_input, task.get('processing_config', {}))
             await message.reply(f"✅ Perfil '<b>{escape_html(user_input)}</b>' guardado.", parse_mode=ParseMode.HTML, quote=True)
         elif state == "awaiting_rename":
+            if not user_input:
+                await message.reply("❌ El nombre del archivo no puede estar vacío.", quote=True)
+                return
+            if len(user_input) > 100:
+                await message.reply("❌ El nombre del archivo es demasiado largo. Máximo 100 caracteres.", quote=True)
+                return
             await db_instance.update_task_config(task_id, "final_filename", sanitize_filename(os.path.splitext(user_input)[0]))
+            await message.reply("✅ Nombre del archivo actualizado.", quote=True)
+            
         elif state == "awaiting_trim":
+            if not user_input:
+                await message.reply("❌ Los tiempos de corte no pueden estar vacíos.", quote=True)
+                return
+            # Validar formato de tiempo básico
+            time_pattern = r'^(\d{1,2}:\d{2}(:\d{2})?(-\d{1,2}:\d{2}(:\d{2})?)?|\d{1,2}:\d{2}(:\d{2})?)$'
+            if not re.match(time_pattern, user_input):
+                await message.reply("❌ Formato de tiempo inválido. Use: `00:10-00:50` o `01:23`", quote=True)
+                return
             await db_instance.update_task_config(task_id, "trim_times", user_input)
+            await message.reply("✅ Tiempos de corte configurados.", quote=True)
+            
         elif state == "awaiting_gif":
             parts = user_input.split()
             if len(parts) == 2 and parts[0].replace('.','',1).isdigit() and parts[1].isdigit():
-                await db_instance.update_task_config(task_id, "gif_options", {"duration": float(parts[0]), "fps": int(parts[1])})
-            else: await message.reply("❌ Formato inválido. Use: `duración fps` (ej: `5 15`)", quote=True); return
+                duration = float(parts[0])
+                fps = int(parts[1])
+                if duration <= 0 or duration > 60:
+                    await message.reply("❌ La duración debe estar entre 0.1 y 60 segundos.", quote=True)
+                    return
+                if fps < 5 or fps > 30:
+                    await message.reply("❌ Los FPS deben estar entre 5 y 30.", quote=True)
+                    return
+                await db_instance.update_task_config(task_id, "gif_options", {"duration": duration, "fps": fps})
+                await message.reply("✅ Configuración de GIF actualizada.", quote=True)
+            else: 
+                await message.reply("❌ Formato inválido. Use: `duración fps` (ej: `5 15`)", quote=True)
+                return
         elif state == "awaiting_audiotags":
             tags_to_update, valid_keys = {}, {'título': 'title', 'titulo': 'title', 'artista': 'artist', 'artist': 'artist', 'álbum': 'album', 'album': 'album'}
             for line in user_input.split('\n'):
@@ -134,7 +183,7 @@ async def main_config_callbacks_router(client: Client, query: CallbackQuery):
     elif data.startswith("config_"): await show_config_menu_and_set_state(client, query)
     elif data.startswith("set_"): await set_value_callback(client, query)
 
-@Client.on_callback_query(filters.regex(r"^(profile_|batch_|join_|zip_|panel_delete_all_)"))
+@Client.on_callback_query(filters.regex(r"^(profile_|batch_|join_|zip_|panel_delete_all_|cancel_task_)"))
 async def advanced_features_callbacks_router(client: Client, query: CallbackQuery):
     try: await query.answer()
     except Exception: pass
@@ -144,6 +193,7 @@ async def advanced_features_callbacks_router(client: Client, query: CallbackQuer
     elif data.startswith("join_"): await handle_join_actions(client, query)
     elif data.startswith("zip_"): await handle_zip_actions(client, query)
     elif data.startswith("panel_delete_all_"): await handle_panel_delete_all(client, query)
+    elif data.startswith("cancel_task_"): await handle_cancel_task(client, query)
 
 async def open_task_menu_callback(client: Client, query: CallbackQuery):
     task_id = query.data.split("_")[2]
@@ -297,3 +347,37 @@ async def handle_panel_delete_all(client: Client, query: CallbackQuery):
         deleted = await db_instance.delete_all_pending_tasks(query.from_user.id)
         await query.message.edit_text(f"💥 Panel limpiado. Se descartaron {deleted.deleted_count} tareas.")
     elif action == "cancel": await query.message.edit_text("Operación cancelada.")
+
+async def handle_cancel_task(client: Client, query: CallbackQuery):
+    """Maneja la cancelación de una tarea en progreso"""
+    try:
+        task_id = query.data.split("_")[2]
+        user_id = query.from_user.id
+        
+        # Verificar si la tarea existe
+        task = await db_instance.get_task(task_id)
+        if not task:
+            await query.answer("❌ La tarea ya no existe.", show_alert=True)
+            return
+            
+        # Verificar que el usuario es el propietario de la tarea
+        if task.get('user_id') != user_id:
+            await query.answer("❌ No tienes permisos para cancelar esta tarea.", show_alert=True)
+            return
+            
+        # Cancelar la tarea
+        await db_instance.update_task_field(task_id, "status", "cancelled")
+        await db_instance.set_user_state(user_id, "idle")
+        
+        # Notificar al usuario
+        await query.message.edit_text(
+            "❌ <b>Tarea Cancelada</b>\n\n"
+            f"La tarea <code>{task_id}</code> ha sido cancelada exitosamente.",
+            parse_mode=ParseMode.HTML
+        )
+        
+        logger.info(f"Tarea {task_id} cancelada por el usuario {user_id}")
+        
+    except Exception as e:
+        logger.error(f"Error cancelando tarea: {e}")
+        await query.answer("❌ Error al cancelar la tarea.", show_alert=True)
