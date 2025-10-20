@@ -679,9 +679,28 @@ async def handle_telegram_link(client: Client, message: Message, url: str = None
             try:
                 # Intentar unirse al canal con el userbot
                 logger.info(f"Intentando unirse al canal privado: {chat_id}")
-                chat = await user_client.get_chat(chat_id)
                 
-                # Si llegamos aquí, el userbot se unió exitosamente
+                # Primero intentar obtener información del chat
+                try:
+                    chat = await user_client.get_chat(chat_id)
+                    logger.info(f"Canal encontrado: {chat.title}")
+                except Exception as get_chat_error:
+                    logger.error(f"Error obteniendo chat: {get_chat_error}")
+                    
+                    # Si es un error de PeerIdInvalid, intentar con el ID sin normalizar
+                    if "Peer id invalid" in str(get_chat_error):
+                        try:
+                            # Intentar con el ID original sin el prefijo -100
+                            original_id = int(raw_chat_id)
+                            chat = await user_client.get_chat(original_id)
+                            logger.info(f"Canal encontrado con ID original: {chat.title}")
+                        except Exception as original_error:
+                            logger.error(f"Error con ID original: {original_error}")
+                            raise get_chat_error
+                    else:
+                        raise get_chat_error
+                
+                # Si llegamos aquí, el userbot tiene acceso al canal
                 await status_msg.edit(
                     "✅ <b>Ya eres miembro de este canal.</b>\n\n"
                     "Por favor, envía el enlace del mensaje específico que quieres descargar.",
@@ -906,10 +925,28 @@ async def handle_telegram_link(client: Client, message: Message, url: str = None
                     return
             except Exception as e:
                 logger.error(f"Error accediendo al canal privado {chat_id}: {e}")
-                await status_msg.edit(
-                    f"❌ <b>Error al acceder al canal:</b> {escape_html(str(e))}",
-                    parse_mode=ParseMode.HTML
-                )
+                
+                # Mensaje de error más específico
+                if "Peer id invalid" in str(e):
+                    error_message = (
+                        "❌ <b>Error al acceder al canal privado</b>\n\n"
+                        "El userbot no puede acceder a este canal. Posibles causas:\n\n"
+                        "• El canal es muy privado y requiere invitación especial\n"
+                        "• El userbot no está autorizado para este canal\n"
+                        "• El enlace del canal es incorrecto\n\n"
+                        "💡 <b>Soluciones:</b>\n"
+                        "• Verifica que el enlace sea correcto\n"
+                        "• Asegúrate de que el userbot tenga acceso al canal\n"
+                        "• Intenta con un canal público primero"
+                    )
+                else:
+                    error_message = (
+                        f"❌ <b>Error al acceder al canal:</b>\n\n"
+                        f"<code>{escape_html(str(e))}</code>\n\n"
+                        "Por favor, verifica el enlace e intenta nuevamente."
+                    )
+                
+                await status_msg.edit(error_message, parse_mode=ParseMode.HTML)
                 return
         
         else:

@@ -244,6 +244,27 @@ class Database:
             logger.error(f"Error registrando usuario {user_id}: {e}")
             return False
 
+    async def create_task(self, task_data: dict) -> str:
+        """Crea una nueva tarea de procesamiento"""
+        try:
+            # Agregar timestamp si no existe
+            if 'created_at' not in task_data:
+                task_data['created_at'] = datetime.utcnow()
+            
+            # Insertar en la colección de tareas
+            result = await self.tasks.insert_one(task_data)
+            
+            if result.inserted_id:
+                logger.info(f"Tarea creada exitosamente: {result.inserted_id}")
+                return str(result.inserted_id)
+            else:
+                logger.error("No se pudo crear la tarea")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error creando tarea: {e}")
+            return None
+
     # --- Métodos para Canales Monitoreados ---
     
     async def add_monitored_channel(self, channel_id: int, user_id: int) -> bool:
