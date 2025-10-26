@@ -177,14 +177,10 @@ def _build_video_command(
             raise ValueError("Error al mapear subtítulos. Verifique las configuraciones de entrada.")
 
     # Validar que el flujo 'scaled_v' se haya generado correctamente
-    if 'scaled_v' in video_chain:
-        video_chain = video_chain.replace('scaled_v', 'scaled_v?')
+    if 'scaled_v' not in video_chain:
+        raise ValueError("El flujo 'scaled_v' no se generó correctamente en el filtro complejo.")
 
-    # Validar que el mapa de salida sea correcto
-    if not video_chain.strip("[]"):
-        raise ValueError("El mapa de salida de video está vacío. Verifique los filtros complejos.")
-
-    # Actualizar el comando con el mapa de salida corregido
+    # Asegurar que el mapa de salida sea válido
     command.extend(["-map", video_chain.strip("[]")])
 
     return [command], output_path
