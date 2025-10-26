@@ -53,54 +53,61 @@ def build_quality_menu(task_id: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔙 Volver", callback_data=f"menu_{task_id}")]
     ]
     return InlineKeyboardMarkup(keyboard)
-
 def build_processing_menu(task_id: str, file_type: str, task_data: Dict) -> InlineKeyboardMarkup:
-    keyboard, config = [], task_data.get('processing_config', {})
-    
-    # Sección de Compresión/Calidad para videos
+    keyboard = []
+    config = task_data.get('processing_config', {})
+
+    # --- SECCIÓN DE VIDEO ---
     if file_type == 'video':
-        quality = config.get('quality', '1080p')
-        mute_text = "🔇 Silenciar" if not config.get('mute_audio') else "🔊 Restaurar Audio"
+        # 1. Calidad
+        quality = config.get('quality', 'Original')
+        quality_emoji = "✅" if quality != 'Original' else "📉"
+        keyboard.append([InlineKeyboardButton(f"{quality_emoji} Calidad: {quality}", callback_data=f"config_transcode_{task_id}")])
+
+        # 2. Marca de Agua
+        wm_conf = config.get('watermark')
+        if wm_conf:
+            wm_type = "Imagen" if wm_conf.get('type') == 'image' else "Texto"
+            wm_text = f"✅ Marca de Agua: {wm_type}"
+        else:
+            wm_text = "💧 Añadir Marca de Agua"
+        keyboard.append([InlineKeyboardButton(wm_text, callback_data=f"config_watermark_{task_id}")])
+
+        # 3. Fila de Herramientas
+        mute_conf = config.get('mute_audio', False)
+        mute_text = "🔊 Restaurar Audio" if mute_conf else "🔇 Silenciar Audio"
+        mute_emoji = "✅" if mute_conf else ""
         
-        keyboard.extend([
-            # Calidad y Compresión
-            [InlineKeyboardButton(f"{quality_emoji} Tipo: {quality.title()}", callback_data=f"set_content_type_{task_id}")],
-            [InlineKeyboardButton(f"📉 Calidad: {transcode_res}", callback_data=f"config_transcode_{task_id}")],
-            # Herramientas de Video
-            [
-                InlineKeyboardButton("✂️ Cortar", callback_data=f"config_trim_{task_id}"),
-                InlineKeyboardButton("🎞️ GIF", callback_data=f"config_gif_{task_id}"),
-                InlineKeyboardButton(mute_text, callback_data=f"set_mute_{task_id}_toggle")
-            ],
-            # Personalización
-            [
-                InlineKeyboardButton("💧 Marca Agua", callback_data=f"config_watermark_{task_id}"),
-                InlineKeyboardButton("🖼️ Miniatura", callback_data=f"config_thumbnail_{task_id}")
-            ],
-            # Pistas y Subtítulos
-            [InlineKeyboardButton("📜 Pistas (Audio/Subs)", callback_data=f"config_tracks_{task_id}")]
+        trim_conf = config.get('trim_times')
+        trim_emoji = "✅" if trim_conf else "✂️"
+
+        keyboard.append([
+            InlineKeyboardButton(f"{trim_emoji} Cortar", callback_data=f"config_trim_{task_id}"),
+            InlineKeyboardButton(f"{mute_emoji} {mute_text}", callback_data=f"set_mute_{task_id}_toggle")
         ])
+
+        # 4. Pistas (Audio y Subtítulos) y Miniatura
+        keyboard.append([
+            InlineKeyboardButton("📜 Pistas (Audio/Subs)", callback_data=f"config_tracks_{task_id}"),
+            InlineKeyboardButton("🖼️ Miniatura", callback_data=f"config_thumbnail_{task_id}")
+        ])
+
+    # --- SECCIÓN DE AUDIO (si es necesario) ---
     elif file_type == 'audio':
-        keyboard.extend([
-            [
-                InlineKeyboardButton("✂️ Cortar", callback_data=f"config_trim_{task_id}"),
-                InlineKeyboardButton("📝 Metadatos", callback_data=f"config_audiometadata_{task_id}")
-            ],
+        keyboard.append([
+            InlineKeyboardButton("✂️ Cortar Audio", callback_data=f"config_trim_{task_id}"),
+            InlineKeyboardButton("📝 Metadatos", callback_data=f"config_audiometadata_{task_id}")
         ])
-        
-    # Controles Comunes (para todos los tipos)
-    keyboard.extend([
-        # Opciones de Archivo
-        [
-            InlineKeyboardButton("✏️ Renombrar", callback_data=f"config_rename_{task_id}"),
-            InlineKeyboardButton("💾 Guardar Perfil", callback_data=f"profile_save_request_{task_id}")
-        ],
-    ])
-    
-    # Botones de Acción Principal
+
+    # --- CONTROLES COMUNES ---
+    filename = config.get('final_filename', 'Nombre Original')
+    filename_emoji = "✅" if 'final_filename' in config else "✏️"
+    keyboard.append([InlineKeyboardButton(f"{filename_emoji} Renombrar: {filename}", callback_data=f"config_rename_{task_id}")])
+
+    # --- BOTONES DE ACCIÓN PRINCIPAL ---
     keyboard.append([
-        InlineKeyboardButton("❌ Cancelar", callback_data=f"task_delete_{task_id}"),
-        InlineKeyboardButton("⚡️ Procesar", callback_data=f"task_queuesingle_{task_id}")
+        InlineKeyboardButton("🗑️ Cancelar Tarea", callback_data=f"task_delete_{task_id}"),
+        InlineKeyboardButton("⚡️ PROCESAR AHORA ⚡️", callback_data=f"task_queuesingle_{task_id}")
     ])
     
     return InlineKeyboardMarkup(keyboard)
@@ -114,10 +121,11 @@ def build_cancel_button(task_id: str) -> InlineKeyboardMarkup:
 # --- Sub-menús de Configuración ---
 
 def build_transcode_menu(task_id: str) -> InlineKeyboardMarkup:
-    resolutions = ["1080p", "720p", "480p", "360p", "240p", "144p"]
-    keyboard = [[InlineKeyboardButton(res, callback_data=f"set_transcode_{task_id}_resolution_{res}")] for res in resolutions]
-    keyboard.append([InlineKeyboardButton("❌ Mantener Resolución Original", callback_data=f"set_transcode_{task_id}_remove_all")])
-    keyboard.append([InlineKeyboardButton("🔙 Volver", callback_data=f"p_open_{task_id}")])
+    # Menú mejorado con opción para quitar la compresión
+    resolutions = ["1080p", "720p", "480p", "360p"]
+    keyboard = [[InlineKeyboardButton(f"✅ Establecer {res}", callback_data=f"set_transcode_{task_id}_{res}")] for res in resolutions]
+    keyboard.append([InlineKeyboardButton("❌ Mantener Calidad Original", callback_data=f"set_transcode_{task_id}_remove")])
+    keyboard.append([InlineKeyboardButton("🔙 Volver al Menú", callback_data=f"p_open_{task_id}")])
     return InlineKeyboardMarkup(keyboard)
 
 def build_tracks_menu(task_id: str, config: Dict) -> InlineKeyboardMarkup:
