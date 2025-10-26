@@ -225,7 +225,16 @@ async def handle_text_input_for_state(client: Client, message: Message, user_sta
             def __init__(self, msg, uid): self.message = msg; self.from_user = type('user', (), {'id':uid})
             async def answer(self, *args, **kwargs): pass
         
-        original_panel_message = await client.get_messages(user_id, message.reply_to_message.id)
+        original_message = getattr(message, "reply_to_message", None)
+        if original_message is None or getattr(original_message, "id", None) is None:
+            await client.send_message(
+                user_id,
+                "⚠️ No pude localizar el panel original. Por favor vuelve a abrir el menú usando /start.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+        original_panel_message = await client.get_messages(user_id, original_message.id)
         await _update_and_redisplay_menu(client, FakeQuery(original_panel_message, user_id), task_id, "✅ Configuración guardada.")
         await message.delete() # Borra el mensaje de entrada del usuario
     else:

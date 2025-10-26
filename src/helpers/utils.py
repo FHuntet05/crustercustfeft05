@@ -57,12 +57,24 @@ def _resolve_parse_mode_html():
 @retry_async(retry_exceptions=(FloodWait, BadRequest), max_attempts=3)
 async def _try_edit_message(bot, chat_id, message_id, text):
     """Try to edit a message with retries."""
-    await bot.edit_message_text(
-        chat_id=chat_id,
-        message_id=message_id,
-        text=text,
-        parse_mode=_resolve_parse_mode_html()
-    )
+    kwargs = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text
+    }
+    parse_mode = _resolve_parse_mode_html()
+    if parse_mode:
+        kwargs["parse_mode"] = parse_mode
+
+    try:
+        await bot.edit_message_text(**kwargs)
+    except BadRequest as exc:
+        if "parse mode" in str(exc).lower():
+            # Reintentar sin parse_mode para evitar bloquear el progreso.
+            kwargs.pop("parse_mode", None)
+            await bot.edit_message_text(**kwargs)
+        else:
+            raise
 
 async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
     """Edita un mensaje de estado de forma segura, evitando spam y manejando errores."""
