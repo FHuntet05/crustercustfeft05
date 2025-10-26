@@ -176,6 +176,17 @@ def _build_video_command(
         except KeyError:
             raise ValueError("Error al mapear subtítulos. Verifique las configuraciones de entrada.")
 
+    # Validar que el flujo 'scaled_v' se haya generado correctamente
+    if 'scaled_v' in video_chain:
+        video_chain = video_chain.replace('scaled_v', 'scaled_v?')
+
+    # Validar que el mapa de salida sea correcto
+    if not video_chain.strip("[]"):
+        raise ValueError("El mapa de salida de video está vacío. Verifique los filtros complejos.")
+
+    # Actualizar el comando con el mapa de salida corregido
+    command.extend(["-map", video_chain.strip("[]")])
+
     return [command], output_path
 
 def _build_extract_audio_command(input_path: str, output_path_base: str) -> Tuple[List[List[str]], str]:
