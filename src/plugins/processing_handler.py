@@ -6,7 +6,7 @@ import re
 import time
 from datetime import datetime
 from pyrogram import Client, filters
-from pyrogram.types import Message, CallbackQuery
+from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.enums import ParseMode
 from pyrogram.errors import MessageNotModified
 from bson.objectid import ObjectId
@@ -296,3 +296,27 @@ async def handle_direct_video(client: Client, message: Message):
         await _update_and_redisplay_menu(client, message, task_id, "Task created successfully.")
     else:
         await message.reply("Failed to create task.")
+
+@Client.on_callback_query(filters.regex(r"^compress_video_"))
+async def handle_compress_video(client: Client, query: CallbackQuery):
+    """Handles the 'Compress Video' button click."""
+    task_id = query.data.split("_")[2]
+    task = await db_instance.get_task(task_id)
+
+    if not task:
+        await query.answer("Task not found.", show_alert=True)
+        return
+
+    video_name = task.get("original_filename", "Unknown Video")
+    compression_menu = InlineKeyboardMarkup([
+        [InlineKeyboardButton("1080p", callback_data=f"set_compression_{task_id}_1080p"),
+         InlineKeyboardButton("720p", callback_data=f"set_compression_{task_id}_720p")],
+        [InlineKeyboardButton("480p", callback_data=f"set_compression_{task_id}_480p"),
+         InlineKeyboardButton("Cancel", callback_data=f"cancel_task_{task_id}")]
+    ])
+
+    await query.message.edit_text(
+        f"\ud83c\udfa5 <b>Compressing Video:</b>\n<code>{escape_html(video_name)}</code>\n\nSelect a quality:",
+        reply_markup=compression_menu,
+        parse_mode=ParseMode.HTML
+    )
