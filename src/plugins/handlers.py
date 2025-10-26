@@ -1237,8 +1237,38 @@ async def start_command(client: Client, message: Message):
 
 @Client.on_message(filters.private & filters.video, group=1)
 async def handle_direct_video(client: Client, message: Message):
-    """Maneja videos enviados directamente al bot."""
-    await main_processing_router(client, message)
+    """Handles videos sent directly to the bot."""
+    user_id = message.from_user.id
+    video_info = await get_media_info(message)
+
+    if not video_info["file_name"]:
+        video_info["file_name"] = f"video_{int(time.time())}.mp4"
+
+    task_data = {
+        "user_id": user_id,
+        "file_id": message.video.file_id,
+        "original_filename": video_info["file_name"],
+        "file_type": "video",
+        "file_metadata": {
+            "size": video_info["file_size"],
+            "duration": video_info["duration"],
+            "width": video_info["width"],
+            "height": video_info["height"],
+            "mime_type": video_info["mime_type"]
+        },
+        "status": "pending_processing",
+        "created_at": datetime.utcnow(),
+        "processing_config": {
+            "quality": "1080p",
+            "content_type": "default"
+        }
+    }
+
+    task_id = await db_instance.create_task(task_data)
+    if task_id:
+        await message.reply(f"Task created successfully with ID: {task_id}")
+    else:
+        await message.reply("Failed to create task.")
 
 @Client.on_message(filters.command("panel") & filters.private)
 async def panel_command(client: Client, message: Message):
