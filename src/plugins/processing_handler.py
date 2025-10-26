@@ -3,6 +3,8 @@
 import logging
 import os
 import re
+import time
+from datetime import datetime
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery
 from pyrogram.enums import ParseMode
@@ -11,7 +13,7 @@ from bson.objectid import ObjectId
 
 from src.db.mongo_manager import db_instance
 from src.helpers.keyboards import build_processing_menu, build_transcode_menu, build_tracks_menu, build_watermark_menu, build_position_menu, build_thumbnail_menu, build_audio_metadata_menu, build_back_button
-from src.helpers.utils import sanitize_filename, escape_html
+from src.helpers.utils import sanitize_filename, escape_html, get_media_info
 
 logger = logging.getLogger(__name__)
 
@@ -259,3 +261,38 @@ async def handle_media_input_for_state(client: Client, message: Message, user_st
         await message.delete()
     else:
         await message.reply("❌ Archivo no válido para esta operación.")
+
+# Add a function to handle direct video processing
+async def handle_direct_video(client: Client, message: Message):
+    """Handles videos sent directly to the bot."""
+    user_id = message.from_user.id
+    video_info = await get_media_info(message)
+
+    if not video_info["file_name"]:
+        video_info["file_name"] = f"video_{int(time.time())}.mp4"
+
+    task_data = {
+        "user_id": user_id,
+        "file_id": message.video.file_id,
+        "original_filename": video_info["file_name"],
+        "file_type": "video",
+        "file_metadata": {
+            "size": video_info["file_size"],
+            "duration": video_info["duration"],
+            "width": video_info["width"],
+            "height": video_info["height"],
+            "mime_type": video_info["mime_type"]
+        },
+        "status": "pending_processing",
+        "created_at": datetime.utcnow(),
+        "processing_config": {
+            "quality": "1080p",
+            "content_type": "default"
+        }
+    }
+
+    task_id = await db_instance.create_task(task_data)
+    if task_id:
+        await _update_and_redisplay_menu(client, message, task_id, "Task created successfully.")
+    else:
+        await message.reply("Failed to create task.")

@@ -30,7 +30,7 @@ from src.helpers.utils import (
 )
 from src.core import downloader
 from src.core.exceptions import AuthenticationError, NetworkError
-from . import processing_handler
+from .processing_handler import main_processing_router, handle_text_input_for_state, handle_media_input_for_state
 
 logger = logging.getLogger(__name__)
 
@@ -1238,126 +1238,7 @@ async def start_command(client: Client, message: Message):
 @Client.on_message(filters.private & filters.video, group=1)
 async def handle_direct_video(client: Client, message: Message):
     """Maneja videos enviados directamente al bot."""
-    try:
-        # Enviar mensaje de estado inicial
-        status_msg = await message.reply(
-            "🎥 <b>Video recibido</b>\n"
-            "Procesando información...",
-            parse_mode=ParseMode.HTML
-        )
-        
-        # Obtener información del video
-        video_info = await get_media_info(message)
-        
-        if not video_info["file_name"]:
-            video_info["file_name"] = f"video_{int(time.time())}.mp4"
-            
-        # Mostrar información del video
-        info_message = (
-            f"📹 <b>Detalles del Video</b>\n\n"
-            f"📁 <b>Nombre:</b> {escape_html(video_info['file_name'])}\n"
-            f"📊 <b>Tamaño:</b> {format_size(video_info['file_size'])}\n"
-            f"🎬 <b>Duración:</b> {format_time(video_info['duration'])}\n"
-            f"📺 <b>Resolución:</b> {video_info['width']}x{video_info['height']}\n\n"
-            f"⚙️ <b>Estado:</b> Listo para procesar\n"
-            f"📋 El video ha sido agregado al panel."
-        )
-        
-        # Construir el mensaje y teclado para el panel
-        panel_message = (
-            f"{info_message}\n\n"
-            f"✨ <b>Acciones disponibles:</b>\n"
-            f"• Procesar video\n"
-            f"• Cortar/recortar\n"
-            f"• Extraer audio"
-        )
-        
-        # Usar el teclado simplificado sin parámetros
-        await status_msg.edit(
-            panel_message,
-            parse_mode=ParseMode.HTML,
-            reply_markup=build_detailed_format_menu()  # Ahora acepta None por defecto
-        )
-        
-        # Registrar el video en la base de datos
-        try:
-            task_data = {
-                "user_id": message.from_user.id,
-                "file_id": message.video.file_id,
-                "original_filename": video_info["file_name"],
-                "file_type": "video",
-                "file_metadata": {
-                    "size": video_info["file_size"],
-                    "duration": video_info["duration"],
-                    "width": video_info["width"],
-                    "height": video_info["height"],
-                    "mime_type": video_info["mime_type"]
-                },
-                "status": "pending_processing",
-                "created_at": datetime.utcnow(),
-                "processing_config": {
-                    "quality": "1080p",
-                    "content_type": "default"
-                }
-            }
-            
-            task_id = await db_instance.create_task(task_data)
-            
-            if task_id:
-                # Actualizar el mensaje con el ID de la tarea
-                await status_msg.edit(
-                    f"{panel_message}\n\n"
-                    f"🆔 <b>ID de Tarea:</b> <code>{task_id}</code>\n"
-                    f"💡 Usa <code>/p {task_id}</code> para configurar este video",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=build_detailed_format_menu()
-                )
-            else:
-                raise Exception("No se pudo crear la tarea")
-            
-        except Exception as db_error:
-            logger.error(f"Error registrando video en DB: {db_error}")
-            await status_msg.edit(
-                f"{info_message}\n\n"
-                "⚠️ <b>Advertencia:</b> No se pudo registrar en la base de datos.",
-                parse_mode=ParseMode.HTML
-            )
-            
-    except Exception as e:
-        logger.error(f"Error procesando video: {e}")
-        if 'status_msg' in locals():
-            await status_msg.edit(
-                "❌ <b>Error al procesar el video</b>\n"
-                f"Detalles: {escape_html(str(e))}",
-                parse_mode=ParseMode.HTML
-            )
-        else:
-            await message.reply(
-                "❌ <b>Error al procesar el video</b>\n"
-                "Por favor, intenta nuevamente.",
-                parse_mode=ParseMode.HTML
-            )
-
-@Client.on_message(filters.private & filters.text & filters.regex(r"^/"), group=-1)
-async def state_guardian(client: Client, message: Message):
-    """Resetea el estado del usuario si se emite un comando durante una operación."""
-    user_id = message.from_user.id
-    user_state = await db_instance.get_user_state(user_id)
-    
-    if user_state.get("status") != "idle":
-        logger.warning(
-            f"State Guardian: User {user_id} sent command '{message.text}' "
-            f"while in state '{user_state.get('status')}'. Resetting state."
-        )
-        
-        if source_id := user_state.get("data", {}).get("source_message_id"):
-            try: 
-                await client.edit_message_text(user_id, source_id, "✖️ Operación cancelada.")
-            except Exception:
-                pass
-                
-        await db_instance.set_user_state(user_id, "idle")
-        await message.reply("✔️ Operación anterior cancelada.")
+    await main_processing_router(client, message)
 
 @Client.on_message(filters.command("panel") & filters.private)
 async def panel_command(client: Client, message: Message):
@@ -1652,7 +1533,7 @@ async def text_message_handler(client: Client, message: Message):
             
         # Manejar otros estados si es necesario
         elif user_state.get("status") != "idle":
-            await processing_handler.handle_text_input_for_state(client, message, user_state)
+            await handle_text_input_for_state(client, message, user_state)
             return
             
         # Verificar si es otro tipo de URL (no de Telegram)
