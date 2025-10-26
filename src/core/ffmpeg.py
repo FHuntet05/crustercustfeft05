@@ -132,7 +132,7 @@ def _build_video_command(
 
     # --- 3. Mapeo de Salidas (Mapping) ---
     if filter_graph:
-        command.extend(["-map", final_video_label.strip("[]")])
+        command.extend(["-map", final_video_label])
     else:
         command.extend(["-map", f"{input_map['video']}:v?"])
 

@@ -53,7 +53,7 @@ def _resolve_parse_mode_html():
     if hasattr(mode, "value"):
         mode = mode.value
     if isinstance(mode, str):
-        return mode.upper()
+        return mode.lower()
     return mode
 
 @retry_async(retry_exceptions=(FloodWait, BadRequest), max_attempts=3)
