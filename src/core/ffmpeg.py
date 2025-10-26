@@ -65,46 +65,76 @@ def _build_video_command(
         input_count += 1
 
     # --- 2. Filtros Complejos (Filter Complex) ---
-    filter_complex_parts = []
-    video_chain = f"[{input_map['video']}:v]"
-    final_video_output_tag = "[v_out]" # Usaremos una etiqueta de salida final y consistente
+    filter_graph = []
+    video_label = f"[{input_map['video']}:v]"
+
+    def _next_label(idx: int) -> str:
+        return f"[v_step{idx}]"
+
+    step_index = 0
+
+    # Tabla de calidades aceptadas
+    quality_map = {
+        "1080p": ("1920:1080", "22"),
+        "720p": ("1280:720", "24"),
+        "480p": ("854:480", "26"),
+        "360p": ("640:360", "28")
+    }
 
     quality = config.get('quality')
-    if quality:
-        quality_map = {
-            "1080p": ("1920:1080", "22"), "720p": ("1280:720", "24"),
-            "480p": ("854:480", "26"),   "360p": ("640:360", "28")
-        }
-        if quality in quality_map:
-            res, _ = quality_map[quality]
-            scale_filter = f"scale={res}:force_original_aspect_ratio=decrease,pad={res}:(ow-iw)/2:(oh-ih)/2"
-            filter_complex_parts.append(f"{video_chain}{scale_filter}[scaled_v]")
-            video_chain = "[scaled_v]"
+    if quality and quality in quality_map:
+        step_index += 1
+        res, _ = quality_map[quality]
+        dest_label = _next_label(step_index)
+        scale_filter = (
+            f"scale={res}:force_original_aspect_ratio=decrease,"
+            f"pad={res}:(ow-iw)/2:(oh-ih)/2"
+        )
+        filter_graph.append((video_label, scale_filter, dest_label))
+        video_label = dest_label
 
     if wm_conf := config.get('watermark'):
-        pos_map = {'bottom_right': 'main_w-overlay_w-10:main_h-overlay_h-10'}
+        pos_map = {
+            'top_left': '10:10',
+            'top_right': 'main_w-overlay_w-10:10',
+            'bottom_left': '10:main_h-overlay_h-10',
+            'bottom_right': 'main_w-overlay_w-10:main_h-overlay_h-10'
+        }
         position = pos_map.get(wm_conf.get('position', 'bottom_right'))
         if wm_conf.get('type') == 'image' and watermark_path:
-            filter_complex_parts.append(f"{video_chain}[{input_map['watermark']}:v]overlay={position}[watermarked_v]")
-            video_chain = "[watermarked_v]"
+            step_index += 1
+            dest_label = _next_label(step_index)
+            left_inputs = f"{video_label}[{input_map['watermark']}:v]"
+            filter_graph.append((left_inputs, f"overlay={position}", dest_label))
+            video_label = dest_label
         elif wm_conf.get('type') == 'text':
-            text = wm_conf.get('text', '').replace("'", "’")
-            drawtext = f"drawtext=fontfile='assets/font.ttf':text='{text}':fontcolor=white@0.8:fontsize=24:box=1:boxcolor=black@0.5:boxborderw=5:{position}"
-            filter_complex_parts.append(f"{video_chain}{drawtext}[watermarked_v]")
-            video_chain = "[watermarked_v]"
+            step_index += 1
+            dest_label = _next_label(step_index)
+            safe_text = wm_conf.get('text', '').replace("'", "’").replace(':', '∶')
+            drawtext = (
+                "drawtext=fontfile='assets/font.ttf':"
+                f"text='{safe_text}':fontcolor=white@0.8:"
+                "fontsize=24:box=1:boxcolor=black@0.5:boxborderw=5:"
+                "x=(w-text_w-10):y=(h-text_h-10)"
+            )
+            filter_graph.append((video_label, drawtext, dest_label))
+            video_label = dest_label
 
-    # [CORRECCIÓN CLAVE 1] Se aplica la etiqueta de salida final al último eslabón de la cadena de filtros.
-    if filter_complex_parts:
-        # Reemplaza la última etiqueta de salida (ej. '[scaled_v]') por la etiqueta final '[v_out]'
-        last_filter = filter_complex_parts[-1]
-        filter_complex_parts[-1] = last_filter.split('[')[-1].join(last_filter.rsplit(']', 1)) + final_video_output_tag
-        command.extend(["-filter_complex", ";".join(filter_complex_parts)])
+    final_video_label = video_label
+
+    if filter_graph:
+        # Forzamos que la última etapa genere una etiqueta conocida
+        final_video_label = "[v_out]"
+        src, flt, _ = filter_graph[-1]
+        filter_graph[-1] = (src, flt, final_video_label)
+        graph_str = ";".join(f"{src}{flt}{dst}" for src, flt, dst in filter_graph)
+        command.extend(["-filter_complex", graph_str])
 
     # --- 3. Mapeo de Salidas (Mapping) ---
-    if filter_complex_parts:
-        command.extend(["-map", final_video_output_tag]) # Mapea siempre la etiqueta de salida final
+    if filter_graph:
+        command.extend(["-map", final_video_label.strip("[]")])
     else:
-        command.extend(["-map", f"{input_map['video']}:v?"]) # Si no hay filtros, mapea el video original
+        command.extend(["-map", f"{input_map['video']}:v?"])
 
     if replace_audio_path:
         command.extend(["-map", f"{input_map['audio']}:a"])
@@ -116,15 +146,13 @@ def _build_video_command(
     command.extend(["-map", f"{input_map['video']}:s?"])
 
     # --- 4. Opciones de Codificación (Encoding) ---
-    # [CORRECCIÓN CLAVE 2] Si hay filtros, SIEMPRE se debe recodificar. No se puede usar 'copy'.
-    if filter_complex_parts:
-        crf = "23" # CRF por defecto
+    if filter_graph:
+        crf_value = "23"
         if quality and quality in quality_map:
-            _, crf = quality_map[quality]
-        command.extend(["-c:v", "libx264", "-preset", "fast", "-crf", crf])
-        command.extend(["-c:a", "aac", "-b:a", "128k"]) # También recodificar audio para compatibilidad
+            _, crf_value = quality_map[quality]
+        command.extend(["-c:v", "libx264", "-preset", "fast", "-crf", crf_value])
+        command.extend(["-c:a", "aac", "-b:a", "128k"])
     else:
-        # Si no hay filtros, podemos copiar los streams directamente (muy rápido)
         command.extend(["-c:v", "copy", "-c:a", "copy"])
 
     command.extend(["-c:s", "mov_text"]) # Siempre procesar subtítulos para compatibilidad

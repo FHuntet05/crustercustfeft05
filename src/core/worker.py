@@ -10,8 +10,7 @@ from datetime import datetime
 from zipfile import ZipFile, ZIP_DEFLATED
 from pyrogram.enums import ParseMode
 from bson.objectid import ObjectId
-from typing import Dict, List
-from pyrogram import InlineKeyboardButton, InlineKeyboardMarkup
+from typing import Dict, List, Optional
 
 from src.db.mongo_manager import db_instance
 from src.helpers.utils import (format_status_message, sanitize_filename,
@@ -34,7 +33,15 @@ class ProgressContext:
 
 progress_tracker: Dict[int, ProgressContext] = {}
 
-def _progress_callback_pyrogram(current: int, total: int, user_id: int, title: str, status: str, db_total_size: int):
+def _progress_callback_pyrogram(
+    current: int,
+    total: int,
+    user_id: int,
+    title: str,
+    status: str,
+    db_total_size: int,
+    file_info: Optional[str] = None
+):
     ctx = progress_tracker.get(user_id)
     if not ctx: return
     final_total = total if total > 0 else db_total_size
@@ -46,7 +53,19 @@ def _progress_callback_pyrogram(current: int, total: int, user_id: int, title: s
     speed = current / elapsed if elapsed > 0 else 0
     eta = (final_total - current) / speed if current > 0 and speed > 0 else float('inf')
     percentage = (current / final_total) * 100 if final_total > 0 else 0
-    text = format_status_message(operation_title=title, percentage=percentage, processed_bytes=current, total_bytes=final_total, speed=speed, eta=eta, elapsed=elapsed, status_tag=status, engine="Pyrogram", user_id=user_id)
+    text = format_status_message(
+        operation_title=title,
+        percentage=percentage,
+        processed_bytes=current,
+        total_bytes=final_total,
+        speed=speed,
+        eta=eta,
+        elapsed=elapsed,
+        status_tag=status,
+        engine="Pyrogram",
+        user_id=user_id,
+        file_info=file_info
+    )
     coro = _edit_status_message(user_id, text, progress_tracker)
     asyncio.run_coroutine_threadsafe(coro, ctx.loop)
 
@@ -57,6 +76,7 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
     time_pattern, ctx = re.compile(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})"), progress_tracker.get(user_id)
     if not ctx: return
     ctx.reset_timer()
+    file_info = os.path.basename(input_path)
     process = await asyncio.create_subprocess_exec(*command, stderr=asyncio.subprocess.PIPE)
     all_stderr_lines = []
     async for line in process.stderr:
@@ -73,7 +93,19 @@ async def _run_command_with_progress(user_id: int, command: List[str], input_pat
                 percentage, elapsed = (processed_time / duration) * 100, now - ctx.start_time
                 speed = processed_time / elapsed if elapsed > 0 else 0
                 eta = (duration - processed_time) / speed if speed > 0 else float('inf')
-                text = format_status_message(operation_title="Task is being Processed!", percentage=percentage, processed_bytes=processed_time, total_bytes=duration, speed=speed, eta=eta, elapsed=elapsed, status_tag="#Processing", engine="FFmpeg", user_id=user_id)
+                text = format_status_message(
+                    operation_title="→ Processing ...",
+                    percentage=percentage,
+                    processed_bytes=processed_time,
+                    total_bytes=duration,
+                    speed=speed,
+                    eta=eta,
+                    elapsed=elapsed,
+                    status_tag="#Processing - #FFmpeg",
+                    engine="FFmpeg",
+                    user_id=user_id,
+                    file_info=file_info
+                )
                 await _edit_status_message(user_id, text, progress_tracker)
     await process.wait()
     if process.returncode != 0:
@@ -93,14 +125,10 @@ async def _process_media_task(bot, task: dict, dl_dir: str):
             progress=_progress_callback_pyrogram,
             progress_args=(
                 user_id,
-                "⬇️ <b>Descargando archivo...</b>\n" \
-                "╔ ▰▱▱▱▱▱▱▱▱▱ » {progress}%\n" \
-                "╠ Progreso: {current_size} MB de {total_size} MB\n" \
-                "╠ Estado: #Descarga - #Telegram\n" \
-                "╠ Velocidad: {speed} MB/s\n" \
-                "╚ ETA: {eta}",
-                "#TelegramDownload",
-                db_total_size
+                "↓ Downloading ...",
+                "#Download - #Telegram",
+                db_total_size,
+                os.path.basename(actual_download_path)
             )
         )
     elif url := task.get('url'):
@@ -167,27 +195,20 @@ async def _process_media_task(bot, task: dict, dl_dir: str):
     elif file_type == 'audio' or config.get('extract_audio'): sender_func, kwargs = bot.send_audio, {'audio': definitive_output_path}
     else: sender_func, kwargs = bot.send_document, {'document': definitive_output_path}
 
-    # Definir status_message si no está definido previamente
-    if 'status_message' not in locals():
-        status_message = await bot.send_message(user_id, "✅ Tarea recibida. Preparando...", parse_mode=ParseMode.HTML)
-
-    # Actualizar el mensaje de estado durante la subida con diseño mejorado
-    await status_message.edit_text(
-        "⬆️ <b>Subiendo archivo...</b>\n" \
-        "╔ ▰▰▱▱▱▱▱▱▱▱ » {progress}%\n" \
-        "╠ Progreso: {current_size} MB de {total_size} MB\n" \
-        "╠ Estado: #Subida - #Telegram\n" \
-        "╠ Velocidad: {speed} MB/s\n" \
-        "╠ ETA: {eta}\n" \
-        "╠ Archivos: {files_count}/{total_files}\n" \
-        "╚ Archivo: {file_name}",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Cancelar", callback_data="cancel_upload")]
-        ]),
-        parse_mode=ParseMode.HTML
+    await sender_func(
+        user_id,
+        caption=caption,
+        parse_mode=ParseMode.HTML,
+        progress=_progress_callback_pyrogram,
+        progress_args=(
+            user_id,
+            "↑ Uploading ...",
+            "#Upload - #Telegram",
+            final_size,
+            os.path.basename(definitive_output_path)
+        ),
+        **kwargs
     )
-
-    await sender_func(user_id, caption=caption, parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=(user_id, "Uploading...", "#TelegramUpload", final_size), **kwargs)
     return definitive_output_path
 
 async def _process_join_task(bot, task: dict, dl_dir: str):
@@ -210,7 +231,19 @@ async def _process_join_task(bot, task: dict, dl_dir: str):
     _, stderr = await process.communicate()
     if process.returncode != 0: raise Exception(f"FFmpeg (concat) falló: {stderr.decode()}")
     final_size = os.path.getsize(output_path)
-    await bot.send_video(user_id, video=output_path, caption=f"✅ Unión de {len(source_task_ids)} videos completada.", progress=_progress_callback_pyrogram, progress_args=(user_id, "Subiendo...", "#TelegramUpload", final_size))
+    await bot.send_video(
+        user_id,
+        video=output_path,
+        caption=f"✅ Unión de {len(source_task_ids)} videos completada.",
+        progress=_progress_callback_pyrogram,
+        progress_args=(
+            user_id,
+            "↑ Uploading ...",
+            "#Upload - #Telegram",
+            final_size,
+            os.path.basename(output_path)
+        )
+    )
     return output_path
 
 async def _process_zip_task(bot, task: dict, dl_dir: str):
@@ -227,7 +260,19 @@ async def _process_zip_task(bot, task: dict, dl_dir: str):
             await _edit_status_message(user_id, f"Añadiendo al ZIP: {filename}", progress_tracker)
             zf.write(dl_path, arcname=filename)
     final_size = os.path.getsize(output_path)
-    await bot.send_document(user_id, document=output_path, caption=f"✅ Compresión de {len(source_task_ids)} archivos completada.", progress=_progress_callback_pyrogram, progress_args=(user_id, "Subiendo...", "#TelegramUpload", final_size))
+    await bot.send_document(
+        user_id,
+        document=output_path,
+        caption=f"✅ Compresión de {len(source_task_ids)} archivos completada.",
+        progress=_progress_callback_pyrogram,
+        progress_args=(
+            user_id,
+            "↑ Uploading ...",
+            "#Upload - #Telegram",
+            final_size,
+            os.path.basename(output_path)
+        )
+    )
     return output_path
 
 async def process_task(bot, task: dict):
@@ -349,20 +394,17 @@ async def process_restricted_content(bot, task: dict) -> None:
         os.makedirs(task_dir, exist_ok=True)
         
         # Descargar el archivo
+        file_basename = getattr(message.media, 'file_name', 'restricted_file')
         file_path = await bot.download_media(
             message,
-            file_name=os.path.join(task_dir, message.media.file_name if hasattr(message.media, 'file_name') else "downloaded_file"),
+            file_name=os.path.join(task_dir, file_basename),
             progress=_progress_callback_pyrogram,
             progress_args=(
                 user_id,
-                "⬇️ <b>Descargando archivo...</b>\n" \
-                "╔ ▰▱▱▱▱▱▱▱▱▱ » {progress}%\n" \
-                "╠ Progreso: {current_size} MB de {total_size} MB\n" \
-                "╠ Estado: #Descarga - #Telegram\n" \
-                "╠ Velocidad: {speed} MB/s\n" \
-                "╚ ETA: {eta}",
-                "#RestrictedDownload",
-                message.media.file_size if hasattr(message.media, 'file_size') else 0
+                "↓ Downloading ...",
+                "#Download - #Restricted",
+                message.media.file_size if hasattr(message.media, 'file_size') else 0,
+                file_basename
             )
         )
         
@@ -371,12 +413,7 @@ async def process_restricted_content(bot, task: dict) -> None:
             
         # Actualizar estado
         await status_message.edit_text(
-            "⬆️ <b>Subiendo archivo procesado...</b>\n" \
-            "╔ ▰▱▱▱▱▱▱▱▱▱ » {progress}%\n" \
-            "╠ Progreso: {current_size} MB de {total_size} MB\n" \
-            "╠ Estado: #Subida - #Telegram\n" \
-            "╠ Velocidad: {speed} MB/s\n" \
-            "╚ ETA: {eta}",
+            "⬆️ <b>Subiendo archivo procesado...</b>",
             parse_mode=ParseMode.HTML
         )
         
@@ -388,7 +425,13 @@ async def process_restricted_content(bot, task: dict) -> None:
                 caption=f"✅ <b>Archivo descargado exitosamente</b>\n🔗 De: {message_link}",
                 parse_mode=ParseMode.HTML,
                 progress=_progress_callback_pyrogram,
-                progress_args=(user_id, "Uploading...", "#RestrictedUpload", os.path.getsize(file_path))
+                progress_args=(
+                    user_id,
+                    "↑ Uploading ...",
+                    "#Upload - #Restricted",
+                    os.path.getsize(file_path),
+                    os.path.basename(file_path)
+                )
             )
         elif message.document:
             await bot.send_document(
@@ -397,7 +440,13 @@ async def process_restricted_content(bot, task: dict) -> None:
                 caption=f"✅ <b>Archivo descargado exitosamente</b>\n🔗 De: {message_link}",
                 parse_mode=ParseMode.HTML,
                 progress=_progress_callback_pyrogram,
-                progress_args=(user_id, "Uploading...", "#RestrictedUpload", os.path.getsize(file_path))
+                progress_args=(
+                    user_id,
+                    "↑ Uploading ...",
+                    "#Upload - #Restricted",
+                    os.path.getsize(file_path),
+                    os.path.basename(file_path)
+                )
             )
         elif message.audio:
             await bot.send_audio(
@@ -406,7 +455,13 @@ async def process_restricted_content(bot, task: dict) -> None:
                 caption=f"✅ <b>Archivo descargado exitosamente</b>\n🔗 De: {message_link}",
                 parse_mode=ParseMode.HTML,
                 progress=_progress_callback_pyrogram,
-                progress_args=(user_id, "Uploading...", "#RestrictedUpload", os.path.getsize(file_path))
+                progress_args=(
+                    user_id,
+                    "↑ Uploading ...",
+                    "#Upload - #Restricted",
+                    os.path.getsize(file_path),
+                    os.path.basename(file_path)
+                )
             )
             
         # Limpiar

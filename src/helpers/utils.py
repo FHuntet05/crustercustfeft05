@@ -46,6 +46,16 @@ except (TypeError, ValueError):
 
 from .retry import retry_async
 
+
+def _resolve_parse_mode_html():
+    """Devuelve un valor de parse_mode compatible con Pyrogram."""
+    mode = getattr(ParseMode, "HTML", "HTML")
+    if hasattr(mode, "value"):
+        mode = mode.value
+    if isinstance(mode, str):
+        return mode.upper()
+    return mode
+
 @retry_async(retry_exceptions=(FloodWait, BadRequest), max_attempts=3)
 async def _try_edit_message(bot, chat_id, message_id, text):
     """Try to edit a message with retries."""
@@ -53,7 +63,7 @@ async def _try_edit_message(bot, chat_id, message_id, text):
         chat_id=chat_id,
         message_id=message_id,
         text=text,
-        parse_mode=ParseMode.HTML
+        parse_mode=_resolve_parse_mode_html()
     )
 
 async def _edit_status_message(user_id: int, text: str, progress_tracker: dict):
@@ -111,7 +121,7 @@ def escape_html(text: str) -> str:
     if not isinstance(text, str): return ""
     return escape(text, quote=False)
 
-def _create_text_bar(percentage: float, length: int = 12, fill_char: str = '■', empty_char: str = '□') -> str:
+def _create_text_bar(percentage: float, length: int = 10, fill_char: str = '▰', empty_char: str = '▱') -> str:
     """Crea una barra de progreso de texto."""
     if not 0 <= percentage <= 100: percentage = 0
     filled_len = int(length * percentage / 100)
@@ -143,30 +153,45 @@ def format_status_message(
     speed: float, eta: float, elapsed: float, status_tag: str,
     engine: str, user_id: int, file_info: Optional[str] = None
 ) -> str:
-    """Construye el mensaje de estado/progreso completo."""
+    """Construye el mensaje de estado/progreso completo al estilo solicitado."""
     bar = _create_text_bar(percentage)
-    lines = [f"<b>{operation_title}</b>", f"<code>[{bar}] {percentage:.2f}%</code>"]
-    
-    is_processing = "Process" in operation_title
-    processed_str = format_time(processed_bytes) if is_processing else format_bytes(processed_bytes)
-    total_str = format_time(total_bytes) if is_processing and total_bytes > 0 else format_bytes(total_bytes)
-
-    details = [
-        f"Progreso: {processed_str} de {total_str}",
-        f"Estado: {status_tag}",
-        f"ETA: {format_time(eta)}"
-    ]
+    is_processing = engine.lower() == "ffmpeg"
 
     if is_processing:
-        details.append(f"Velocidad: {speed:.2f}x")
+        current_str = format_time(processed_bytes)
+        total_str = format_time(total_bytes) if total_bytes > 0 else "∞"
+        speed_str = f"{speed:.2f}x"
     else:
-        details.append(f"Velocidad: {format_bytes(speed)}/s")
+        current_str = format_bytes(processed_bytes)
+        total_str = format_bytes(total_bytes)
+        speed_str = f"{format_bytes(speed)}/s" if speed > 0 else "0 B/s"
 
-    details.append(f"Transcurrido: {format_time(elapsed)}")
-    details.append(f"Motor: {engine} | ID: {user_id}")
+    header = operation_title
+    progress_line = f"╠ Progress: {current_str} of {total_str}"
+    status_line = f"╠ Status: {status_tag}"
+    speed_line = f"╠ Speed: {speed_str}"
+    eta_line = f"╠ ETA: {format_time(eta)}"
+    elapsed_line = f"╠ Elapsed: {format_time(elapsed)}"
 
-    lines.extend([f"├ {detail}" for detail in details])
-    return "\n".join(lines)
+    info_lines = [
+        progress_line,
+        status_line,
+        speed_line,
+        eta_line,
+        elapsed_line,
+        f"╠ Engine: {engine} | ID: {user_id}"
+    ]
+
+    if file_info:
+        info_lines.append(f"╚ File: {file_info}")
+    else:
+        info_lines[-1] = info_lines[-1].replace("╠", "╚", 1)
+
+    return "\n".join([
+        header,
+        f"╔ {bar} » {percentage:5.1f}%",
+        *info_lines
+    ])
 
 def generate_summary_caption(task: Dict, initial_size: int, final_size: int, final_filename: str) -> str:
     """Genera el caption para el archivo final, resumiendo las operaciones realizadas."""
