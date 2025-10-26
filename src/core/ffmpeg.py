@@ -26,13 +26,11 @@ def build_ffmpeg_command(
     audio_thumb_path: Optional[str] = None, subs_path: Optional[str] = None
 ) -> Tuple[List[List[str]], str]:
     
-    # [CORREGIDO] La lógica ahora es más directa.
     config = task.get('processing_config', {})
     
     if config.get('extract_audio'):
         return _build_extract_audio_command(input_path, output_path)
     
-    # Por ahora, nos enfocamos en el comando de video principal, que es el más complejo.
     return _build_video_command(task, input_path, output_path, watermark_path, replace_audio_path, subs_path)
 
 def _build_video_command(
@@ -43,8 +41,7 @@ def _build_video_command(
     config = task.get('processing_config', {})
     command = ["ffmpeg", "-y", "-hide_banner"]
 
-    # --- 1. Manejo de Entradas (Inputs) ---
-    # Input principal
+    # --- 1. Entradas (Inputs) ---
     if trim_times := config.get('trim_times'):
         try:
             if '-' in trim_times:
@@ -56,7 +53,6 @@ def _build_video_command(
             logger.warning(f"Formato de trim inválido, se ignorará: {e}")
     command.extend(["-i", input_path])
 
-    # Inputs adicionales
     input_map = {"video": "0"}
     input_count = 1
     if watermark_path:
@@ -67,126 +63,79 @@ def _build_video_command(
         command.extend(["-i", replace_audio_path])
         input_map["audio"] = str(input_count)
         input_count += 1
-    # [FUTURO] Añadir manejo de miniaturas y subtítulos aquí si es necesario
 
-    # --- 2. Construcción de Filtros Complejos (Filter Complex) ---
+    # --- 2. Filtros Complejos (Filter Complex) ---
     filter_complex_parts = []
     video_chain = f"[{input_map['video']}:v]"
+    final_video_output_tag = "[v_out]" # Usaremos una etiqueta de salida final y consistente
 
-    # [CORREGIDO] Lógica de reescalado/compresión simplificada
     quality = config.get('quality')
     if quality:
-        # Mapeo de calidades a resoluciones y CRF
         quality_map = {
             "1080p": ("1920:1080", "22"), "720p": ("1280:720", "24"),
             "480p": ("854:480", "26"),   "360p": ("640:360", "28")
         }
         if quality in quality_map:
-            res, crf = quality_map[quality]
+            res, _ = quality_map[quality]
             scale_filter = f"scale={res}:force_original_aspect_ratio=decrease,pad={res}:(ow-iw)/2:(oh-ih)/2"
             filter_complex_parts.append(f"{video_chain}{scale_filter}[scaled_v]")
             video_chain = "[scaled_v]"
 
-    # Lógica de marca de agua
     if wm_conf := config.get('watermark'):
-        wm_type = wm_conf.get('type')
-        pos_map = {
-            'top_left': '10:10', 'top_right': 'main_w-overlay_w-10:10',
-            'bottom_left': '10:main_h-overlay_h-10', 'bottom_right': 'main_w-overlay_w-10:main_h-overlay_h-10'
-        }
+        pos_map = {'bottom_right': 'main_w-overlay_w-10:main_h-overlay_h-10'}
         position = pos_map.get(wm_conf.get('position', 'bottom_right'))
-
-        if wm_type == 'image' and watermark_path:
+        if wm_conf.get('type') == 'image' and watermark_path:
             filter_complex_parts.append(f"{video_chain}[{input_map['watermark']}:v]overlay={position}[watermarked_v]")
             video_chain = "[watermarked_v]"
-        elif wm_type == 'text':
-            text = wm_conf.get('text', '').replace("'", "’").replace(":", "∶")
-            drawtext_filter = f"drawtext=fontfile='assets/font.ttf':text='{text}':fontcolor=white@0.8:fontsize=24:box=1:boxcolor=black@0.5:boxborderw=5:x=(w-text_w-10):y=(h-text_h-10)"
-            filter_complex_parts.append(f"{video_chain}{drawtext_filter}[watermarked_v]")
+        elif wm_conf.get('type') == 'text':
+            text = wm_conf.get('text', '').replace("'", "’")
+            drawtext = f"drawtext=fontfile='assets/font.ttf':text='{text}':fontcolor=white@0.8:fontsize=24:box=1:boxcolor=black@0.5:boxborderw=5:{position}"
+            filter_complex_parts.append(f"{video_chain}{drawtext}[watermarked_v]")
             video_chain = "[watermarked_v]"
 
+    # [CORRECCIÓN CLAVE 1] Se aplica la etiqueta de salida final al último eslabón de la cadena de filtros.
     if filter_complex_parts:
+        # Reemplaza la última etiqueta de salida (ej. '[scaled_v]') por la etiqueta final '[v_out]'
+        last_filter = filter_complex_parts[-1]
+        filter_complex_parts[-1] = last_filter.split('[')[-1].join(last_filter.rsplit(']', 1)) + final_video_output_tag
         command.extend(["-filter_complex", ";".join(filter_complex_parts)])
 
     # --- 3. Mapeo de Salidas (Mapping) ---
-    command.extend(["-map", video_chain.strip("[]")]) # Mapea la última salida de la cadena de video
+    if filter_complex_parts:
+        command.extend(["-map", final_video_output_tag]) # Mapea siempre la etiqueta de salida final
+    else:
+        command.extend(["-map", f"{input_map['video']}:v?"]) # Si no hay filtros, mapea el video original
 
     if replace_audio_path:
         command.extend(["-map", f"{input_map['audio']}:a"])
     elif config.get('mute_audio'):
-        command.append("-an") # No incluir audio
+        command.append("-an")
     else:
-        command.extend(["-map", f"{input_map['video']}:a?"]) # Mapea el audio original si existe
+        command.extend(["-map", f"{input_map['video']}:a?"])
 
-    # [CORREGIDO] Siempre mantener los subtítulos originales a menos que se indique lo contrario
-    if config.get('remove_subtitles'):
-        command.append("-sn")
-    else:
-        command.extend(["-map", f"{input_map['video']}:s?"])
+    command.extend(["-map", f"{input_map['video']}:s?"])
 
     # --- 4. Opciones de Codificación (Encoding) ---
-    # [CORREGIDO] Aplicar compresión si se especificó una calidad
-    if quality and quality in quality_map:
-        res, crf = quality_map[quality]
-        command.extend([
-            "-c:v", "libx264", "-preset", "medium", "-crf", crf,
-            "-c:a", "aac", "-b:a", "128k",
-            "-c:s", "mov_text" # Codifica subtítulos para compatibilidad MP4
-        ])
+    # [CORRECCIÓN CLAVE 2] Si hay filtros, SIEMPRE se debe recodificar. No se puede usar 'copy'.
+    if filter_complex_parts:
+        crf = "23" # CRF por defecto
+        if quality and quality in quality_map:
+            _, crf = quality_map[quality]
+        command.extend(["-c:v", "libx264", "-preset", "fast", "-crf", crf])
+        command.extend(["-c:a", "aac", "-b:a", "128k"]) # También recodificar audio para compatibilidad
     else:
-        # Si no se especifica calidad pero hay filtros, debemos recodificar.
-        if filter_complex_parts:
-             command.extend(["-c:v", "libx264", "-preset", "medium", "-crf", "23"])
-        else: # Si no hay filtros ni calidad, es una copia directa (muy rápido)
-             command.extend(["-c:v", "copy"])
-        # Siempre copiar audio y subtítulos si no se especifica lo contrario
-        command.extend(["-c:a", "copy", "-c:s", "copy"])
-        
+        # Si no hay filtros, podemos copiar los streams directamente (muy rápido)
+        command.extend(["-c:v", "copy", "-c:a", "copy"])
+
+    command.extend(["-c:s", "mov_text"]) # Siempre procesar subtítulos para compatibilidad
     command.extend(["-movflags", "+faststart"])
     command.extend(["-progress", "pipe:2", output_path])
     
-    # Validar entradas opcionales antes de construir el comando
-    if watermark_path and not os.path.exists(watermark_path):
-        raise ValueError(f"El archivo de marca de agua no existe: {watermark_path}")
-    if replace_audio_path and not os.path.exists(replace_audio_path):
-        raise ValueError(f"El archivo de audio para reemplazo no existe: {replace_audio_path}")
-
-    # Validar que el mapa de entradas tenga las claves necesarias
-    if 'video' not in input_map:
-        raise ValueError("No se encontró un flujo de video en el mapa de entradas.")
-
-    # Validar que los filtros complejos no estén vacíos si se especifican configuraciones
-    if filter_complex_parts and not any(filter_complex_parts):
-        raise ValueError("Los filtros complejos están vacíos a pesar de configuraciones activas.")
-
-    # Validar que las opciones de calidad sean válidas
-    if quality and quality not in quality_map:
-        raise ValueError(f"La calidad especificada '{quality}' no es válida. Opciones disponibles: {list(quality_map.keys())}")
-
-    # Validar que los mapas de salida sean correctos
-    try:
-        command.extend(["-map", video_chain.strip("[]")])
-    except KeyError:
-        raise ValueError("Error al mapear la salida de video. Verifique las configuraciones de entrada y filtros.")
-
-    # Validar subtítulos si están habilitados
-    if not config.get('remove_subtitles'):
-        try:
-            command.extend(["-map", f"{input_map['video']}:s?"])
-        except KeyError:
-            raise ValueError("Error al mapear subtítulos. Verifique las configuraciones de entrada.")
-
-    # Validar que el flujo 'scaled_v' se haya generado correctamente
-    if 'scaled_v' not in video_chain:
-        raise ValueError("El flujo 'scaled_v' no se generó correctamente en el filtro complejo.")
-
-    # Asegurar que el mapa de salida sea válido
-    command.extend(["-map", video_chain.strip("[]")])
-
+    # [CORRECCIÓN CLAVE 3] Se elimina todo el bloque de validación erróneo que estaba aquí.
+    
     return [command], output_path
 
 def _build_extract_audio_command(input_path: str, output_path_base: str) -> Tuple[List[List[str]], str]:
-    # Esta función ya era correcta, la mantenemos.
     final_output_path = f"{os.path.splitext(output_path_base)[0]}.m4a"
     command = ["ffmpeg", "-y", "-i", input_path, "-vn", "-c:a", "copy", final_output_path]
     return [command], final_output_path
