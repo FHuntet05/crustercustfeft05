@@ -57,20 +57,24 @@ def _resolve_parse_mode_html():
 @retry_async(retry_exceptions=(FloodWait, BadRequest), max_attempts=3)
 async def _try_edit_message(bot, chat_id, message_id, text):
     """Try to edit a message with retries."""
-    kwargs = {
-        "chat_id": chat_id,
-        "message_id": message_id,
-        "text": text
-    }
-    parse_mode = _resolve_parse_mode_html()
-    if parse_mode:
-        kwargs["parse_mode"] = parse_mode
+    kwargs = {"chat_id": chat_id, "message_id": message_id, "text": text}
 
     try:
         await bot.edit_message_text(**kwargs)
+        return
+    except BadRequest as exc:
+        # Si el error no está relacionado con formato/parseo, propágalo.
+        if "not modified" in str(exc).lower():
+            raise
+        if "entities" not in str(exc).lower() and "parse mode" not in str(exc).lower():
+            raise
+
+    # Si llegamos aquí es porque el texto posiblemente contiene HTML/Markdown.
+    try:
+        kwargs["parse_mode"] = _resolve_parse_mode_html()
+        await bot.edit_message_text(**kwargs)
     except BadRequest as exc:
         if "parse mode" in str(exc).lower():
-            # Reintentar sin parse_mode para evitar bloquear el progreso.
             kwargs.pop("parse_mode", None)
             await bot.edit_message_text(**kwargs)
         else:
