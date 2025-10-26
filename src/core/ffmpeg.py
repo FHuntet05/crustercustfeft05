@@ -145,6 +145,37 @@ def _build_video_command(
     command.extend(["-movflags", "+faststart"])
     command.extend(["-progress", "pipe:2", output_path])
     
+    # Validar entradas opcionales antes de construir el comando
+    if watermark_path and not os.path.exists(watermark_path):
+        raise ValueError(f"El archivo de marca de agua no existe: {watermark_path}")
+    if replace_audio_path and not os.path.exists(replace_audio_path):
+        raise ValueError(f"El archivo de audio para reemplazo no existe: {replace_audio_path}")
+
+    # Validar que el mapa de entradas tenga las claves necesarias
+    if 'video' not in input_map:
+        raise ValueError("No se encontró un flujo de video en el mapa de entradas.")
+
+    # Validar que los filtros complejos no estén vacíos si se especifican configuraciones
+    if filter_complex_parts and not any(filter_complex_parts):
+        raise ValueError("Los filtros complejos están vacíos a pesar de configuraciones activas.")
+
+    # Validar que las opciones de calidad sean válidas
+    if quality and quality not in quality_map:
+        raise ValueError(f"La calidad especificada '{quality}' no es válida. Opciones disponibles: {list(quality_map.keys())}")
+
+    # Validar que los mapas de salida sean correctos
+    try:
+        command.extend(["-map", video_chain.strip("[]")])
+    except KeyError:
+        raise ValueError("Error al mapear la salida de video. Verifique las configuraciones de entrada y filtros.")
+
+    # Validar subtítulos si están habilitados
+    if not config.get('remove_subtitles'):
+        try:
+            command.extend(["-map", f"{input_map['video']}:s?"])
+        except KeyError:
+            raise ValueError("Error al mapear subtítulos. Verifique las configuraciones de entrada.")
+
     return [command], output_path
 
 def _build_extract_audio_command(input_path: str, output_path_base: str) -> Tuple[List[List[str]], str]:

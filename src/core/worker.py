@@ -11,6 +11,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 from pyrogram.enums import ParseMode
 from bson.objectid import ObjectId
 from typing import Dict, List
+from pyrogram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.db.mongo_manager import db_instance
 from src.helpers.utils import (format_status_message, sanitize_filename,
@@ -86,7 +87,22 @@ async def _process_media_task(bot, task: dict, dl_dir: str):
     if file_id := task.get('file_id'):
         actual_download_path = os.path.join(dl_dir, original_filename)
         db_total_size = task.get('file_metadata', {}).get('size', 0)
-        await bot.download_media(file_id, file_name=actual_download_path, progress=_progress_callback_pyrogram, progress_args=(user_id, "Downloading...", "#TelegramDownload", db_total_size))
+        await bot.download_media(
+            file_id,
+            file_name=actual_download_path,
+            progress=_progress_callback_pyrogram,
+            progress_args=(
+                user_id,
+                "⬇️ <b>Descargando archivo...</b>\n" \
+                "╔ ▰▱▱▱▱▱▱▱▱▱ » {progress}%\n" \
+                "╠ Progreso: {current_size} MB de {total_size} MB\n" \
+                "╠ Estado: #Descarga - #Telegram\n" \
+                "╠ Velocidad: {speed} MB/s\n" \
+                "╚ ETA: {eta}",
+                "#TelegramDownload",
+                db_total_size
+            )
+        )
     elif url := task.get('url'):
         base_path = os.path.join(dl_dir, sanitize_filename(task.get('final_filename', 'url_download')))
         await _edit_status_message(user_id, "Descargando desde URL...", progress_tracker)
@@ -150,6 +166,26 @@ async def _process_media_task(bot, task: dict, dl_dir: str):
     elif file_type == 'video' and not config.get('extract_audio'): sender_func, kwargs = bot.send_video, {'video': definitive_output_path}
     elif file_type == 'audio' or config.get('extract_audio'): sender_func, kwargs = bot.send_audio, {'audio': definitive_output_path}
     else: sender_func, kwargs = bot.send_document, {'document': definitive_output_path}
+
+    # Definir status_message si no está definido previamente
+    if 'status_message' not in locals():
+        status_message = await bot.send_message(user_id, "✅ Tarea recibida. Preparando...", parse_mode=ParseMode.HTML)
+
+    # Actualizar el mensaje de estado durante la subida con diseño mejorado
+    await status_message.edit_text(
+        "⬆️ <b>Subiendo archivo...</b>\n" \
+        "╔ ▰▰▱▱▱▱▱▱▱▱ » {progress}%\n" \
+        "╠ Progreso: {current_size} MB de {total_size} MB\n" \
+        "╠ Estado: #Subida - #Telegram\n" \
+        "╠ Velocidad: {speed} MB/s\n" \
+        "╠ ETA: {eta}\n" \
+        "╠ Archivos: {files_count}/{total_files}\n" \
+        "╚ Archivo: {file_name}",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Cancelar", callback_data="cancel_upload")]
+        ]),
+        parse_mode=ParseMode.HTML
+    )
 
     await sender_func(user_id, caption=caption, parse_mode=ParseMode.HTML, progress=_progress_callback_pyrogram, progress_args=(user_id, "Uploading...", "#TelegramUpload", final_size), **kwargs)
     return definitive_output_path
@@ -319,7 +355,12 @@ async def process_restricted_content(bot, task: dict) -> None:
             progress=_progress_callback_pyrogram,
             progress_args=(
                 user_id,
-                "Downloading from restricted channel...",
+                "⬇️ <b>Descargando archivo...</b>\n" \
+                "╔ ▰▱▱▱▱▱▱▱▱▱ » {progress}%\n" \
+                "╠ Progreso: {current_size} MB de {total_size} MB\n" \
+                "╠ Estado: #Descarga - #Telegram\n" \
+                "╠ Velocidad: {speed} MB/s\n" \
+                "╚ ETA: {eta}",
                 "#RestrictedDownload",
                 message.media.file_size if hasattr(message.media, 'file_size') else 0
             )
@@ -330,7 +371,12 @@ async def process_restricted_content(bot, task: dict) -> None:
             
         # Actualizar estado
         await status_message.edit_text(
-            "⬆️ <b>Subiendo archivo procesado...</b>",
+            "⬆️ <b>Subiendo archivo procesado...</b>\n" \
+            "╔ ▰▱▱▱▱▱▱▱▱▱ » {progress}%\n" \
+            "╠ Progreso: {current_size} MB de {total_size} MB\n" \
+            "╠ Estado: #Subida - #Telegram\n" \
+            "╠ Velocidad: {speed} MB/s\n" \
+            "╚ ETA: {eta}",
             parse_mode=ParseMode.HTML
         )
         
