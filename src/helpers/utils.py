@@ -240,3 +240,23 @@ def format_task_details_rich(task: Dict, index: int) -> str:
     if meta_summary:
         lines.append(f"   └ 📊 {meta_summary}")
     return "\n".join(lines)
+
+def get_media_info(message) -> Dict:
+    """
+    Extracts media information from a Telegram message.
+
+    Args:
+        message: The Telegram message containing media.
+
+    Returns:
+        A dictionary with media details such as file name, size, duration, etc.
+    """
+    info = {
+        "file_name": getattr(message, "file_name", "unknown"),
+        "mime_type": getattr(message, "mime_type", "unknown"),
+        "file_size": getattr(message, "file_size", 0),
+        "duration": getattr(message, "duration", 0),
+        "width": getattr(message, "width", 0),
+        "height": getattr(message, "height", 0),
+    }
+    return info
