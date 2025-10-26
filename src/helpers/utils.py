@@ -49,11 +49,9 @@ from .retry import retry_async
 
 def _resolve_parse_mode_html():
     """Devuelve un valor de parse_mode compatible con Pyrogram."""
-    mode = getattr(ParseMode, "HTML", "HTML")
-    if hasattr(mode, "value"):
-        mode = mode.value
-    if isinstance(mode, str):
-        return mode.lower()
+    mode = getattr(ParseMode, "HTML", None)
+    if mode is None:
+        return "HTML"
     return mode
 
 @retry_async(retry_exceptions=(FloodWait, BadRequest), max_attempts=3)
@@ -171,25 +169,20 @@ def format_status_message(
     status_line = f"╠ Status: {status_tag}"
     speed_line = f"╠ Speed: {speed_str}"
     eta_line = f"╠ ETA: {format_time(eta)}"
-    elapsed_line = f"╠ Elapsed: {format_time(elapsed)}"
 
-    info_lines = [
-        progress_line,
-        status_line,
-        speed_line,
-        eta_line,
-        elapsed_line,
-        f"╠ Engine: {engine} | ID: {user_id}"
-    ]
+    info_lines = [progress_line, status_line, speed_line, eta_line]
 
     if file_info:
         info_lines.append(f"╚ File: {file_info}")
     else:
         info_lines[-1] = info_lines[-1].replace("╠", "╚", 1)
 
+    display_percentage = max(0, min(100, round(percentage)))
+    percentage_str = f"{display_percentage}%"
+
     return "\n".join([
         header,
-        f"╔ {bar} » {percentage:5.1f}%",
+        f"╔ {bar} » {percentage_str}",
         *info_lines
     ])
 

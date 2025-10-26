@@ -557,6 +557,7 @@ async def worker_loop(bot_instance):
                 if len(task_queue.active_tasks) >= task_queue.max_concurrent_tasks:
                     break
                     
+                queue_position = await db_instance.tasks.count_documents({"status": "processing"}) + 1
                 task = await db_instance.tasks.find_one_and_update(
                     {
                         "status": "queued",
@@ -566,7 +567,7 @@ async def worker_loop(bot_instance):
                         "$set": {
                             "status": "processing",
                             "processed_at": datetime.utcnow(),
-                            "queue_position": await db_instance.tasks.count_documents({"status": "processing"}) + 1
+                            "queue_position": queue_position
                         }
                     },
                     sort=[('priority', -1), ('created_at', 1)]
@@ -576,7 +577,7 @@ async def worker_loop(bot_instance):
                     try:
                         queue_msg = (
                             f"⌛ <b>Tarea en cola</b>\n"
-                            f"Posición: {task['queue_position']}\n"
+                            f"Posición: {queue_position}\n"
                             f"ID: <code>{task['_id']}</code>"
                         )
                         await bot_instance.send_message(user_id, queue_msg, parse_mode=ParseMode.HTML)
