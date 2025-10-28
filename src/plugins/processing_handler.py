@@ -1,5 +1,6 @@
 # --- INICIO DEL ARCHIVO src/plugins/processing_handler.py ---
 
+import asyncio
 import logging
 import os
 import re
@@ -329,3 +330,53 @@ async def handle_compress_video(client: Client, query: CallbackQuery):
         reply_markup=compression_menu,
         parse_mode=ParseMode.HTML
     )
+
+async def handle_ffmpeg_errors(input_file: str, output_file: str) -> str:
+    """
+    Maneja errores comunes de FFmpeg y aplica soluciones.
+
+    Args:
+        input_file (str): Ruta del archivo de entrada.
+        output_file (str): Ruta del archivo de salida.
+
+    Returns:
+        str: Mensaje de estado indicando éxito o fallo.
+    """
+    try:
+        # Intentar reparar el archivo si el error es "moov atom not found"
+        repair_command = [
+            "ffmpeg", "-i", input_file, "-c", "copy", output_file
+        ]
+        repair_process = await asyncio.create_subprocess_exec(
+            *repair_command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await repair_process.communicate()
+
+        if repair_process.returncode == 0:
+            return f"✅ Archivo reparado exitosamente: {output_file}"
+        elif b"moov atom not found" in stderr:
+            return "❌ Error: Archivo corrupto. No se pudo reparar."
+
+        # Intentar conversión segura si el error es "Conversion failed"
+        conversion_command = [
+            "ffmpeg", "-i", input_file, "-preset", "ultrafast", "-c:v", "libx264", "-c:a", "aac", output_file
+        ]
+        conversion_process = await asyncio.create_subprocess_exec(
+            *conversion_command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await conversion_process.communicate()
+
+        if conversion_process.returncode == 0:
+            return f"✅ Conversión completada: {output_file}"
+        elif b"Conversion failed" in stderr:
+            return "❌ Error: Fallo en la conversión. Parámetros incompatibles."
+
+        return "❌ Error desconocido durante el procesamiento con FFmpeg."
+
+    except Exception as e:
+        logger.error(f"Error manejando FFmpeg: {e}")
+        return f"❌ Error inesperado: {str(e)}"
