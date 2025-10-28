@@ -343,6 +343,19 @@ async def handle_ffmpeg_errors(input_file: str, output_file: str) -> str:
         str: Mensaje de estado indicando éxito o fallo.
     """
     try:
+        # Validar el archivo antes de procesarlo
+        validate_command = ["ffmpeg", "-v", "error", "-i", input_file, "-f", "null", "-"]
+        validate_process = await asyncio.create_subprocess_exec(
+            *validate_command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        _, validate_stderr = await validate_process.communicate()
+
+        if validate_process.returncode != 0:
+            logger.error(f"Error validando archivo: {validate_stderr.decode()}")
+            return "❌ Error: Archivo inválido o corrupto."
+
         # Intentar reparar el archivo si el error es "moov atom not found"
         repair_command = [
             "ffmpeg", "-i", input_file, "-c", "copy", output_file
@@ -352,11 +365,12 @@ async def handle_ffmpeg_errors(input_file: str, output_file: str) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        stdout, stderr = await repair_process.communicate()
+        _, repair_stderr = await repair_process.communicate()
 
         if repair_process.returncode == 0:
             return f"✅ Archivo reparado exitosamente: {output_file}"
-        elif b"moov atom not found" in stderr:
+        elif b"moov atom not found" in repair_stderr:
+            logger.error(f"Error reparando archivo: {repair_stderr.decode()}")
             return "❌ Error: Archivo corrupto. No se pudo reparar."
 
         # Intentar conversión segura si el error es "Conversion failed"
@@ -368,11 +382,12 @@ async def handle_ffmpeg_errors(input_file: str, output_file: str) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        stdout, stderr = await conversion_process.communicate()
+        _, conversion_stderr = await conversion_process.communicate()
 
         if conversion_process.returncode == 0:
             return f"✅ Conversión completada: {output_file}"
-        elif b"Conversion failed" in stderr:
+        elif b"Conversion failed" in conversion_stderr:
+            logger.error(f"Error en conversión: {conversion_stderr.decode()}")
             return "❌ Error: Fallo en la conversión. Parámetros incompatibles."
 
         return "❌ Error desconocido durante el procesamiento con FFmpeg."
